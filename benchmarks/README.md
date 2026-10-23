@@ -228,15 +228,15 @@ The filesystem suite transfers one S3 object through PyAthena's `S3FileSystem` (
 Its operations, selected with `--transport`, are:
 
 - `read`: one `read()` of the whole object from a file opened with `block_size`; PyAthena's files read it as parallel range requests of that size and hold the parts and the joined object, about twice the object's size, in memory, while s3fs's file reads it as one stream through fsspec's read-ahead cache;
-- `get`: `get_file()` to a local file in a temporary directory of the trial; PyAthena's reads one block at a time through a file opened with `block_size`, whose `bytes` cache requests the next block with the first read and one block at a time afterwards, and s3fs's reads parallel ranges of `chunksize` with `max_concurrency` requests at a time;
+- `get`: `get_file()` to a local file in the trial's temporary directory; PyAthena's reads one block at a time through a file opened with `block_size`, whose `bytes` cache requests the next block with the first read and one block at a time afterwards, and s3fs's reads parallel ranges of `chunksize` with `max_concurrency` requests at a time;
 - `write`: writes through a file opened with `block_size`, which uploads the object as a multipart upload with parts of that size; PyAthena's files upload up to `max_workers` parts at a time, and s3fs's file one part at a time;
-- `put`: `put_file()` from a sparse local file of the object's size, so that no disk read bounds the upload; PyAthena's uploads up to `max_workers` parts of `block_size` at a time, and s3fs's `max_concurrency` parts of `chunksize`;
+- `put`: `put_file()` from a sparse local file of the object's size, so that no disk read bounds the upload; PyAthena's uploads up to `max_workers` parts of `block_size` at a time, and s3fs's `max_concurrency` parts of `chunksize`, or one PutObject for an object below twice `chunksize`;
 - `copy`: `cp_file()`, or `_cp_file()` of `AioS3FileSystem`, with parts of `block_size`; PyAthena copies an object over 5 GiB as a multipart copy with up to `max_workers` part copies at a time, and s3fs copies one over 150 MiB (`s3fs.core.MANAGED_COPY_THRESHOLD`) as a multipart copy of one part at a time; the copies of smaller objects, single CopyObject requests, are recorded as unsupported; PyAthena's copies exclude tags and annotations, which the generated objects do not have.
 
 Each case sets the filesystem's `max_workers` and the S3 client's `max_pool_connections`, through the connection's `s3_config` for PyAthena, and as `max_concurrency` and `config_kwargs` for s3fs, which creates its own client from the session's credentials.
 The `[filesystem]` section of `config.toml` sets the swept values, 8 and 40 workers and pools of 10 and 40 by default, and a `block_size` of 8 MiB.
 The suite's scales are the object sizes in bytes in `[filesystem] sizes`, not the row counts in `[scales]`: 64 MiB (small), 256 MiB (medium), 1 GiB (large), and 6 GiB (xlarge) by default.
-A `get` also writes the object to a file on the host's volume, through the page cache; a `put` reads a sparse file, which no disk bounds.
+A `get` also writes the object to the trial's temporary directory, which the parent process measures as the peak temp dir and removes; on the Amazon Linux 2023 hosts, that directory is on the tmpfs `/tmp`, so the object stays in memory outside the process's RSS. A `put` reads a sparse file, which no disk bounds.
 
 The `sync` API calls the filesystem on the trial's thread, and a file's parallel requests run in an `S3ThreadPoolExecutor`.
 The `aio` API runs a read, get, write, or put in `asyncio.to_thread()`, as `AioS3FSCursor` reads result files, and a file's parallel requests run through `S3AioExecutor`, dispatched on the filesystem's event loop, fsspec's IO thread, to a pool of `max_workers` threads of the file; its `get_file()` and `put_file()` run the synchronous filesystem's in the filesystem's thread pool.
@@ -244,7 +244,7 @@ Its copy is a coroutine awaited on the trial's event loop, whose part copies run
 Both event loops keep Python's default executor, which runs only the trial's `asyncio.to_thread()` call.
 Before #1159, the parallel requests of the `aio` API ran in the default executors, whose `min(32, os.cpu_count() + 4)` threads bound them.
 The `s3fs` API calls s3fs on the trial's thread; each call waits for a coroutine on fsspec's IO loop, where aiobotocore sends the requests, so the trial's event loop lag is not sampled.
-Its cases run in the `s3fs` environment: `jobs` marks them for it, without a suffix to their IDs, and rejects `--environment` with another environment for them; a `run` of them in another environment records each trial as failed.
+Its cases run in the `s3fs` environment: `jobs` marks them for it, without a suffix to their IDs, and rejects `--environment` with another environment for them; a `run` in an environment without s3fs records them as unsupported.
 
 The source objects, of zero bytes, are uploaded with boto3 below the run's scratch prefix and recorded under `objects` in the manifest.
 `prepare --filesystem-scale` uploads them with the manifest, so that every fleet host reads the same objects.
@@ -265,7 +265,7 @@ uv run --no-sync python -m pyathena_bench run \
 
 Reads and writes are bounded by the host's sustained network bandwidth: 3.75 Gbps on `r7g.2xlarge` and 25 Gbps on `c8gn.2xlarge`, both with 8 vCPUs, so that the default executor of an event loop has 12 threads on either.
 Copies are not: their UploadPartCopy requests name the source range, and S3 copies the bytes.
-`c8gn.2xlarge` has 16 GiB of memory, in which the 6 GiB read, holding about twice the object, leaves no margin below the default RSS limit; on it, select reads, gets, writes, and puts up to large, where PyAthena's copies are unsupported, and writes and copies at xlarge, where a get would write 6 GiB to the volume:
+`c8gn.2xlarge` has 16 GiB of memory, in which the 6 GiB read, holding about twice the object, leaves no margin below the default RSS limit; on it, select reads, gets, writes, and puts up to large, where PyAthena's copies are unsupported, and writes and copies at xlarge, where a get would hold 6 GiB in the tmpfs:
 
 ```bash
 uv run --no-sync python -m pyathena_bench jobs \
@@ -300,7 +300,7 @@ Athena result reuse and library query caches are disabled.
 | Process high-water RSS | OS high-water value, including imports and process startup |
 | Event-loop lag | Delay beyond the heartbeat interval; 10 ms interval by default |
 | Thread metrics | Observed process threads and CPU time since the baseline, including native library threads |
-| Peak temp dir | Largest sampled size of the trial's Polars temporary directory |
+| Peak temp dir | Largest sampled size of the trial's temporary directory: Polars' file cache, and the local file of the filesystem suite's `get` and `put` |
 
 Some cursors eagerly read data during `execute()`, while others fetch lazily.
 Consequently, `consume_seconds` alone is not a fair retrieval comparison.
@@ -311,7 +311,7 @@ Client result time excludes the delay between server completion and its observat
 API row conversion and native DataFrame/Table access appear as separate cases.
 Sampled RSS can miss short peaks, and the constructor suite's RSS includes its subsequent validation read.
 If the operating system denies access to per-thread CPU times, `thread_cpu_available` is false; thread counts and RSS are still recorded.
-Each trial process receives its own `POLARS_TEMP_DIR`, which the parent samples with RSS and removes after the trial.
+Each trial process receives its own temporary directory, as `POLARS_TEMP_DIR` and in its payload, which the parent samples with RSS and removes after the trial.
 Polars before 1.39.0 downloaded the whole S3 object of a lazy CSV scan into a file cache in this directory before yielding batches and left the file after the process exited; PyAthena requires Polars 1.39.0 or later, whose scans do not write that cache.
 When the temporary directory is a tmpfs, as `/tmp` is on Amazon Linux 2023, files written there use memory that RSS does not include.
 

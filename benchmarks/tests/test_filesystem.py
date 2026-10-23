@@ -21,6 +21,7 @@ from pyathena_bench.config import Settings
 from pyathena_bench.filesystem import (
     filesystem,
     get_object,
+    missing_api_reason,
     put_object,
     read_object,
     run_filesystem,
@@ -46,6 +47,8 @@ def test_written_object_has_the_size_in_blocks_and_reads_back_whole(memory_fs):
 def test_put_uploads_a_sparse_local_file_that_get_downloads_whole(memory_fs, tmp_path):
     assert put_object(memory_fs, "/bucket/object", tmp_path / "up", 10) == 10
     assert os.stat(tmp_path / "up").st_size == 10
+    # Sparse: the file holds no block, so an upload reads no disk.
+    assert os.stat(tmp_path / "up").st_blocks == 0
     assert memory_fs.cat_file("/bucket/object") == bytes(10)
     assert get_object(memory_fs, "/bucket/object", tmp_path / "down") == 10
     assert (tmp_path / "down").read_bytes() == bytes(10)
@@ -58,6 +61,10 @@ class RecordingFileSystem:
         self.threads = []
         self.copies = []
         self.transfers = []
+        self.connected = False
+
+    def connect(self):
+        self.connected = True
 
     def open(self, path, mode, block_size):
         self.threads.append(threading.get_ident())
@@ -108,7 +115,8 @@ def test_aio_file_transfers_run_in_a_thread_as_the_aio_cursor_reads(
         return threading.get_ident()
 
     loop_thread = asyncio.run(run())
-    assert (fs.threads == [loop_thread]) is on_loop_thread
+    [thread] = fs.threads
+    assert (thread == loop_thread) is on_loop_thread
 
 
 @pytest.mark.parametrize(
@@ -238,6 +246,8 @@ def test_s3fs_filesystem_takes_the_session_credentials_and_the_case_sizes(monkey
     )
     fs = filesystem(Settings(region="us-west-2"), case, session, connection=None)
     assert isinstance(fs, RecordingFileSystem)
+    # The client is created before the transfer, as the PyAthena filesystems' is.
+    assert fs.connected
     assert s3fs.created == [
         {
             "key": "AKIA",
@@ -260,6 +270,8 @@ def test_s3fs_api_needs_the_s3fs_package(monkeypatch):
     case = Case(
         "s3", "s3fs", "read", "bytes", suite="filesystem", max_workers=8, pool_connections=10
     )
+    assert missing_api_reason(case) == "s3fs is not installed in this environment"
+    assert missing_api_reason(Case("s3", "sync", "read", "bytes", suite="filesystem")) is None
     with pytest.raises(RuntimeError, match="s3fs environment"):
         filesystem(Settings(), case, SimpleNamespace(), connection=None)
 
@@ -292,12 +304,20 @@ class TestRunFilesystem:
             )
         return client
 
+    @pytest.fixture(autouse=True)
+    def temp_dir(self, tmp_path):
+        """The trial's directory, as the supervisor creates it for the child."""
+        self.temp_dir = tmp_path / "trial"
+        self.temp_dir.mkdir()
+
     def run(self, operation, api="aio"):
         case = Case(
             "s3", api, operation, "bytes", suite="filesystem", max_workers=8, pool_connections=10
         )
         return asyncio.run(
-            run_filesystem(Settings(), case, None, "s3://b/source", "s3://b/out/object", 10)
+            run_filesystem(
+                Settings(), case, None, "s3://b/source", "s3://b/out/object", 10, self.temp_dir
+            )
         )
 
     def test_written_object_is_checked_and_deleted(self, s3_client):
@@ -306,11 +326,14 @@ class TestRunFilesystem:
         assert result["queries"][0]["bytes"] == 10
         assert s3_client.deleted == [("b", "out/object")]
 
-    def test_uploaded_object_is_checked_and_deleted(self, s3_client):
+    def test_uploaded_object_is_checked_with_head_object_and_deleted(self, s3_client):
+        # The upload reports 10 bytes; the object's size comes from S3.
+        s3_client.size = 11
         result = self.run("put", api="sync")
-        assert result["status"] == "ok"
-        assert result["queries"][0]["bytes"] == 10
+        assert result["queries"][0]["status"] == "size_mismatch"
+        assert result["queries"][0]["bytes"] == 11
         assert s3_client.deleted == [("b", "out/object")]
+        assert not (self.temp_dir / "object").exists()
 
     def test_downloaded_size_is_the_local_file_and_the_file_is_removed(self, s3_client):
         local = []
@@ -325,8 +348,8 @@ class TestRunFilesystem:
             result = self.run("get", api="sync")
         assert result["queries"][0]["status"] == "size_mismatch"
         assert result["queries"][0]["bytes"] == 9
-        [downloaded] = local
-        assert not os.path.exists(downloaded)
+        assert local == [str(self.temp_dir / "object")]
+        assert not (self.temp_dir / "object").exists()
         assert s3_client.deleted == []
 
     def test_short_object_is_a_size_mismatch(self, s3_client):

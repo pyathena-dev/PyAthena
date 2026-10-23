@@ -47,7 +47,7 @@ from pyathena_bench.aws import (
 )
 from pyathena_bench.cases import Case
 from pyathena_bench.config import Settings, select_sql, write_json
-from pyathena_bench.filesystem import run_filesystem
+from pyathena_bench.filesystem import missing_api_reason, run_filesystem
 from pyathena_bench.report import CHECKPOINT, read_trials, trial_key
 
 _logger = logging.getLogger(__name__)
@@ -120,7 +120,13 @@ def worker(pipe: Connection, payload: dict[str, Any]) -> None:
         observer.register(session_)
         if case.suite == "filesystem":
             measurement = run_filesystem(
-                settings, case, session_, payload["source"], payload["destination"], payload["size"]
+                settings,
+                case,
+                session_,
+                payload["source"],
+                payload["destination"],
+                payload["size"],
+                Path(payload["temp_dir"]),
             )
         else:
             adapter = Adapter(
@@ -200,12 +206,13 @@ def directory_bytes(path: Path) -> int:
 
 
 def start_with_temp_dir(process: Any, temp_dir: Path) -> None:
-    """Start a spawned trial process with its own Polars temporary directory.
+    """Start a spawned trial process with its own temporary directory.
 
     Polars before 1.39.0 downloads cloud objects for lazy CSV scans into a
     file cache under ``POLARS_TEMP_DIR`` and keeps the files after the process
     exits. A per-trial directory lets the parent measure and remove any
-    storage Polars writes there.
+    storage Polars writes there, and the local file of the filesystem suite,
+    which the child receives in its payload as ``temp_dir``.
 
     Args:
         process: Unstarted multiprocessing process; it inherits the environment.
@@ -227,8 +234,8 @@ def supervise(
 ) -> dict[str, Any]:
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe()
-    process = context.Process(target=target, args=(child, payload))
     temp_dir = Path(tempfile.mkdtemp(prefix="pyathena-bench-trial-"))
+    process = context.Process(target=target, args=(child, {**payload, "temp_dir": str(temp_dir)}))
     temp_peak = 0
     start_with_temp_dir(process, temp_dir)
     child.close()
@@ -482,7 +489,7 @@ def run(
     locations = run_locations(resources, manifest["run_id"])
     for scale in scales:
         for case in cases:
-            unsupported = case.unsupported_reason(settings, scale)
+            unsupported = case.unsupported_reason(settings, scale) or missing_api_reason(case)
             if unsupported:
                 if (scale, case.id, None) in completed:
                     continue

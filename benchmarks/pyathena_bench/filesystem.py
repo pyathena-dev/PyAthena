@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import tempfile
 import time
 from functools import partial
 from pathlib import Path
@@ -177,14 +176,31 @@ async def transfer(
     return operation()
 
 
+def missing_api_reason(case: Case) -> str | None:
+    """Return why the case's API cannot run in this environment.
+
+    Args:
+        case: Benchmark case.
+
+    Returns:
+        The reason, or None if the API's library is installed.
+    """
+    if case.api == "s3fs" and s3fs is None:
+        return "s3fs is not installed in this environment"
+    return None
+
+
 def filesystem(settings: Settings, case: Case, session_: Any, connection: Any) -> Any:
-    """Create the filesystem of a case.
+    """Create the filesystem of a case, with its S3 client.
 
     The PyAthena filesystems share the connection's S3 client, whose
     connection pool has the case's size. s3fs creates its own client from the
     session's credentials, with a connection pool of the same size, and takes
     the case's ``max_workers`` as its ``max_concurrency``, the number of
     parallel range requests of ``get_file()`` and parts of ``put_file()``.
+    Its client is connected here, as the PyAthena filesystems take the
+    connection's client when they are created, so that no transfer measures
+    the creation of a client.
 
     Args:
         settings: Configuration with the region.
@@ -205,7 +221,7 @@ def filesystem(settings: Settings, case: Case, session_: Any, connection: Any) -
         if s3fs is None:
             raise RuntimeError("The s3fs API needs the s3fs environment; see the README")
         credentials = session_.get_credentials().get_frozen_credentials()
-        return s3fs.S3FileSystem(
+        fs = s3fs.S3FileSystem(
             key=credentials.access_key,
             secret=credentials.secret_key,
             token=credentials.token,
@@ -218,6 +234,8 @@ def filesystem(settings: Settings, case: Case, session_: Any, connection: Any) -
             max_concurrency=case.max_workers,
             skip_instance_cache=True,
         )
+        fs.connect()
+        return fs
     filesystem_class = AioS3FileSystem if case.api == "aio" else S3FileSystem
     return filesystem_class(
         connection=connection, max_workers=case.max_workers, skip_instance_cache=True
@@ -225,15 +243,22 @@ def filesystem(settings: Settings, case: Case, session_: Any, connection: Any) -
 
 
 async def run_filesystem(
-    settings: Settings, case: Case, session_: Any, source: str, destination: str, size: int
+    settings: Settings,
+    case: Case,
+    session_: Any,
+    source: str,
+    destination: str,
+    size: int,
+    temp_dir: Path,
 ) -> dict[str, Any]:
     """Measure one transfer of a filesystem case in the running trial process.
 
     The event loop keeps Python's default executor, so ``asyncio.to_thread()``
     runs with its default number of threads. The filesystem comes from
     :func:`filesystem`; the connection's S3 client checks the written, uploaded,
-    or copied object with every API. A ``get`` or ``put`` goes through a local
-    file in a temporary directory of the trial, removed with it.
+    or copied object with every API. A ``get`` or ``put`` goes through the
+    local file ``object`` in ``temp_dir``, removed after the measurement, once
+    the event loop's lag is no longer sampled.
 
     Args:
         settings: Configuration with the block size and region.
@@ -243,6 +268,8 @@ async def run_filesystem(
         destination: Object that a write, upload, or copy creates and the
             trial deletes after checking its size.
         size: Size of the object in bytes.
+        temp_dir: The trial's temporary directory, which its parent process
+            measures and removes.
 
     Returns:
         A trial result with one transfer in ``queries``; its status is
@@ -260,6 +287,7 @@ async def run_filesystem(
         s3_config=Config(max_pool_connections=case.pool_connections),
     )
     fs = filesystem(settings, case, session_, connection)
+    local = temp_dir / "object"
     samples: list[float] = []
     stop = asyncio.Event()
     monitor = asyncio.create_task(heartbeat(settings.heartbeat_interval, stop, samples))
@@ -270,21 +298,15 @@ async def run_filesystem(
         start = time.perf_counter()
         try:
             try:
-                with tempfile.TemporaryDirectory(prefix="pyathena-bench-object-") as directory:
-                    transferred = await transfer(
-                        fs,
-                        case,
-                        source,
-                        destination,
-                        size,
-                        settings.filesystem_block_size,
-                        Path(directory) / "object",
-                    )
-                    elapsed = time.perf_counter() - start
+                transferred = await transfer(
+                    fs, case, source, destination, size, settings.filesystem_block_size, local
+                )
+                elapsed = time.perf_counter() - start
             finally:
                 # The event loop's lag is sampled during the transfer only.
                 stop.set()
                 await monitor
+                local.unlink(missing_ok=True)
             # Checked after the measurement: the written, uploaded, or copied object
             # is complete.
             if case.transport not in {"read", "get"}:

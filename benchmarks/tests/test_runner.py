@@ -38,7 +38,11 @@ def cache_writing_worker(pipe, payload):
     cache.mkdir(parents=True)
     (cache / "object").write_bytes(b"x" * 4096)
     time.sleep(0.2)
-    result = {"status": "ok", "temp_dir": os.environ["POLARS_TEMP_DIR"]}
+    result = {
+        "status": "ok",
+        "temp_dir": os.environ["POLARS_TEMP_DIR"],
+        "payload_temp_dir": payload["temp_dir"],
+    }
     pipe.send({"event": "result", "result": result})
     pipe.close()
 
@@ -117,6 +121,7 @@ class TestRunner:
         assert result["status"] == "ok"
         assert result["temp_dir_peak_bytes"] >= 4096
         assert result["temp_dir"] != "/parent/value"
+        assert result["payload_temp_dir"] == result["temp_dir"]
         assert not Path(result["temp_dir"]).exists()
         assert os.environ["POLARS_TEMP_DIR"] == "/parent/value"
 
@@ -299,6 +304,23 @@ def test_filesystem_trials_transfer_the_prepared_object_within_the_scratch_bucke
     trials = f"s3://scratch/runs/{RUN_MANIFEST['run_id']}/trials/"
     assert payload["destination"] == f"{trials}{payload['trial']}/object"
     assert "sql" not in payload
+
+
+def test_s3fs_cases_are_unsupported_where_s3fs_is_not_installed(monkeypatch, tmp_path, run_stubs):
+    monkeypatch.setattr("pyathena_bench.runner.validate_objects", lambda *args: None)
+    monkeypatch.setattr("pyathena_bench.filesystem.s3fs", None)
+    monkeypatch.setattr(
+        "pyathena_bench.runner.supervise",
+        lambda payload, events, settings: pytest.fail("No trial runs without s3fs"),
+    )
+    manifest = {**RUN_MANIFEST, "objects": {"small": {"location": "s3://out/o", "size": 2**30}}}
+    case = Case(
+        "s3", "s3fs", "read", "bytes", suite="filesystem", max_workers=8, pool_connections=10
+    )
+    assert run(Settings(), manifest, [case], ["small"], tmp_path / "run")
+    [record] = [json.loads(line) for line in (tmp_path / "run" / "trials.jsonl").open()]
+    assert record["status"] == "unsupported"
+    assert record["reason"] == "s3fs is not installed in this environment"
 
 
 def test_copies_without_a_multipart_copy_are_recorded_as_unsupported(
