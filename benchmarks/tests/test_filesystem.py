@@ -375,6 +375,22 @@ class TestRunFilesystem:
     def test_failed_size_check_is_recorded_as_the_transfer_error(self, s3_client):
         s3_client.head_error = RuntimeError("Forbidden")
         result = self.run("write")
-        assert result["queries"][0]["status"] == "error"
-        assert result["queries"][0]["error"] == "RuntimeError: Forbidden"
-        assert "total_seconds" in result["queries"][0]
+        [query] = result["queries"]
+        assert query["status"] == "error"
+        assert query["error"] == "RuntimeError: Forbidden"
+        # The transfer's timing is kept when its check fails.
+        assert query["total_seconds"] >= 0
+        assert query["cpu_seconds"] >= 0
+
+    def test_a_failed_transfer_keeps_its_timing(self, s3_client):
+        def failing_open(path, mode, block_size):
+            raise RuntimeError("Reset")
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(RecordingFileSystem, "open", staticmethod(failing_open))
+            result = self.run("read")
+        [query] = result["queries"]
+        assert query["status"] == "error"
+        assert query["error"] == "RuntimeError: Reset"
+        assert query["total_seconds"] >= 0
+        assert query["cpu_seconds"] >= 0

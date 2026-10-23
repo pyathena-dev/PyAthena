@@ -355,7 +355,8 @@ async def run_objects(
             # Removed, so that the trials do not accumulate objects and local files.
             if case.transport in {"put", "pipe", "copy", "rm"}:
                 delete_objects(s3, destination)
-            shutil.rmtree(local, ignore_errors=True)
+            if local.is_dir():
+                shutil.rmtree(local)
         except Exception as exc:
             query["status"] = "error"
             query["error"] = f"Removal failed: {type(exc).__name__}: {exc}"

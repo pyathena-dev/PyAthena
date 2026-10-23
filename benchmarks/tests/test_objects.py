@@ -325,6 +325,17 @@ class TestRunObjects:
         assert result["successful_queries_per_second"] == 0.0
         assert not (tmp_path / "objects").exists()
 
+    def test_a_failed_local_removal_makes_the_trial_an_error(self, s3, tmp_path, monkeypatch):
+        def failing_rmtree(path):
+            raise PermissionError(f"{path}: busy")
+
+        monkeypatch.setattr("pyathena_bench.objects.shutil.rmtree", failing_rmtree)
+        result = self.run("get", tmp_path=tmp_path)
+        [query] = result["queries"]
+        assert (result["status"], query["status"]) == ("error", "error")
+        assert query["error"].startswith("Removal failed: PermissionError: ")
+        assert result["successful_queries_per_second"] == 0.0
+
     def test_a_failed_removal_makes_the_trial_an_error(self, s3, tmp_path):
         s3.objects.update({"trial/000000": 4, "trial/000001": 4})
         s3.delete_errors = [{"Key": "trial/000000", "Code": "AccessDenied"}]
@@ -341,9 +352,11 @@ class TestRunObjects:
             await asyncio.sleep(0.05)
             return dict.fromkeys(paths, b"xyzw")
 
-        monkeypatch.setattr(RecordingFileSystem, "_cat", slow_cat, raising=False)
+        monkeypatch.setattr(RecordingFileSystem, "_cat", staticmethod(slow_cat), raising=False)
         # The default heartbeat interval is 10 ms, so a 50 ms operation is sampled.
-        assert len(self.run("cat", api="aio", tmp_path=tmp_path)["loop_lag_seconds"]) >= 1
+        result = self.run("cat", api="aio", tmp_path=tmp_path)
+        assert result["status"] == "ok"
+        assert len(result["loop_lag_seconds"]) >= 1
         assert self.run("cat", api="s3fs", tmp_path=tmp_path)["loop_lag_seconds"] is None
 
     def test_a_failed_operation_is_recorded_and_still_cleaned_up(self, s3, tmp_path, monkeypatch):
