@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import math
 import traceback
@@ -621,8 +622,10 @@ class S3Core:
 
         ``request_kwargs`` that the operation accepts are added; a parameter
         of the request takes precedence. The operation is identified by the
-        name of the method, so a callable whose ``__name__`` is not that of a
-        client method, such as a ``functools.partial``, is sent without them.
+        name of the method; a ``functools.partial`` is identified by the
+        method it wraps, and its bound keywords are parameters of the request.
+        A callable whose ``__name__`` is not that of a client method is sent
+        without them.
 
         Args:
             method: The name of the client method, or the method itself.
@@ -643,8 +646,12 @@ class S3Core:
         """
         func = getattr(self._client, method) if isinstance(method, str) else method
         if self._request_kwargs:
-            name = getattr(func, "__name__", "")
-            request = {**self.operation_params(name, self._request_kwargs), **request}
+            target, bound = func, set(request)
+            while isinstance(target, functools.partial):
+                bound.update(target.keywords)
+                target = target.func
+            params = self.operation_params(getattr(target, "__name__", ""), self._request_kwargs)
+            request.update({k: v for k, v in params.items() if k not in bound})
         try:
             response = retry_api_call(func, config=self._retry_config, logger=_logger, **request)
         except BaseException as e:
@@ -1120,10 +1127,10 @@ class S3Core:
             The ``(start, end)`` byte ranges, with an exclusive end, that
             cover the whole object in order; empty for an empty object.
         """
+        if size == 0:
+            return []
         block_size = max(block_size, math.ceil(size / self.MULTIPART_UPLOAD_MAX_PARTS))
         starts = list(range(0, size, block_size))
-        if not starts:
-            return []
         if len(starts) > 1 and size - starts[-1] < self.MULTIPART_UPLOAD_MIN_PART_SIZE:
             starts.pop()
             if size - starts[-1] > self.MULTIPART_UPLOAD_MAX_PART_SIZE:

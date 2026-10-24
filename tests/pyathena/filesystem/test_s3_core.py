@@ -120,44 +120,29 @@ class TestS3Core:
         assert isinstance(e.value.__cause__, botocore.exceptions.ClientError)
         assert e.value.__cause__.response["Error"]["Code"] == code
 
-    @pytest.mark.parametrize(
-        ("method", "code", "message"),
-        [
-            # HEAD responses have no body, so the code is the status code.
-            ("head_object", "405", "Method Not Allowed"),
-            (
-                "get_object",
-                "MethodNotAllowed",
-                "The specified method is not allowed against this resource.",
-            ),
-        ],
-    )
-    def test_delete_marker_version_is_not_found(self, method, code, message):
-        # GH-1338: a version that is a delete marker is answered with 405 and
-        # the x-amz-delete-marker header, and does not exist as an object.
-        core, stubber = _make_core()
-        stubber.add_client_error(
-            method,
-            service_error_code=code,
-            service_message=message,
-            http_status_code=405,
-            response_meta={"HTTPHeaders": {"x-amz-delete-marker": "true"}},
-            expected_params={"Bucket": "bucket", "Key": "key", "VersionId": "marker"},
+    def test_call_partial(self):
+        # GH-1338: a functools.partial of a client method has no __name__; it
+        # is sent with the request_kwargs of the method it wraps, and its
+        # bound keywords take precedence as parameters of the request.
+        core, stubber = _make_core(
+            request_kwargs={"RequestPayer": "requester", "ExpectedBucketOwner": "111122223333"}
         )
-        with stubber, pytest.raises(FileNotFoundError, match=message):
-            getattr(core, method)(S3Path("bucket", "key", "marker"))
-
-    def test_call_callable_without_name(self):
-        # GH-1338: request_kwargs are selected by the name of the client
-        # method, so a callable without one is sent without them.
-        core, stubber = _make_core(request_kwargs={"RequestPayer": "requester"})
         stubber.add_response(
-            "head_object", {"ContentLength": 1}, expected_params={"Bucket": "bucket", "Key": "key"}
+            "head_object",
+            {"ContentLength": 1},
+            expected_params={
+                "Bucket": "bucket",
+                "Key": "key",
+                "RequestPayer": "requester",
+                "ExpectedBucketOwner": "444455556666",
+            },
+        )
+        head_object = functools.partial(
+            core.client.head_object, Bucket="bucket", ExpectedBucketOwner="444455556666"
         )
         with stubber:
-            response = core.call(
-                functools.partial(core.client.head_object, Bucket="bucket"), Key="key"
-            )
+            response = core.call(head_object, Key="key")
+        stubber.assert_no_pending_responses()
         assert response["ContentLength"] == 1
 
     @pytest.mark.parametrize("translated", [True, False])

@@ -13,12 +13,15 @@ import pytest
 from pyathena.filesystem.s3_errors import S3ClientError
 
 
-def _client_error(code, message="error message", status_code=None, condition=None):
+def _client_error(code, message="error message", status_code=None, condition=None, headers=None):
     error_response = {"Error": {"Code": code, "Message": message}}
     if condition is not None:
         error_response["Error"]["Condition"] = condition
     if status_code is not None:
         error_response["ResponseMetadata"] = {"HTTPStatusCode": status_code}
+    if headers is not None:
+        # botocore lowercases the names of the response headers.
+        error_response.setdefault("ResponseMetadata", {})["HTTPHeaders"] = headers
     return botocore.exceptions.ClientError(error_response, "TestOperation")
 
 
@@ -108,4 +111,22 @@ class TestS3ClientError:
         assert type(actual) is expected
         if expected is OSError:
             assert actual.errno == errno.EINVAL
+        assert "error message" in str(actual)
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            # HEAD responses have no body, so the code is the status code.
+            "405",
+            "MethodNotAllowed",
+        ],
+    )
+    def test_os_error_delete_marker(self, code):
+        # GH-1338: HeadObject/GetObject of a version that is a delete marker
+        # is answered with 405 and the x-amz-delete-marker header, and the
+        # version does not exist as an object. Other 405 errors map to EPERM.
+        actual = S3ClientError(
+            _client_error(code, status_code=405, headers={"x-amz-delete-marker": "true"})
+        ).os_error
+        assert type(actual) is FileNotFoundError
         assert "error message" in str(actual)
