@@ -9,6 +9,7 @@
 
 import contextlib
 import functools
+import posixpath
 import uuid
 
 import fsspec.tests.abstract as abstract
@@ -23,9 +24,10 @@ from tests.pyathena.conftest import connect
 def _xfail_missing_ls(test):
     """Mark an inherited conformance test as failing on GH-1330.
 
-    The test is expected to fail only where ``pytest.raises(FileNotFoundError)``
-    around ``ls()`` finds no exception. The mark goes on a wrapper, so the test
-    function of fsspec's class stays unmarked.
+    The test is expected to fail with pytest's ``Failed``, as the
+    ``pytest.raises(FileNotFoundError)`` around ``ls()`` does when nothing is
+    raised, so other errors still fail it. The mark goes on a wrapper, so the
+    test function of fsspec's class stays unmarked.
 
     Args:
         test: The test function of fsspec's abstract class.
@@ -52,6 +54,11 @@ class S3Fixtures(abstract.AbstractFixtures):
         return S3FileSystem(connect())
 
     @pytest.fixture
+    def fs_join(self):
+        # S3 keys use "/" on every platform.
+        return posixpath.join
+
+    @pytest.fixture
     def fs_path(self, fs):
         # Each test writes below its own prefix, so parallel tests do not share
         # objects.
@@ -70,10 +77,14 @@ class S3Fixtures(abstract.AbstractFixtures):
         return False
 
 
+# AioS3FileSystem runs pipe_file() and a small open() through the code of
+# S3FileSystem, so only its copy, get, and put have classes of their own.
 class AioS3Fixtures(S3Fixtures):
     @pytest.fixture(scope="class")
     def fs(self):
-        return AioS3FileSystem(connection=connect())
+        fs = AioS3FileSystem(connection=connect())
+        yield fs
+        fs.close()
 
 
 class TestS3FileSystemCopy(abstract.AbstractCopyTests, S3Fixtures):
@@ -114,11 +125,3 @@ class TestAioS3FileSystemPut(abstract.AbstractPutTests, AioS3Fixtures):
     test_put_directory_to_new_directory = _xfail_missing_ls(
         abstract.AbstractPutTests.test_put_directory_to_new_directory
     )
-
-
-class TestAioS3FileSystemPipe(abstract.AbstractPipeTests, AioS3Fixtures):
-    pass
-
-
-class TestAioS3FileSystemOpen(abstract.AbstractOpenTests, AioS3Fixtures):
-    pass
