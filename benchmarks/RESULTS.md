@@ -20,10 +20,11 @@ Compare entries only when they used the same instance type, architecture, and sc
 | 2026-10-13 | `437276e1` | 4.1.0 release commit, filesystem suite | `c8gn.2xlarge` (arm64), one host | Spot | small, medium, large, xlarge (objects) | [2026-10-13-437276e1-filesystem](history/2026-10-13-437276e1-filesystem.md) |
 | 2026-10-19 | `9e99caa8` | 4.2.0 (tagged on `baee716c`, which differs only in one test file) | `r7g.2xlarge` (arm64), fleet of 10 | Spot | medium, large, xlarge, xxlarge | [2026-10-19-9e99caa8](history/2026-10-19-9e99caa8.md) |
 | 2026-10-19 | `9e99caa8` | 4.2.0 (tagged on `baee716c`, which differs only in one test file), filesystem suite | `c8gn.2xlarge` (arm64), one host | Spot | small, medium, large, xlarge (objects) | [2026-10-19-9e99caa8-filesystem](history/2026-10-19-9e99caa8-filesystem.md) |
+| 2026-10-23 | `7b20b499` | unreleased (after 4.2.1), filesystem and objects suites against s3fs | `c8gn.2xlarge` (arm64), one host | Spot | small, medium, large, xlarge (objects); medium (1,000 objects) | [2026-10-23-7b20b499-filesystem](history/2026-10-23-7b20b499-filesystem.md) |
 
 ## Recommendations
 
-These recommendations come from the runs of `9e99caa8` on `r7g.2xlarge` and `c8gn.2xlarge` hosts, and, where a row says so, from the 4.0.0 run; the entries give the measured cases and their limits.
+These recommendations come from the runs of `9e99caa8` on `r7g.2xlarge` and `c8gn.2xlarge` hosts, and, where a row says so, from the 4.0.0 run and the s3fs comparison of `7b20b499`; the entries give the measured cases and their limits.
 
 | Need | Use | Measured |
 | --- | --- | --- |
@@ -36,3 +37,4 @@ These recommendations come from the runs of `9e99caa8` on `r7g.2xlarge` and `c8g
 | A Wrangler-like pandas read | PandasCursor | 10 million flat rows in 19.8 seconds through UNLOAD and 84.2 seconds through CSV, against 23.4 and 108.9 seconds for Wrangler |
 | Asynchronous code | The native asyncio cursors, or the synchronous and ThreadPool APIs offloaded with `asyncio.to_thread()` or an executor; synchronous calls block the event loop while they poll | Single-query timings of the three APIs differed by a median of 1.7% in the 4.0.0 run |
 | S3 transfers in asyncio applications | `AioS3FileSystem`; PyAthena keeps `S3FileSystem` registered for fsspec's `s3` and `s3a` protocols, and making `AioS3FileSystem` the default is to be revisited when boto3 supports asyncio natively, because it still runs the blocking boto3 calls in threads | With 40 workers on 8 vCPUs, `AioS3FileSystem` wrote 1 GiB and 6 GiB objects at 0.97 to 1.00 times and copied 6 GiB at 1.01 to 1.05 times the throughput of `S3FileSystem`, and read 1 GiB at 1.00 times; with 8 workers, it copied 6 GiB at 1.36 to 1.49 times (#1159) |
+| Transfers of many objects with one call (`cat`, `get`, `put`, `pipe`, or `copy` with a list of paths) | `AioS3FileSystem` with `batch_size`; the synchronous `S3FileSystem` transfers one object at a time | In the s3fs comparison of `7b20b499`, 1,000 objects of 1 MiB at 286 to 484 objects per second with a batch size of 40, against 6.5 to 20.3 for `S3FileSystem` and 184.7 to 235.4 for s3fs, except copies, at 345.1 against 412.7 for s3fs |
