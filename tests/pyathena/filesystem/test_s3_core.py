@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: MIT
 
 import copy
+import functools
 import gc
 import io
 import re
@@ -118,6 +119,31 @@ class TestS3Core:
         # an InvalidRange read.
         assert isinstance(e.value.__cause__, botocore.exceptions.ClientError)
         assert e.value.__cause__.response["Error"]["Code"] == code
+
+    def test_call_partial(self):
+        # GH-1338: a functools.partial of a client method has no __name__; it
+        # is sent with the request_kwargs of the method it wraps, and its
+        # bound keywords take precedence as parameters of the request.
+        core, stubber = _make_core(
+            request_kwargs={"RequestPayer": "requester", "ExpectedBucketOwner": "111122223333"}
+        )
+        stubber.add_response(
+            "head_object",
+            {"ContentLength": 1},
+            expected_params={
+                "Bucket": "bucket",
+                "Key": "key",
+                "RequestPayer": "requester",
+                "ExpectedBucketOwner": "444455556666",
+            },
+        )
+        head_object = functools.partial(
+            core.client.head_object, Bucket="bucket", ExpectedBucketOwner="444455556666"
+        )
+        with stubber:
+            response = core.call(head_object, Key="key")
+        stubber.assert_no_pending_responses()
+        assert response["ContentLength"] == 1
 
     @pytest.mark.parametrize("translated", [True, False])
     def test_call_failure_frees_request(self, translated):
@@ -1082,6 +1108,8 @@ class TestS3Core:
     @pytest.mark.parametrize(
         ("size", "block_size", "ranges"),
         [
+            # GH-1338: an empty object has no ranges.
+            (0, 5 * 2**20, []),
             # A single range.
             (5 * 2**20, 5 * 2**20, [(0, 5 * 2**20)]),
             # The size is an exact multiple of the block size.

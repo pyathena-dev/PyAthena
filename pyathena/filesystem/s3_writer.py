@@ -179,8 +179,6 @@ class S3MultipartWriter:
             raise ValueError("size must be nonnegative.")
         if first_part_number < 1:
             raise ValueError("part_number must be at least 1.")
-        if size == 0:
-            return
         ranges = self._core.part_ranges(size, self._core.MULTIPART_UPLOAD_MAX_PART_SIZE)
         for part_number, range_ in enumerate(ranges, first_part_number):
             self._check_part_number(part_number)

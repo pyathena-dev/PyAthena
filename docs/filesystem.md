@@ -243,6 +243,7 @@ operations raise natural errors instead of botocore's `ClientError`:
 | S3 error | Python exception |
 | --- | --- |
 | `404` / `NoSuchKey` / `NoSuchBucket` | `FileNotFoundError` |
+| `405` of a version that is a delete marker (`x-amz-delete-marker: true`) | `FileNotFoundError` |
 | `403` / `AccessDenied` | `PermissionError` |
 | `BucketAlreadyExists` / `BucketAlreadyOwnedByYou` | `FileExistsError` |
 | `PreconditionFailed` of an `If-None-Match` condition | `FileExistsError` |
