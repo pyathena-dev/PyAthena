@@ -35,7 +35,9 @@ class S3ClientError:
     by its HTTP status code; if neither is recognized, a generic ``OSError``
     with the original error message is used. A ``PreconditionFailed`` error
     of an ``If-None-Match`` condition, from a write that must not replace an
-    existing object, is mapped to ``FileExistsError``.
+    existing object, is mapped to ``FileExistsError``. A ``405`` error with
+    the ``x-amz-delete-marker: true`` header, from a request for a version
+    that is a delete marker, is mapped to ``FileNotFoundError``.
 
     Example:
         >>> try:
@@ -108,14 +110,21 @@ class S3ClientError:
         self._code: str = str(error_info.get("Code", ""))
         self._message: str = str(error_info.get("Message", error))
         self._condition: str = str(error_info.get("Condition", ""))
-        status_code = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        response_metadata = error.response.get("ResponseMetadata", {})
+        status_code = response_metadata.get("HTTPStatusCode")
         self._http_status_code: int | None = int(status_code) if status_code is not None else None
+        headers = response_metadata.get("HTTPHeaders", {})
+        self._delete_marker: bool = headers.get("x-amz-delete-marker") == "true"
         self._os_error: OSError = self._translate()
 
     def _translate(self) -> OSError:
         if self._code == "PreconditionFailed" and self._condition == "If-None-Match":
             # A conditional write (IfNoneMatch="*") found an existing object.
             return FileExistsError(self._message)
+        if self._http_status_code == 405 and self._delete_marker:
+            # HeadObject/GetObject of a version that is a delete marker.
+            # https://docs.aws.amazon.com/AmazonS3/latest/userguide/DeleteMarker.html
+            return FileNotFoundError(self._message)
         exception = self._ERROR_CODE_TO_EXCEPTION.get(self._code)
         if exception:
             return exception(self._message)

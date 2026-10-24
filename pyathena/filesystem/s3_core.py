@@ -620,7 +620,9 @@ class S3Core:
         """Send a request with the retry policy and translate its errors.
 
         ``request_kwargs`` that the operation accepts are added; a parameter
-        of the request takes precedence.
+        of the request takes precedence. The operation is identified by the
+        name of the method, so a callable whose ``__name__`` is not that of a
+        client method, such as a ``functools.partial``, is sent without them.
 
         Args:
             method: The name of the client method, or the method itself.
@@ -641,7 +643,8 @@ class S3Core:
         """
         func = getattr(self._client, method) if isinstance(method, str) else method
         if self._request_kwargs:
-            request = {**self.operation_params(func.__name__, self._request_kwargs), **request}
+            name = getattr(func, "__name__", "")
+            request = {**self.operation_params(name, self._request_kwargs), **request}
         try:
             response = retry_api_call(func, config=self._retry_config, logger=_logger, **request)
         except BaseException as e:
@@ -1115,10 +1118,12 @@ class S3Core:
 
         Returns:
             The ``(start, end)`` byte ranges, with an exclusive end, that
-            cover the whole object in order.
+            cover the whole object in order; empty for an empty object.
         """
         block_size = max(block_size, math.ceil(size / self.MULTIPART_UPLOAD_MAX_PARTS))
         starts = list(range(0, size, block_size))
+        if not starts:
+            return []
         if len(starts) > 1 and size - starts[-1] < self.MULTIPART_UPLOAD_MIN_PART_SIZE:
             starts.pop()
             if size - starts[-1] > self.MULTIPART_UPLOAD_MAX_PART_SIZE:
