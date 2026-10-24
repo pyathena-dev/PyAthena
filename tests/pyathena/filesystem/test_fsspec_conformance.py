@@ -23,8 +23,9 @@ from tests.pyathena.conftest import connect
 def _xfail_missing_ls(test):
     """Mark an inherited conformance test as failing on GH-1330.
 
-    The mark goes on a wrapper, so the test function of fsspec's class stays
-    unmarked.
+    The test is expected to fail only where ``pytest.raises(FileNotFoundError)``
+    around ``ls()`` finds no exception. The mark goes on a wrapper, so the test
+    function of fsspec's class stays unmarked.
 
     Args:
         test: The test function of fsspec's abstract class.
@@ -40,6 +41,7 @@ def _xfail_missing_ls(test):
     return pytest.mark.xfail(
         reason="GH-1330: ls() of a missing key prefix returns [] instead of raising "
         "FileNotFoundError",
+        raises=pytest.fail.Exception,
         strict=True,
     )(wrapper)
 
