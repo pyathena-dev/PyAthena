@@ -30,6 +30,7 @@ from zlib import crc32
 import boto3
 import botocore.exceptions
 import pytest
+from botocore.config import Config
 from botocore.stub import Stubber
 from fsspec import Callback
 from fsspec.compression import compr
@@ -82,6 +83,7 @@ class TestS3FileSystem:
         client = mock.MagicMock()
         client.meta.method_to_api_mapping = S3_CLIENT.meta.method_to_api_mapping
         client.meta.service_model = S3_CLIENT.meta.service_model
+        client.meta.config = S3_CLIENT.meta.config
         fs._core = S3Core(client, retry_config=RetryConfig())
         # The requests of the core and of the filesystem go to one mock.
         fs._call = fs._core.call = mock.MagicMock()
@@ -1956,6 +1958,176 @@ class TestS3FileSystem:
 
         fs.mv("s3://bucket/src", "s3://bucket/dst/", recursive=True, maxdepth=1)
         fs._call.assert_not_called()
+
+    # The per-object method that each batch operation calls.
+    BATCH_OPERATIONS = {
+        "cat": "cat_file",
+        "cat_ranges": "cat_file",
+        "pipe": "pipe_file",
+        "put": "put_file",
+        "get": "get_file",
+        "copy": "cp_file",
+        "mv": "_copy_file",
+    }
+
+    @staticmethod
+    def _batch(fs, operation, count, **kwargs):
+        # Run a batch operation over count objects, with lists of sources and
+        # destinations, which are paired as given without lookups.
+        sources = [f"s3://bucket/src/{i}" for i in range(count)]
+        targets = [f"s3://bucket/dst/{i}" for i in range(count)]
+        local = [f"local/{i}" for i in range(count)]
+        if operation == "cat":
+            return fs.cat(sources, **kwargs)
+        if operation == "cat_ranges":
+            return fs.cat_ranges(sources, 0, 1, **kwargs)
+        if operation == "pipe":
+            return fs.pipe(dict.fromkeys(targets, b"x"), **kwargs)
+        if operation == "put":
+            return fs.put(local, targets, **kwargs)
+        if operation == "get":
+            return fs.get(sources, local, **kwargs)
+        return getattr(fs, operation)(sources, targets, **kwargs)
+
+    @pytest.mark.parametrize("operation", list(BATCH_OPERATIONS))
+    def test_batch_operation_runs_calls_concurrently(self, operation):
+        # GH-1322: the per-object calls of a batch operation run batch_size at
+        # a time. Run one at a time, the first would wait for the others
+        # until the barrier breaks.
+        fs = self._make_fs()
+        fs._delete_objects = mock.MagicMock()
+        barrier = threading.Barrier(3, timeout=EVENT_TIMEOUT)
+
+        def call(*args, **kwargs):
+            barrier.wait()
+            # The bytes of a read, which also count as a copied file.
+            return b"x"
+
+        setattr(fs, self.BATCH_OPERATIONS[operation], call)
+        self._batch(fs, operation, 3, batch_size=3)
+
+    @pytest.mark.parametrize(("batch_size", "expected"), [(None, 2), (3, 3), (-1, 6)])
+    def test_batch_size(self, batch_size, expected):
+        # GH-1322: by default, the calls that run at once are max_workers (4)
+        # but at most the connections of the client's pool (2), so that no
+        # connection is discarded; a given batch_size is used as given.
+        fs = self._make_fs()
+        fs._client.meta.config = S3_CLIENT.meta.config.merge(Config(max_pool_connections=2))
+        barrier = threading.Barrier(expected, timeout=EVENT_TIMEOUT)
+        lock = threading.Lock()
+        running = peak = 0
+
+        def cat_file(path, **kwargs):
+            nonlocal running, peak
+            with lock:
+                running += 1
+                peak = max(peak, running)
+            try:
+                barrier.wait()
+                return b""
+            finally:
+                with lock:
+                    running -= 1
+
+        fs.cat_file = cat_file
+        self._batch(fs, "cat", 6, batch_size=batch_size)
+        assert peak == expected
+
+    def test_batch_failure_stops_the_batch(self):
+        # GH-1322: a failed call starts no further call and stops the retries
+        # of the running one, whose backoff wait would take at least
+        # EVENT_TIMEOUT seconds; its error is raised once that call has ended.
+        fs = self._make_fs()
+        operation = ThrottledOperation(operation_name="GetObject")
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+        started, ended = set(), []
+
+        def cat_file(path, **kwargs):
+            started.add(path)
+            if path == "bucket/src/0":
+                assert operation.started.wait(EVENT_TIMEOUT)
+                raise PermissionError("Access Denied")
+            try:
+                return throttled()
+            finally:
+                ended.append(path)
+
+        fs.cat_file = cat_file
+        begin = time.monotonic()
+        with pytest.raises(PermissionError, match="Access Denied"):
+            self._batch(fs, "cat", 4, batch_size=2)
+        assert time.monotonic() - begin < EVENT_TIMEOUT
+        assert operation.calls == 1
+        assert started == {"bucket/src/0", "bucket/src/1"}
+        assert ended == ["bucket/src/1"]
+
+    def test_batch_interrupt_waits_for_running_calls(self):
+        # GH-1322: an interrupt of the waiting thread, here from the progress
+        # callback when the first call ends, starts no further call and is
+        # raised once the running call has ended.
+        fs = self._make_fs()
+        second = threading.Event()
+        interrupted = threading.Event()
+        started, ended = set(), []
+
+        class InterruptingCallback(Callback):
+            def relative_update(self, inc=1):
+                interrupted.set()
+                raise KeyboardInterrupt
+
+        def get_file(rpath, lpath, **kwargs):
+            started.add(rpath)
+            if rpath == "s3://bucket/src/0":
+                # Ends once the second call is running.
+                assert second.wait(EVENT_TIMEOUT)
+            else:
+                second.set()
+                assert interrupted.wait(EVENT_TIMEOUT)
+            ended.append(rpath)
+
+        fs.get_file = get_file
+        with pytest.raises(KeyboardInterrupt):
+            self._batch(fs, "get", 4, batch_size=2, callback=InterruptingCallback())
+        assert started == {"s3://bucket/src/0", "s3://bucket/src/1"}
+        assert ended == ["s3://bucket/src/0", "s3://bucket/src/1"]
+
+    @pytest.mark.parametrize("on_error", ["omit", "return"])
+    def test_cat_on_error(self, on_error):
+        # GH-1322: as in fsspec, a failed read does not stop the others with
+        # "omit", which leaves out its path, or "return", which returns its
+        # error in place of the contents.
+        fs = self._make_fs()
+        error = FileNotFoundError("bucket/src/0")
+
+        def cat_file(path, **kwargs):
+            if path == "bucket/src/0":
+                raise error
+            return path.encode()
+
+        fs.cat_file = cat_file
+        expected = {"bucket/src/1": b"bucket/src/1", "bucket/src/2": b"bucket/src/2"}
+        if on_error == "return":
+            expected = {"bucket/src/0": error, **expected}
+        assert self._batch(fs, "cat", 3, on_error=on_error, batch_size=2) == expected
+
+    def test_copy_on_error_ignore(self):
+        # GH-1322: as in fsspec, on_error="ignore" skips a missing source
+        # without stopping the other copies, and raises the other errors.
+        fs = self._make_fs()
+        copied = []
+
+        def cp_file(path1, path2, **kwargs):
+            if path1 == "s3://bucket/src/0":
+                raise FileNotFoundError(path1)
+            if path1 == "s3://bucket/src/2":
+                raise PermissionError(path1)
+            copied.append(path1)
+
+        fs.cp_file = cp_file
+        self._batch(fs, "copy", 2, on_error="ignore", batch_size=2)
+        assert copied == ["s3://bucket/src/1"]
+        with pytest.raises(PermissionError):
+            self._batch(fs, "copy", 3, on_error="ignore", batch_size=1)
 
     def test_cp_file_multipart_parameters(self):
         # GH-967: block_size and max_workers control a multipart copy and are
