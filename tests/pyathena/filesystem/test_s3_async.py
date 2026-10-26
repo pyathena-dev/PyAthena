@@ -971,11 +971,13 @@ class TestAioS3FileSystem:
         )
         events = []
         release = threading.Event()
+        released = []
 
         def block():
-            # The finally block of the test releases it; bounded, so that a
-            # regression that blocks the event loop fails instead of hanging.
-            release.wait(EVENT_TIMEOUT)
+            # The finally block of the test releases it. The wait is bounded,
+            # and its timeout recorded, so that a regression that blocks the
+            # event loop fails instead of hanging or passing.
+            released.append(release.wait(EVENT_TIMEOUT))
 
         def upload_part_copy(**kw):
             if kw["part_number"] == 2:
@@ -1034,6 +1036,7 @@ class TestAioS3FileSystem:
             await await_bounded(task)
 
         assert events == ["abort"]
+        assert released == [True]
 
     @pytest.mark.parametrize("queued", [False, True])
     def test_copy_object_with_multipart_upload_interrupted_while_scheduling_completion(
@@ -2587,6 +2590,7 @@ class TestAioS3StreamedFile:
         lock = threading.Lock()
         started = threading.Semaphore(0)
         release = threading.Event()
+        released = []
         aborted = threading.Event()
 
         def upload_part(**kw):
@@ -2594,9 +2598,10 @@ class TestAioS3StreamedFile:
             with lock:
                 events.append(f"start {part_number}")
             started.release()
-            # The finally block of the test releases it; bounded, so that a
-            # write that blocks the event loop fails instead of hanging.
-            release.wait(EVENT_TIMEOUT)
+            # The finally block of the test releases it. The wait is bounded,
+            # and its timeout recorded, so that a regression that blocks the
+            # event loop fails instead of hanging or passing.
+            released.append(release.wait(EVENT_TIMEOUT))
             with lock:
                 events.append(f"end {part_number}")
             return S3MultipartUploadPart(part_number, {"ETag": '"e"'})
@@ -2626,6 +2631,7 @@ class TestAioS3StreamedFile:
         assert sorted(events[:2]) == ["start 1", "start 2"]
         assert sorted(events[2:4]) == ["end 1", "end 2"]
         assert events[4:] == ["abort"]
+        assert released == [True, True]
         fs.core.complete_multipart_upload.assert_not_called()
 
     @pytest.mark.parametrize("cancelled", ["close", "flush"])
@@ -2637,11 +2643,14 @@ class TestAioS3StreamedFile:
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
         started = threading.Event()
         release = threading.Event()
+        released = []
 
         def complete_multipart_upload(*args, **kwargs):
             started.set()
-            # The finally block of the test releases it.
-            release.wait(EVENT_TIMEOUT)
+            # The finally block of the test releases it. The wait is bounded,
+            # and its timeout recorded, so that a regression that blocks the
+            # event loop fails instead of hanging or passing.
+            released.append(release.wait(EVENT_TIMEOUT))
 
         fs.core.complete_multipart_upload = mock.MagicMock(side_effect=complete_multipart_upload)
         f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
@@ -2670,6 +2679,7 @@ class TestAioS3StreamedFile:
         await asyncio.to_thread(shutdown_bounded, f._pool)
 
         assert f.closed
+        assert released == [True]
         fs.core.complete_multipart_upload.assert_called_once()
         fs.core.abort_multipart_upload.assert_not_called()
 
@@ -2681,13 +2691,15 @@ class TestAioS3StreamedFile:
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
         started = threading.Event()
         release = threading.Event()
+        released = []
         respond = fs.core.upload_part.side_effect
 
         def upload_part(**kwargs):
             started.set()
-            # The finally block of the test releases it; bounded, so that a
-            # regression that blocks the event loop fails instead of hanging.
-            release.wait(EVENT_TIMEOUT)
+            # The finally block of the test releases it. The wait is bounded,
+            # and its timeout recorded, so that a regression that blocks the
+            # event loop fails instead of hanging or passing.
+            released.append(release.wait(EVENT_TIMEOUT))
             return respond(**kwargs)
 
         fs.core.upload_part = mock.MagicMock(side_effect=upload_part)
@@ -2727,6 +2739,7 @@ class TestAioS3StreamedFile:
         await asyncio.to_thread(shutdown_bounded, f._pool)
 
         assert f.closed
+        assert released == [True]
         fs.core.complete_multipart_upload.assert_called_once()
         fs.core.abort_multipart_upload.assert_not_called()
 
