@@ -501,7 +501,9 @@ class S3Core:
     :class:`~pyathena.filesystem.s3_errors.S3ClientError`): a missing bucket
     or multipart upload, or a missing object or version that an operation
     reads, raises ``FileNotFoundError``, and a denied request
-    ``PermissionError``.
+    ``PermissionError``. A copy whose source names a version that is a delete
+    marker raises ``OSError`` with ``EINVAL``, as S3 rejects it as an invalid
+    request.
     As in S3, deleting a missing key is not an error. Nothing is cached.
 
     Example:
@@ -1019,6 +1021,8 @@ class S3Core:
         Raises:
             ValueError: If the upload has no bucket, key, or upload ID, or the
                 source has no key.
+            OSError: With ``EINVAL`` if the source names a version that is a
+                delete marker.
         """
         request = self._multipart_upload_request(upload)
         if not source.key:
@@ -1176,6 +1180,9 @@ class S3Core:
         Raises:
             ValueError: If the source or the destination has no key, or the
                 destination has a version ID, which a write cannot replace.
+            FileNotFoundError: If the source object or version does not exist.
+            OSError: With ``EINVAL`` if the source names a version that is a
+                delete marker.
         """
         if not source.key:
             raise ValueError(f"The source has no key: {source.uri}.")
