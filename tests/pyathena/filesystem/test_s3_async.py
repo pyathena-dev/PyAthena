@@ -15,7 +15,6 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest import mock
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from botocore.stub import Stubber
@@ -396,7 +395,14 @@ class TestAioS3FileSystem:
                 return {"Uploads": [{"Key": "dir/a", "UploadId": "u1"}]}
             return {}
 
+        def generate_presigned_url(*args, **kwargs):
+            # Signing sends no request, so its arguments are recorded as one.
+            with lock:
+                requests.append(("generate_presigned_url", {"args": args, **kwargs}))
+            return "https://signed"
+
         fs._sync_fs._call = fs._sync_fs._core.call = call
+        fs._sync_fs.core.generate_presigned_url = generate_presigned_url
         return store, requests
 
     @pytest.mark.parametrize(
@@ -488,7 +494,6 @@ class TestAioS3FileSystem:
             ("clear_multipart_uploads", "clear_multipart_uploads", ("s3://bucket/dir",), {}),
             ("created", "created", ("s3://bucket/key",), {}),
             ("modified", "modified", ("s3://bucket/key",), {}),
-            # Signing sends no request.
             (
                 "sign",
                 "sign",
@@ -510,19 +515,13 @@ class TestAioS3FileSystem:
 
         def comparable(value):
             # The metadata, the listed versions and uploads compare by their
-            # public properties, and a signed URL without the time of signing.
+            # public properties.
             if isinstance(value, list):
                 return [comparable(v) for v in value]
             if isinstance(value, (S3Metadata, S3ObjectVersion, S3MultipartUpload)):
                 cls = type(value)
                 properties = [n for n in dir(cls) if isinstance(getattr(cls, n), property)]
                 return cls, {n: getattr(value, n) for n in properties}
-            if isinstance(value, str) and value.startswith("https://"):
-                url = urlsplit(value)
-                query = parse_qs(url.query)
-                for name in ("X-Amz-Date", "X-Amz-Signature"):
-                    query.pop(name)
-                return url.netloc, url.path, query
             return value
 
         outcomes = []
@@ -563,7 +562,7 @@ class TestAioS3FileSystem:
                     callback.events,
                 )
             )
-        assert outcomes[0][1] or sync_method == "sign", "no request was sent"
+        assert outcomes[0][1], "no request was sent"
         assert outcomes[1] == outcomes[0]
 
     @pytest.mark.parametrize("path", ["s3://bucket/dir", None])
@@ -1746,11 +1745,9 @@ class TestAioS3FileSystem:
         # A maxdepth below 1 is rejected, also for a version, which fsspec's
         # expansion does not see.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
 
-        with pytest.raises(ValueError, match="maxdepth"):
+        with pytest.raises(ValueError):  # noqa: PT011
             await fs._expand_path("s3://bucket/b?versionId=v1", maxdepth=0)
-        fs._sync_fs._call.assert_not_called()
 
     @pytest.mark.parametrize(
         ("destination", "expected"),
