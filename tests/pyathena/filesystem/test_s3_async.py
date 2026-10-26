@@ -457,6 +457,7 @@ class TestAioS3FileSystem:
             ("_rmdir", "rmdir", ("s3://bucket",), {}),
             ("rmdir", "rmdir", ("s3://bucket",), {}),
             ("_find", "find", ("s3://bucket/dir",), {"maxdepth": 1, "withdirs": True}),
+            ("_find", "find", ("s3://bucket/dir",), {"detail": True}),
             (
                 "_mv",
                 "mv",
@@ -518,6 +519,10 @@ class TestAioS3FileSystem:
             # public properties.
             if isinstance(value, list):
                 return [comparable(v) for v in value]
+            if isinstance(value, dict):
+                return {k: comparable(v) for k, v in value.items()}
+            if isinstance(value, S3Object):
+                return S3Object, dict(value)
             if isinstance(value, (S3Metadata, S3ObjectVersion, S3MultipartUpload)):
                 cls = type(value)
                 properties = [n for n in dir(cls) if isinstance(getattr(cls, n), property)]
@@ -568,9 +573,15 @@ class TestAioS3FileSystem:
     @pytest.mark.parametrize("path", ["s3://bucket/dir", None])
     def test_invalidate_cache(self, path):
         # invalidate_cache() clears the listings that the asynchronous methods
-        # cache, which the synchronous filesystem holds.
+        # cache, which the synchronous filesystem holds. The cache is enabled
+        # here, whatever fsspec's configuration says.
         fs = AioS3FileSystem(
-            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            use_listings_cache=True,
+            listings_expiry_time=None,
+            skip_instance_cache=True,
         )
         _, requests = self._serve_keys(fs, {"dir/a"})
 
@@ -962,8 +973,9 @@ class TestAioS3FileSystem:
         release = threading.Event()
 
         def block():
-            # The finally block of the test always releases it.
-            release.wait()
+            # The finally block of the test releases it; bounded, so that a
+            # regression that blocks the event loop fails instead of hanging.
+            release.wait(EVENT_TIMEOUT)
 
         def upload_part_copy(**kw):
             if kw["part_number"] == 2:
@@ -2673,8 +2685,9 @@ class TestAioS3StreamedFile:
 
         def upload_part(**kwargs):
             started.set()
-            # The finally block of the test always releases it.
-            release.wait()
+            # The finally block of the test releases it; bounded, so that a
+            # regression that blocks the event loop fails instead of hanging.
+            release.wait(EVENT_TIMEOUT)
             return respond(**kwargs)
 
         fs.core.upload_part = mock.MagicMock(side_effect=upload_part)
