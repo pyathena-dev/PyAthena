@@ -237,7 +237,13 @@ class TestS3FileSystem:
             pytest.param(
                 False, lambda fs: fs.exists("s3://bucket/d/key", refresh=True), id="exists"
             ),
-            pytest.param(False, lambda fs: fs.ls("s3://bucket/d/key", refresh=True), id="ls"),
+            pytest.param(
+                False,
+                lambda fs: pytest.raises(
+                    FileNotFoundError, fs.ls, "s3://bucket/d/key", refresh=True
+                ),
+                id="ls",
+            ),
             # The listed entry has no version, so it is looked up again.
             pytest.param(True, lambda fs: fs.isfile("s3://bucket/d/key"), id="version_aware"),
         ],
@@ -256,9 +262,7 @@ class TestS3FileSystem:
 
         fs._call.side_effect = call
 
-        # ls() raises FileNotFoundError for the missing path.
-        with contextlib.suppress(FileNotFoundError):
-            lookup(fs)
+        lookup(fs)
         assert ("bucket/d", "/") not in fs.dircache
         assert not fs.exists("s3://bucket/d/key")
 
@@ -676,13 +680,14 @@ class TestS3FileSystem:
             fs.ls("s3://bucket/dir")
         assert fs._call.call_args_list[0].args[0] is fs._client.list_objects_v2
 
-    def test_ls_empty_bucket(self):
+    @pytest.mark.parametrize("path", ["s3://bucket", "s3://bucket/?versionId=v1"])
+    def test_ls_empty_bucket(self, path):
         # An existing bucket without objects is listed as empty, unlike a key
         # path that matches nothing.
         fs = self._make_fs()
         self._serve_keys(fs, ())
 
-        assert fs.ls("s3://bucket") == []
+        assert fs.ls(path) == []
 
     def test_find_withdirs_does_not_modify_cached_listing(self):
         fs = self._make_fs()
