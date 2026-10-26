@@ -4882,7 +4882,7 @@ class TestS3FileSystem:
 
         assert len(fs.ls(f"{dir_}/prefix")) == 5
         assert len(fs.ls(f"{dir_}/prefix/")) == 5
-        # The start of an object's key is neither an object nor a key prefix.
+        # The start of an object's key is neither an object nor a directory.
         with pytest.raises(FileNotFoundError):
             fs.ls(f"{dir_}/prefix/test_")
         assert len(fs.ls(f"{dir_}/prefix2")) == 1

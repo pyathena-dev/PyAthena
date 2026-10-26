@@ -549,7 +549,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             FileNotFoundError: If the bucket does not exist, or if a key path
-                is neither an object nor a key prefix of one.
+                is neither an object nor a directory, a path that some key
+                starts with followed by ``/``.
 
         Example:
             >>> fs = S3FileSystem()
