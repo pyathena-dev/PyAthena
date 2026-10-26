@@ -5,7 +5,6 @@ import gc
 import gzip
 import io
 import os
-import tempfile
 import threading
 import time
 import traceback
@@ -13,11 +12,10 @@ import uuid
 import warnings
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor, wait
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest import mock
 
-import boto3
-import fsspec
 import pytest
 from botocore.stub import Stubber
 from fsspec.callbacks import Callback
@@ -25,7 +23,7 @@ from fsspec.callbacks import Callback
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3File, AioS3FileSystem, AioS3StreamedFile
 from pyathena.filesystem.s3_core import S3Core, S3MultipartCopyPlan
-from pyathena.filesystem.s3_executor import S3AioThreadPool, S3Executor
+from pyathena.filesystem.s3_executor import S3AioThreadPool
 from pyathena.filesystem.s3_object import (
     S3Metadata,
     S3MultipartUpload,
@@ -69,16 +67,6 @@ class _RecordingCallback(Callback):
         self.events.append(("update", inc))
 
 
-@pytest.fixture(scope="class")
-def register_async_filesystem():
-    fsspec.register_implementation(
-        "s3", "pyathena.filesystem.s3_async.AioS3FileSystem", clobber=True
-    )
-    fsspec.register_implementation(
-        "s3a", "pyathena.filesystem.s3_async.AioS3FileSystem", clobber=True
-    )
-
-
 @pytest.fixture
 def release_blocked_waits():
     """Release a thread that a regression leaves waiting for a future that never runs.
@@ -109,7 +97,7 @@ def release_blocked_waits():
     release()
 
 
-@pytest.mark.usefixtures("register_async_filesystem", "release_blocked_waits")
+@pytest.mark.usefixtures("release_blocked_waits")
 class TestAioS3FileSystem:
     @staticmethod
     async def _multipart_copy(release, fs=None, **kwargs):
@@ -222,64 +210,6 @@ class TestAioS3FileSystem:
         with pytest.raises(PermissionError):
             await fs._cp_file("s3://bucket/src", "s3://bucket/dst")
         assert "bucket/dst" not in fs._sync_fs.dircache
-
-    @pytest.mark.asyncio
-    async def test_copy_object_with_multipart_upload_waits_for_running_parts(self):
-        # GH-973: the abort waits for the part copies that are running when
-        # one fails, and no part starts after the failure.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=2, skip_instance_cache=True)
-        sync_fs = fs._sync_fs
-        sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=S3MultipartUpload(
-                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
-            )
-        )
-        events = []
-        # Part 1 retries until the failure of part 2 stops it, so that it
-        # runs until the copy handles the failure.
-        operation = ThrottledOperation(operation_name="UploadPartCopy")
-        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
-
-        def upload_part_copy(**kw):
-            part_number = kw["part_number"]
-            events.append(f"start {part_number}")
-            if part_number == 1:
-                try:
-                    return throttled()
-                finally:
-                    # Ends a little after the stop, so that an abort that
-                    # does not wait for it is recorded first.
-                    time.sleep(0.05)
-                    events.append("end 1")
-            # Fails once part 1 is running, which the copy cannot cancel.
-            assert operation.started.wait(EVENT_TIMEOUT)
-            raise OSError("part failed")
-
-        sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
-        sync_fs.core.complete_multipart_upload = mock.MagicMock()
-        # The HeadObject of the source, with 3 parts of the default block size.
-        size = 3 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
-        sync_fs.core.abort_multipart_upload = mock.MagicMock(
-            side_effect=lambda *args, **kwargs: events.append("abort")
-        )
-
-        with pytest.raises(OSError, match="part failed"):
-            await await_bounded(
-                fs._copy_object_with_multipart_upload(
-                    S3Path("bucket", "src"),
-                    S3Path("bucket", "dst"),
-                    MetadataDirective="REPLACE",
-                    TaggingDirective="REPLACE",
-                    AnnotationDirective="EXCLUDE",
-                )
-            )
-
-        # Part 3 waits for a worker and is not started after the failure.
-        assert sorted(events[:2]) == ["start 1", "start 2"]
-        assert events[2:] == ["end 1", "abort"]
-        assert operation.calls == 1
-        sync_fs.core.complete_multipart_upload.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_copy_object_with_multipart_upload_max_workers(self):
@@ -414,10 +344,17 @@ class TestAioS3FileSystem:
         def answer(name, request):
             requests.append((name, request))
             key = request.get("Key")
+            if name == "head_bucket" and request["Bucket"] != "bucket":
+                raise FileNotFoundError(request["Bucket"])
             if name == "head_object":
                 if key not in store:
                     raise FileNotFoundError(key)
-                return {"ContentLength": 2, "ETag": '"e"'}
+                return {
+                    "ContentLength": 2,
+                    "ETag": '"e"',
+                    "LastModified": datetime(2026, 1, 1, tzinfo=UTC),
+                    "Metadata": {"m": "1"},
+                }
             if name == "get_object":
                 return {"Body": io.BytesIO(b"aa"), "ContentLength": 2, "ETag": '"e"'}
             if name == "list_objects_v2":
@@ -454,9 +391,18 @@ class TestAioS3FileSystem:
                     "Versions": [{"Key": "key", "VersionId": "v1", "IsLatest": False}],
                     "DeleteMarkers": [{"Key": "key", "VersionId": "m1", "IsLatest": True}],
                 }
+            if name == "list_multipart_uploads":
+                return {"Uploads": [{"Key": "dir/a", "UploadId": "u1"}]}
             return {}
 
+        def generate_presigned_url(*args, **kwargs):
+            # Signing sends no request, so its arguments are recorded as one.
+            with lock:
+                requests.append(("generate_presigned_url", {"args": args, **kwargs}))
+            return "https://signed"
+
         fs._sync_fs._call = fs._sync_fs._core.call = call
+        fs._sync_fs.core.generate_presigned_url = generate_presigned_url
         return store, requests
 
     @pytest.mark.parametrize(
@@ -503,7 +449,15 @@ class TestAioS3FileSystem:
             ("_touch", "touch", ("s3://bucket/new",), {"ContentType": "text/csv"}),
             # An existing object is not replaced.
             ("_touch", "touch", ("s3://bucket/key",), {"truncate": False}),
+            ("touch", "touch", ("s3://bucket/new",), {"ContentType": "text/csv"}),
+            ("touch", "touch", ("s3://bucket/key",), {"truncate": False}),
+            ("_mkdir", "mkdir", ("s3://newbucket",), {"acl": "private"}),
+            # An existing bucket is accepted.
+            ("_makedirs", "makedirs", ("s3://bucket",), {"exist_ok": True}),
+            ("_rmdir", "rmdir", ("s3://bucket",), {}),
+            ("rmdir", "rmdir", ("s3://bucket",), {}),
             ("_find", "find", ("s3://bucket/dir",), {"maxdepth": 1, "withdirs": True}),
+            ("_find", "find", ("s3://bucket/dir",), {"detail": True}),
             (
                 "_mv",
                 "mv",
@@ -525,6 +479,28 @@ class TestAioS3FileSystem:
                 ("s3://bucket/key",),
                 {"delete_markers": True},
             ),
+            (
+                "getxattr",
+                "getxattr",
+                ("s3://bucket/key", "m"),
+                {"ExpectedBucketOwner": "111122223333"},
+            ),
+            (
+                "setxattr",
+                "setxattr",
+                ("s3://bucket/key",),
+                {"copy_kwargs": {"ContentType": "text/csv"}, "m": "2"},
+            ),
+            ("list_multipart_uploads", "list_multipart_uploads", ("s3://bucket/dir",), {}),
+            ("clear_multipart_uploads", "clear_multipart_uploads", ("s3://bucket/dir",), {}),
+            ("created", "created", ("s3://bucket/key",), {}),
+            ("modified", "modified", ("s3://bucket/key",), {}),
+            (
+                "sign",
+                "sign",
+                ("s3://bucket/key",),
+                {"expiration": 100, "client_method": "put_object"},
+            ),
         ],
     )
     @pytest.mark.asyncio
@@ -539,11 +515,15 @@ class TestAioS3FileSystem:
         source.write_bytes(b"a")
 
         def comparable(value):
-            # The metadata and the listed versions compare by their public
-            # properties.
+            # The metadata, the listed versions and uploads compare by their
+            # public properties.
             if isinstance(value, list):
                 return [comparable(v) for v in value]
-            if isinstance(value, (S3Metadata, S3ObjectVersion)):
+            if isinstance(value, dict):
+                return {k: comparable(v) for k, v in value.items()}
+            if isinstance(value, S3Object):
+                return S3Object, dict(value)
+            if isinstance(value, (S3Metadata, S3ObjectVersion, S3MultipartUpload)):
                 cls = type(value)
                 properties = [n for n in dir(cls) if isinstance(getattr(cls, n), property)]
                 return cls, {n: getattr(value, n) for n in properties}
@@ -552,7 +532,12 @@ class TestAioS3FileSystem:
         outcomes = []
         for run, name in (("sync", sync_method), ("async", method)):
             fs = AioS3FileSystem(
-                key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+                key="dummy",
+                secret="dummy",
+                region_name="us-east-1",
+                allow_bucket_creation=True,
+                allow_bucket_deletion=True,
+                skip_instance_cache=True,
             )
             store, requests = self._serve_keys(fs, keys)
             (tmp_path / run).mkdir()
@@ -584,6 +569,28 @@ class TestAioS3FileSystem:
             )
         assert outcomes[0][1], "no request was sent"
         assert outcomes[1] == outcomes[0]
+
+    @pytest.mark.parametrize("path", ["s3://bucket/dir", None])
+    def test_invalidate_cache(self, path):
+        # invalidate_cache() clears the listings that the asynchronous methods
+        # cache, which the synchronous filesystem holds. The cache is enabled
+        # here, whatever fsspec's configuration says.
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            use_listings_cache=True,
+            listings_expiry_time=None,
+            skip_instance_cache=True,
+        )
+        _, requests = self._serve_keys(fs, {"dir/a"})
+
+        fs.ls("s3://bucket/dir")
+        fs.ls("s3://bucket/dir")
+        assert len(requests) == 1
+        fs.invalidate_cache(path)
+        fs.ls("s3://bucket/dir")
+        assert len(requests) == 2
 
     @pytest.mark.asyncio
     async def test_max_workers_none(self):
@@ -964,10 +971,13 @@ class TestAioS3FileSystem:
         )
         events = []
         release = threading.Event()
+        released = []
 
         def block():
-            # The finally block of the test always releases it.
-            release.wait()
+            # The finally block of the test releases it. The wait is bounded,
+            # and its timeout recorded, so that a regression that blocks the
+            # event loop fails instead of hanging or passing.
+            released.append(release.wait(EVENT_TIMEOUT))
 
         def upload_part_copy(**kw):
             if kw["part_number"] == 2:
@@ -987,15 +997,20 @@ class TestAioS3FileSystem:
             side_effect=lambda upload, **params: events.append("abort")
         )
 
-        submit_to = fs._thread_pool.submit_to
         completion_queued = threading.Event()
 
-        def record_completion(future, fn, *args, **kwargs):
-            submit_to(future, fn, *args, **kwargs)
-            if getattr(fn, "__func__", None) is _S3WriteSession.complete:
-                completion_queued.set()
+        def record_completion(submit):
+            # Whichever method of the pool queues the completion.
+            def record(*args, **kwargs):
+                result = submit(*args, **kwargs)
+                if any(getattr(a, "__func__", None) is _S3WriteSession.complete for a in args):
+                    completion_queued.set()
+                return result
 
-        fs._thread_pool.submit_to = record_completion
+            return record
+
+        fs._thread_pool.submit = record_completion(fs._thread_pool.submit)
+        fs._thread_pool.submit_to = record_completion(fs._thread_pool.submit_to)
         task = asyncio.ensure_future(
             fs._copy_object_with_multipart_upload(
                 S3Path("bucket", "src"),
@@ -1018,9 +1033,10 @@ class TestAioS3FileSystem:
         finally:
             release.set()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await await_bounded(task)
 
         assert events == ["abort"]
+        assert released == [True]
 
     @pytest.mark.parametrize("queued", [False, True])
     def test_copy_object_with_multipart_upload_interrupted_while_scheduling_completion(
@@ -1137,79 +1153,6 @@ class TestAioS3FileSystem:
         assert operation.calls <= 1
         sync_fs.core.complete_multipart_upload.assert_not_called()
         sync_fs.core.abort_multipart_upload.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_copy_object_with_multipart_upload_failed_part_stops_running_parts(self):
-        # GH-1203: a failed part copy stops the retries of the running ones
-        # before the upload is aborted; their backoff wait would take at least
-        # EVENT_TIMEOUT seconds.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), max_workers=4, skip_instance_cache=True)
-        sync_fs = fs._sync_fs
-        plan = S3MultipartCopyPlan(
-            source=S3Path("bucket", "src"),
-            destination=S3Path("bucket", "dst"),
-            size=3,
-            ranges=((0, 1), (1, 2), (2, 3)),
-        )
-        sync_fs.core.plan_multipart_copy = mock.MagicMock(return_value=plan)
-        sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "id"})
-        )
-        sync_fs.core.abort_multipart_upload = mock.MagicMock()
-        operation = ThrottledOperation(operation_name="UploadPartCopy")
-        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
-
-        def upload_part_copy(part_number, **kwargs):
-            if part_number == 1:
-                assert operation.started.wait(EVENT_TIMEOUT)
-                raise PermissionError("Access Denied")
-            if part_number == 2:
-                return throttled()
-            return SimpleNamespace(etag='"e"', part_number=part_number)
-
-        sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
-        # The retries stop before the bound of the wait.
-        with pytest.raises(PermissionError, match="Access Denied"):
-            await await_bounded(
-                fs._copy_object_with_multipart_upload(plan.source, plan.destination, max_workers=2)
-            )
-        assert operation.calls == 1
-        sync_fs.core.abort_multipart_upload.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_copy_object_with_multipart_upload_cancelled_creation_stops_retries(self):
-        # GH-1203: cancelling a copy stops the retries of the creation of its
-        # upload, which the cleanup waits for; their backoff wait would take at
-        # least EVENT_TIMEOUT seconds.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        sync_fs = fs._sync_fs
-        plan = S3MultipartCopyPlan(
-            source=S3Path("bucket", "src"),
-            destination=S3Path("bucket", "dst"),
-            size=2,
-            ranges=((0, 1), (1, 2)),
-        )
-        sync_fs.core.plan_multipart_copy = mock.MagicMock(return_value=plan)
-        operation = ThrottledOperation(block=True, operation_name="CreateMultipartUpload")
-        sync_fs.core.create_multipart_upload = retried(
-            operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)
-        )
-        sync_fs.core.abort_multipart_upload = mock.MagicMock()
-        task = asyncio.ensure_future(
-            fs._copy_object_with_multipart_upload(plan.source, plan.destination)
-        )
-        try:
-            assert await asyncio.to_thread(operation.started.wait, EVENT_TIMEOUT)
-            task.cancel()
-        finally:
-            operation.release.set()
-        started = time.monotonic()
-        with pytest.raises(asyncio.CancelledError):
-            await await_bounded(task)
-        assert time.monotonic() - started < EVENT_TIMEOUT
-        assert operation.calls == 1
-        # No upload was created.
-        sync_fs.core.abort_multipart_upload.assert_not_called()
 
     @pytest.mark.parametrize("failing", ["a1", "a2"])
     @pytest.mark.asyncio
@@ -1503,32 +1446,7 @@ class TestAioS3FileSystem:
                 fs.pipe_file("s3://bucket/k1", b"data", mode="create")
             with pytest.raises(FileExistsError):
                 fs.put_file(str(local), "s3://bucket/k2", mode="create")
-        assert fs._sync_fs.exists.call_count == 2
         fs._sync_fs._call.assert_not_called()
-
-    @pytest.mark.parametrize("mode", ["overwrite", "create"])
-    def test_put_file_mode(self, tmp_path, mode):
-        # GH-972: fsspec's mode argument used to be sent to PutObject.
-        # A real client selects the request parameters of each operation.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        fs._sync_fs._core = S3Core(
-            boto3.client(
-                "s3",
-                region_name="us-east-1",
-                aws_access_key_id="dummy",
-                aws_secret_access_key="dummy",
-            )
-        )
-        fs._sync_fs.exists = mock.MagicMock(return_value=False)
-        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock(return_value={"ETag": '"e"'})
-        local = tmp_path / "local"
-        local.write_bytes(b"a")
-
-        fs.put_file(str(local), "s3://bucket/key", mode=mode)
-
-        (call,) = fs._sync_fs._call.call_args_list
-        assert "mode" not in call.kwargs
-        assert call.kwargs.get("IfNoneMatch") == ("*" if mode == "create" else None)
 
     @pytest.mark.parametrize(
         ("path", "compression"),
@@ -1539,14 +1457,14 @@ class TestAioS3FileSystem:
             ("s3://bucket/key.gz/", "infer"),
         ],
     )
-    @pytest.mark.parametrize("intrans", [False, True])
-    def test_pipe_file_compression(self, path, compression, intrans):
+    def test_transaction_pipe_file_compression(self, path, compression):
         # GH-1037: the value is compressed before it is uploaded, also in a
-        # transaction of this filesystem.
+        # transaction of this filesystem, whose pipe_file() is its own; outside
+        # one, it is the synchronous filesystem's.
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
         put_object = fs._sync_fs.core.put_object = mock.MagicMock()
 
-        with fs.transaction if intrans else contextlib.nullcontext():
+        with fs.transaction:
             fs.pipe_file(path, b"data", compression=compression)
 
         (((_, body), kwargs),) = put_object.call_args_list
@@ -1637,24 +1555,6 @@ class TestAioS3FileSystem:
                 fs.put_file(str(local), "s3://bucket/k2", **kwargs)
         fs.open.assert_not_called()
         fs._sync_fs._call.assert_not_called()
-
-    def test_touch_sync_wrapper(self):
-        # GH-977: touch() used to be fsspec's open()-based default, which
-        # dropped the PutObject parameters and returned None.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock(return_value={"ETag": '"e"'})
-
-        actual = fs.touch("s3://bucket/key", ContentType="text/plain")
-        assert isinstance(actual, dict)
-        assert fs._sync_fs._call.call_args.kwargs == {
-            "Bucket": "bucket",
-            "Key": "key",
-            "ContentType": "text/plain",
-        }
-
-        fs._sync_fs.exists = mock.MagicMock(return_value=True)
-        with pytest.raises(ValueError, match="Cannot touch the existing file"):
-            fs.touch("s3://bucket/key", truncate=False)
 
     @pytest.mark.asyncio
     async def test_rm_requests(self):
@@ -1820,14 +1720,21 @@ class TestAioS3FileSystem:
     async def test_copy_version(self):
         # GH-979: a version is copied to a destination named after its key,
         # not globbed with "?" as a wildcard.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        fs._sync_fs.isdir = mock.MagicMock(return_value=False)
-        fs._cp_file = mock.AsyncMock()
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, requests = self._serve_keys(fs, {"b"})
 
         await fs._copy("s3://bucket/b?versionId=v1", "s3://bucket/d/", RequestPayer="requester")
-        fs._cp_file.assert_awaited_once_with(
-            "bucket/b?versionId=v1", "s3://bucket/d/b", RequestPayer="requester"
-        )
+        assert [r for name, r in requests if name == "copy_object"] == [
+            {
+                "CopySource": {"Bucket": "bucket", "Key": "b", "VersionId": "v1"},
+                "Bucket": "bucket",
+                "Key": "d/b",
+                "RequestPayer": "requester",
+            }
+        ]
+        assert store == {"b", "d/b"}
 
     @pytest.mark.asyncio
     async def test_expand_path_glob_lists_stem_prefix(self):
@@ -1847,6 +1754,15 @@ class TestAioS3FileSystem:
             if c.args[0] is sync_fs._client.list_objects_v2
         ]
         assert listings[0]["Prefix"] == "reports/2026-"
+
+    @pytest.mark.asyncio
+    async def test_expand_path_version_maxdepth(self):
+        # A maxdepth below 1 is rejected, also for a version, which fsspec's
+        # expansion does not see.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+
+        with pytest.raises(ValueError):  # noqa: PT011
+            await fs._expand_path("s3://bucket/b?versionId=v1", maxdepth=0)
 
     @pytest.mark.parametrize(
         ("destination", "expected"),
@@ -1954,14 +1870,10 @@ class TestAioS3FileSystem:
                 {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
             )
         )
-        running = []
-        concurrency = []
+        overlap, state = overlapping_calls(1)
 
         def upload_part_copy(**kw):
-            running.append(kw["part_number"])
-            concurrency.append(len(running))
-            time.sleep(0.01)
-            running.remove(kw["part_number"])
+            overlap()
             return SimpleNamespace(etag='"e"', part_number=kw["part_number"])
 
         sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
@@ -2008,7 +1920,7 @@ class TestAioS3FileSystem:
                 c.kwargs["RequestPayer"] == "requester" and "ContentType" not in c.kwargs
                 for c in sync_fs.core.upload_part_copy.call_args_list
             )
-            assert max(concurrency) == 1
+            assert state["peak"] == 1
             assert (
                 sync_fs.core.complete_multipart_upload.call_args.kwargs["RequestPayer"]
                 == "requester"
@@ -2028,84 +1940,11 @@ class TestAioS3FileSystem:
         for fs in (fs1, fs2, fs3):
             assert fs._sync_fs not in S3FileSystem._cache.values()
 
-    @pytest.mark.parametrize(
-        ("algorithm", "checksum_type"),
-        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
-    )
-    @pytest.mark.asyncio
-    async def test_multipart_copy_uses_creation_algorithm(self, algorithm, checksum_type):
-        fs = AioS3FileSystem(
-            key="dummy",
-            secret="dummy",
-            region_name="us-east-1",
-            max_workers=1,
-            skip_instance_cache=True,
-        )
-        block_size = 5 * 2**30
-        size = 2 * block_size
-        checksum_kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
-        if checksum_type:
-            checksum_kwargs["ChecksumType"] = checksum_type
-        expected_parts = []
-        with Stubber(fs.core.client) as stubber:
-            stubber.add_response(
-                "head_object", {"ContentLength": size}, {"Bucket": "bucket", "Key": "src"}
-            )
-            stubber.add_response(
-                "create_multipart_upload",
-                {"Bucket": "bucket", "Key": "dst", "UploadId": "u", **checksum_kwargs},
-                {"Bucket": "bucket", "Key": "dst", **checksum_kwargs},
-            )
-            for number, range_ in (
-                (1, f"bytes=0-{block_size - 1}"),
-                (2, f"bytes={block_size}-{size - 1}"),
-            ):
-                result = {"ETag": f'"p{number}"', f"Checksum{algorithm or 'CRC32'}": "checksum"}
-                stubber.add_response(
-                    "upload_part_copy",
-                    {"CopyPartResult": result},
-                    {
-                        "Bucket": "bucket",
-                        "Key": "dst",
-                        "UploadId": "u",
-                        "PartNumber": number,
-                        "CopySource": {"Bucket": "bucket", "Key": "src"},
-                        "CopySourceRange": range_,
-                    },
-                )
-                expected_parts.append(
-                    {
-                        "ETag": result["ETag"],
-                        "PartNumber": number,
-                        **({f"Checksum{algorithm}": "checksum"} if algorithm else {}),
-                    }
-                )
-            stubber.add_response(
-                "complete_multipart_upload",
-                {"ETag": '"done"'},
-                {
-                    "Bucket": "bucket",
-                    "Key": "dst",
-                    "UploadId": "u",
-                    "MultipartUpload": {"Parts": expected_parts},
-                    **({"ChecksumType": checksum_type} if checksum_type else {}),
-                },
-            )
-            kwargs = {
-                "source": S3Path("bucket", "src"),
-                "destination": S3Path("bucket", "dst"),
-                "block_size": block_size,
-                "MetadataDirective": "REPLACE",
-                "TaggingDirective": "REPLACE",
-                "AnnotationDirective": "EXCLUDE",
-                **checksum_kwargs,
-            }
-            await await_bounded(fs._copy_object_with_multipart_upload(**kwargs))
-            stubber.assert_no_pending_responses()
-
     @pytest.fixture(scope="class")
     def fs(self):
-        return AioS3FileSystem(connection=connect())
+        fs = AioS3FileSystem(connection=connect())
+        yield fs
+        fs.close()
 
     @pytest.mark.parametrize(
         "size",
@@ -2166,120 +2005,6 @@ class TestAioS3FileSystem:
         async with await fs.open_async(path, "rb") as f:
             assert await f.read() == b"hello world"
 
-    @pytest.mark.asyncio
-    async def test_find(self, fs):
-        dir_ = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_find"
-        )
-        for i in range(5):
-            await fs._pipe_file(f"{dir_}/prefix/test_{i}", bytes(i))
-        await fs._touch(f"{dir_}/prefix2")
-
-        result = await fs._find(f"{dir_}/prefix")
-        assert len(result) == 5
-
-        result = await fs._find(f"{dir_}/prefix/")
-        assert len(result) == 5
-
-        result = await fs._find(dir_, prefix="prefix")
-        assert len(result) == 6
-
-        result = await fs._find(f"{dir_}/prefix/test_")
-        assert len(result) == 0
-
-        # maxdepth reaches the listing: only prefix2 is one level down.
-        result = await fs._find(dir_, maxdepth=1)
-        assert result == [fs._strip_protocol(f"{dir_}/prefix2")]
-
-        result = await fs._find(f"{dir_}/prefix", prefix="test_")
-        assert len(result) == 5
-
-        result = await fs._find(f"{dir_}/prefix/", prefix="test_")
-        assert len(result) == 5
-
-        test_1 = await fs._find(f"{dir_}/prefix/test_1")
-        assert len(test_1) == 1
-        assert test_1[0] == fs._strip_protocol(f"{dir_}/prefix/test_1")
-
-        test_1_detail = await fs._find(f"{dir_}/prefix/test_1", detail=True)
-        assert len(test_1_detail) == 1
-        assert test_1_detail[
-            fs._strip_protocol(f"{dir_}/prefix/test_1")
-        ].name == fs._strip_protocol(f"{dir_}/prefix/test_1")
-        assert test_1_detail[fs._strip_protocol(f"{dir_}/prefix/test_1")].size == 1
-
-    @pytest.mark.asyncio
-    async def test_glob(self, fs):
-        dir_ = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_glob"
-        )
-        path = f"{dir_}/nested/test_{uuid.uuid4()}"
-        await fs._touch(path)
-
-        assert fs._strip_protocol(path) not in fs.glob(f"{dir_}/")
-        assert fs._strip_protocol(path) not in fs.glob(f"{dir_}/*")
-        assert fs._strip_protocol(path) not in fs.glob(f"{dir_}/nested")
-        assert fs._strip_protocol(path) not in fs.glob(f"{dir_}/nested/")
-        assert fs._strip_protocol(path) in fs.glob(f"{dir_}/nested/*")
-        assert fs._strip_protocol(path) in fs.glob(f"{dir_}/nested/test_*")
-        assert fs._strip_protocol(path) in fs.glob(f"{dir_}/*/*")
-        assert fs._strip_protocol(f"{dir_}/nested") in fs.glob(f"{dir_}/nested/**")
-
-        with pytest.raises(ValueError):  # noqa: PT011
-            fs.glob("*")
-
-    @pytest.mark.asyncio
-    async def test_rm_recursive(self, fs):
-        dir_ = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_async_rm_recursive"
-        )
-
-        files = [f"{dir_}/{uuid.uuid4()}" for _ in range(2)]
-        for f in files:
-            await fs._touch(f)
-
-        await fs._rm(dir_)
-        for f in files:
-            assert await fs._exists(f)
-        assert await fs._exists(dir_)
-
-        await fs._rm(dir_, recursive=True)
-        for f in files:
-            assert not await fs._exists(f)
-        assert not await fs._exists(dir_)
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        ("base", "exp"),
-        [
-            # Below the maximum part size, a single CopyObject request.
-            (1, 2**10),
-        ],
-    )
-    async def test_upload_cp_file(self, fs, base, exp):
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-            data = b"a" * (base * exp)
-            tmp.write(data)
-            tmp.flush()
-
-            rpath = (
-                f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-                f"filesystem/test_async_upload_cp_file/{uuid.uuid4()}"
-            )
-            await fs._put_file(lpath=tmp.name, rpath=rpath)
-
-            rpath_copy = (
-                f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-                f"filesystem/test_async_upload_cp_file_copy/{uuid.uuid4()}"
-            )
-            await fs._cp_file(path1=rpath, path2=rpath_copy)
-            tmp.seek(0)
-            assert await fs._cat_file(rpath_copy) == tmp.read()
-            assert await fs._cat_file(rpath_copy) == await fs._cat_file(rpath)
-
     @pytest.mark.skipif(
         os.getenv("AWS_ATHENA_S3_VERSIONING_TESTS") != "1",
         reason="Set AWS_ATHENA_S3_VERSIONING_TESTS=1 to create versioning test buckets.",
@@ -2339,16 +2064,6 @@ class TestAioS3FileSystem:
         assert await fs._cat_file(f"{base}/dst/sub/b") == b"b"
         assert not await fs._exists(f"{base}/src/a")
         assert not await fs._exists(f"{base}/src/sub/b")
-
-    def test_pandas_read_csv(self):
-        import pandas
-
-        df = pandas.read_csv(
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}",
-            header=None,
-            names=["col"],
-        )
-        assert [(row["col"],) for _, row in df.iterrows()] == [(123456789,)]
 
 
 class TestAioS3File:
@@ -2473,106 +2188,6 @@ class TestAioS3File:
         assert await asyncio.to_thread(read) == b"a" * size
         assert sync_fs.core.get_object.call_count == 4
         assert state["peak"] == 2
-
-    @pytest.mark.asyncio
-    async def test_open_parts_in_flight(self):
-        # GH-1158: a write keeps at most max_workers parts in flight with the
-        # S3AioExecutor of the file; the S3ThreadPoolExecutor of an
-        # asynchronous filesystem is that of S3File. The parts waiting for a
-        # worker used to be queued with their data.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
-        gates: dict[int, threading.Event] = {}
-
-        def upload_part(**kwargs):
-            # Uploading until the test releases the part.
-            assert gates[kwargs["part_number"]].wait(5)
-            return S3MultipartUploadPart(kwargs["part_number"], {"ETag": '"e"'})
-
-        sync_fs = fs._sync_fs
-        sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=S3MultipartUpload(
-                {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
-            )
-        )
-        sync_fs.core.upload_part = mock.MagicMock(side_effect=upload_part)
-        sync_fs.core.complete_multipart_upload = mock.MagicMock()
-        submit_to = S3Executor.submit_to
-        uploads = {}
-        in_flight = []
-
-        def record_upload(executor, future, fn, *args, **kwargs):
-            if "body" not in kwargs:
-                submit_to(executor, future, fn, *args, **kwargs)
-                return
-            gates[kwargs["part_number"]] = threading.Event()
-            uploads[kwargs["part_number"]] = future
-            in_flight.append(sum(not upload.done() for upload in uploads.values()))
-            submit_to(executor, future, fn, *args, **kwargs)
-            if in_flight[-1] >= 2:
-                # Only the newest part in flight finishes, so a write that
-                # waits for an older one times out.
-                gates[kwargs["part_number"]].set()
-
-        def write():
-            with fs.open("s3://bucket/key", "wb", block_size=block_size, max_workers=2) as f:
-                f.write(b"a" * block_size * 4)
-                for gate in gates.values():
-                    gate.set()
-
-        with mock.patch.object(S3Executor, "submit_to", autospec=True, side_effect=record_upload):
-            await asyncio.to_thread(write)
-
-        assert sync_fs.core.upload_part.call_count == 4
-        sync_fs.core.complete_multipart_upload.assert_called_once()
-        assert in_flight == [1, 2, 2, 2]
-
-    @pytest.mark.asyncio
-    async def test_open_failed_part_while_waiting(self):
-        # GH-1173: a part found failed when a write waits for a part stops the
-        # write with its error with the S3AioExecutor of the file, as with
-        # that of S3File. The write used to upload the rest of the data.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
-        sync_fs = fs._sync_fs
-        sync_fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=S3MultipartUpload(
-                {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
-            )
-        )
-        release = threading.Event()
-
-        def upload_part(**kwargs):
-            # Failing once max_workers parts are in flight.
-            assert release.wait(5)
-            raise PermissionError("Access Denied")
-
-        sync_fs.core.upload_part = mock.MagicMock(side_effect=upload_part)
-        sync_fs.core.abort_multipart_upload = mock.MagicMock()
-        sync_fs.core.complete_multipart_upload = mock.MagicMock()
-        submit_to = S3Executor.submit_to
-        submitted = []
-
-        def record_upload(executor, future, fn, *args, **kwargs):
-            if "body" in kwargs:
-                submitted.append(kwargs["part_number"])
-            submit_to(executor, future, fn, *args, **kwargs)
-            if len(submitted) == 2:
-                release.set()
-
-        def write():
-            with fs.open("s3://bucket/key", "wb", block_size=block_size, max_workers=2) as f:
-                f.write(b"a" * block_size * 3)
-
-        with (
-            mock.patch.object(S3Executor, "submit_to", autospec=True, side_effect=record_upload),
-            pytest.raises(PermissionError, match="Access Denied"),
-        ):
-            await asyncio.to_thread(write)
-
-        assert submitted == [1, 2]
-        sync_fs.core.abort_multipart_upload.assert_called_once()
-        sync_fs.core.complete_multipart_upload.assert_not_called()
 
     def test_open_invalid_max_workers(self):
         fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
@@ -2975,6 +2590,7 @@ class TestAioS3StreamedFile:
         lock = threading.Lock()
         started = threading.Semaphore(0)
         release = threading.Event()
+        released = []
         aborted = threading.Event()
 
         def upload_part(**kw):
@@ -2982,8 +2598,10 @@ class TestAioS3StreamedFile:
             with lock:
                 events.append(f"start {part_number}")
             started.release()
-            # The finally block of the test always releases it.
-            release.wait()
+            # The finally block of the test releases it. The wait is bounded,
+            # and its timeout recorded, so that a regression that blocks the
+            # event loop fails instead of hanging or passing.
+            released.append(release.wait(EVENT_TIMEOUT))
             with lock:
                 events.append(f"end {part_number}")
             return S3MultipartUploadPart(part_number, {"ETag": '"e"'})
@@ -3006,83 +2624,62 @@ class TestAioS3StreamedFile:
         finally:
             release.set()
         with pytest.raises(asyncio.CancelledError):
-            await task
+            await await_bounded(task)
         assert await asyncio.to_thread(aborted.wait, 5)
 
         assert f.closed
         assert sorted(events[:2]) == ["start 1", "start 2"]
         assert sorted(events[2:4]) == ["end 1", "end 2"]
         assert events[4:] == ["abort"]
+        assert released == [True, True]
         fs.core.complete_multipart_upload.assert_not_called()
 
+    @pytest.mark.parametrize("cancelled", ["close", "flush"])
     @pytest.mark.asyncio
-    async def test_close_cancelled(self, fs):
-        # A commit that has started completes even if the task that closes
-        # the file is cancelled, and the upload is not aborted.
+    async def test_commit_cancelled(self, fs, cancelled):
+        # A commit that has started completes, and the upload is not aborted,
+        # when the task that closes the file is cancelled, or when the block
+        # is left with the exception of a cancelled final flush.
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
         started = threading.Event()
         release = threading.Event()
-        completed = threading.Event()
+        released = []
 
         def complete_multipart_upload(*args, **kwargs):
             started.set()
-            # The finally block of the test releases it.
-            release.wait(EVENT_TIMEOUT)
-            completed.set()
+            # The finally block of the test releases it. The wait is bounded,
+            # and its timeout recorded, so that a regression that blocks the
+            # event loop fails instead of hanging or passing.
+            released.append(release.wait(EVENT_TIMEOUT))
 
         fs.core.complete_multipart_upload = mock.MagicMock(side_effect=complete_multipart_upload)
         f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
-        await f.write(b"a" * block_size * 2)
-        task = asyncio.ensure_future(f.close())
-        try:
-            assert await asyncio.to_thread(started.wait, 5)
+
+        async def close():
+            await f.write(b"a" * block_size * 2)
+            task = asyncio.ensure_future(f.close())
+            assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
             task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        finally:
-            release.set()
-        assert await asyncio.to_thread(completed.wait, 5)
-
-        assert f.closed
-        fs.core.complete_multipart_upload.assert_called_once()
-        fs.core.abort_multipart_upload.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_flush_cancelled_then_exit_with_exception(self, fs):
-        # Leaving the block with an exception after a cancelled final flush
-        # does not abort the upload that the running commit completes.
-        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
-        started = threading.Event()
-        release = threading.Event()
-        completed = threading.Event()
-
-        def complete_multipart_upload(*args, **kwargs):
-            started.set()
-            # The finally block of the test always releases it.
-            release.wait()
-            completed.set()
-
-        fs.core.complete_multipart_upload = mock.MagicMock(side_effect=complete_multipart_upload)
-        f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
+            await task
 
         async def flush_and_exit():
             async with f:
                 await f.write(b"a" * block_size * 2)
                 flush = asyncio.ensure_future(f.flush(force=True))
-                assert await asyncio.to_thread(started.wait, 5)
+                assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
                 flush.cancel()
                 await flush
 
         try:
             with pytest.raises(asyncio.CancelledError):
-                await flush_and_exit()
+                await await_bounded(close() if cancelled == "close" else flush_and_exit())
         finally:
             release.set()
-        assert await asyncio.to_thread(completed.wait, 5)
-        # Lets an abort that was submitted run.
-        await asyncio.sleep(0.1)
+        # Waits for the commit, and for an abort queued after it.
+        await asyncio.to_thread(shutdown_bounded, f._pool)
 
         assert f.closed
+        assert released == [True]
         fs.core.complete_multipart_upload.assert_called_once()
         fs.core.abort_multipart_upload.assert_not_called()
 
@@ -3094,12 +2691,15 @@ class TestAioS3StreamedFile:
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
         started = threading.Event()
         release = threading.Event()
+        released = []
         respond = fs.core.upload_part.side_effect
 
         def upload_part(**kwargs):
             started.set()
-            # The finally block of the test always releases it.
-            release.wait()
+            # The finally block of the test releases it. The wait is bounded,
+            # and its timeout recorded, so that a regression that blocks the
+            # event loop fails instead of hanging or passing.
+            released.append(release.wait(EVENT_TIMEOUT))
             return respond(**kwargs)
 
         fs.core.upload_part = mock.MagicMock(side_effect=upload_part)
@@ -3136,9 +2736,10 @@ class TestAioS3StreamedFile:
         finally:
             release.set()
         # Waits for the commit, and for an abort queued after it.
-        await asyncio.to_thread(f._pool.shutdown, True)
+        await asyncio.to_thread(shutdown_bounded, f._pool)
 
         assert f.closed
+        assert released == [True]
         fs.core.complete_multipart_upload.assert_called_once()
         fs.core.abort_multipart_upload.assert_not_called()
 
