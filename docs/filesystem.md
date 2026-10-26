@@ -399,8 +399,10 @@ operation sends one request (one per page for the iterators and
 described below, send several, and `generate_presigned_url()` signs a URL locally
 without a request. The requests are sent with the retry policy. An operation raises
 `FileNotFoundError` for a missing bucket or multipart upload, or for a missing object or
-version that it reads, and caches nothing. Requests sent through `fs.core` do not
-invalidate the filesystem's cache: call
+version that it reads, and caches nothing. `copy_object()` and `upload_part_copy()` with
+a source version that is a delete marker raise `OSError` with `EINVAL`, while the
+filesystem's `cp_file()` raises `FileNotFoundError` for it, as for a missing file.
+Requests sent through `fs.core` do not invalidate the filesystem's cache: call
 `fs.invalidate_cache()` after a change, or make it through the filesystem.
 
 ```python
