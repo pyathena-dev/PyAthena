@@ -547,6 +547,11 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             List of S3Object instances (if detail=True) or paths as strings (if detail=False).
 
+        Raises:
+            FileNotFoundError: If the bucket does not exist, or if a key path
+                is neither an object nor a directory, a path that some key
+                starts with followed by ``/``.
+
         Example:
             >>> fs = S3FileSystem()
             >>> fs.ls("s3://my-bucket")  # List objects in bucket
@@ -560,14 +565,20 @@ class S3FileSystem(AbstractFileSystem):
         path = self._strip_protocol(path).rstrip("/")
         if path in ["", "/"]:
             files = self._ls_buckets(refresh)
-        elif versions:
-            files = self._ls_object_versions(path)
         else:
-            files = self._ls_dirs(path, refresh=refresh)
-            if not files and "/" in path:
-                file = self._head_object(path, refresh=refresh)
-                if file:
-                    files = [file]
+            key = S3Path.parse(path).key
+            if versions:
+                files = self._ls_object_versions(path)
+            else:
+                files = self._ls_dirs(path, refresh=refresh)
+                if not files and key:
+                    file = self._head_object(path, refresh=refresh)
+                    if file:
+                        files = [file]
+            # An empty bucket lists nothing, while a missing bucket raises
+            # from the listing.
+            if not files and key:
+                raise FileNotFoundError(path)
         return list(files) if detail else [f.name for f in files]
 
     def _ls_object_versions(self, path: str) -> list[S3Object]:
