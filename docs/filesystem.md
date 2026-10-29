@@ -79,6 +79,27 @@ fs.cp("s3://YOUR_S3_BUCKET/src", "s3://YOUR_S3_BUCKET/dst")
 fs.rm("s3://YOUR_S3_BUCKET/path/to/", recursive=True)
 ```
 
+`cat`, `cat_ranges`, `get`, `put`, `pipe` with a dict of values, `cp`, and `mv` transfer
+their objects in parallel, `batch_size` objects at a time:
+
+```python
+fs.get("s3://YOUR_S3_BUCKET/path/to/", "local/dir/", recursive=True, batch_size=16)
+```
+
+By default, `batch_size` is the filesystem's `max_workers`, but at most the
+`max_pool_connections` of the S3 client, which is 10 unless the client's configuration
+sets it, such as with the `s3_config` argument of `connect` or the `config_kwargs`
+argument of `S3FileSystem`. `batch_size=-1` transfers all the objects at once. The
+transfers of a batch run in threads of their own, and the range reads, parts, and part
+copies of each object in threads of that object, so a batch can have up to `batch_size`
+× `max_workers` requests in flight, and a batch of multipart uploads holds up to that
+many parts in memory. When a transfer fails, no further transfer starts, the retries of
+the running ones stop, and the error is raised once they have ended. `on_error` of
+`cat`, `cat_ranges`, and `cp` keeps its fsspec meaning; with `on_error="omit"` or
+`"return"` of `cat`, `"return"` of `cat_ranges`, or `"ignore"` of `cp` for a missing
+source, those errors do not stop the batch. `rm` deletes up to 1,000 objects per
+DeleteObjects request, `max_workers` requests at a time.
+
 Writes with `pipe`/`pipe_file` issue a single PutObject request for data up to the
 block size (5 MiB by default); larger data is uploaded as a parallel multipart upload
 through the buffered file path. Inside an

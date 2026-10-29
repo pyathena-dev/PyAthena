@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import logging
 import mimetypes
@@ -10,14 +11,15 @@ import os.path
 import threading
 import time
 import traceback
-from collections.abc import Callable, Mapping
-from concurrent.futures import FIRST_EXCEPTION, Future, as_completed, wait
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, FIRST_EXCEPTION, Future, as_completed, wait
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
+from glob import has_magic
 from io import BytesIO
 from multiprocessing import cpu_count
-from typing import Any, BinaryIO, cast
+from typing import Any, BinaryIO, TypeVar, cast
 from urllib.parse import unquote_plus
 
 import botocore.exceptions
@@ -30,7 +32,7 @@ from fsspec.compression import compr
 from fsspec.core import get_compression
 from fsspec.implementations.local import LocalFileSystem, make_path_posix, trailing_sep
 from fsspec.spec import AbstractBufferedFile
-from fsspec.utils import check_contained, isfilelike, tokenize
+from fsspec.utils import check_contained, isfilelike, other_paths, tokenize
 
 import pyathena
 from pyathena.connection import Connection
@@ -52,6 +54,8 @@ from pyathena.filesystem.s3_writer import _S3WriteSession
 from pyathena.util import RetryConfig, override, stop_retries_on
 
 _logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 # The request parameters on which the authorization of a lookup (HeadObject,
 # HeadBucket, or ListObjectsV2) depends.
@@ -1101,6 +1105,122 @@ class S3FileSystem(AbstractFileSystem):
         """
         return S3ThreadPoolExecutor(max_workers=max_workers)
 
+    def _batch_size(self, batch_size: int | None, count: int) -> int:
+        """Return the number of calls of a batch operation that run at once.
+
+        Args:
+            batch_size: The ``batch_size`` of the operation. None takes
+                ``max_workers``, at most the ``max_pool_connections`` of the
+                S3 client, so that no request opens a connection that the
+                pool would discard; -1 runs every call at once.
+            count: The number of calls of the operation.
+
+        Returns:
+            The number of calls, at least 1 and at most ``count``.
+
+        Raises:
+            ValueError: If ``batch_size`` is neither positive nor -1.
+        """
+        if batch_size is None:
+            batch_size = min(self.max_workers, self._client.meta.config.max_pool_connections)
+        elif batch_size == -1:
+            batch_size = count
+        elif batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer or -1")
+        return max(1, min(batch_size, count))
+
+    def _run_batch(
+        self,
+        calls: Sequence[Callable[[], T]],
+        batch_size: int | None = None,
+        stops: Callable[[Exception], bool] | None = None,
+        callback: Callback = _DEFAULT_CALLBACK,
+    ) -> list[T | Exception]:
+        """Run the per-object calls of a batch operation in parallel.
+
+        At most :meth:`_batch_size` calls run at once, in threads of an
+        executor of their own, so that the parallel requests of a call, such
+        as the parts of an upload, run in the executor of that call. A call
+        starts when another has ended, in the order of ``calls``; with one
+        call at a time, the calls run in the calling thread.
+
+        An error that stops the batch, any error by default, starts no
+        further call, and the retries of the running calls make no further
+        attempt (see :func:`~pyathena.util.stop_retries_on`). Once they have
+        ended, the error is raised. An interrupt, such as
+        ``KeyboardInterrupt``, does the same.
+
+        Args:
+            calls: The calls, without arguments.
+            batch_size: The ``batch_size`` of the operation.
+            stops: Whether an error of a call stops the batch. The errors that
+                do not stop it are returned in place of their results. Errors
+                that are not an ``Exception`` always stop it.
+            callback: Progress callback, updated by one in the calling thread
+                when a call ends.
+
+        Returns:
+            The result of each call, or the error that did not stop the batch.
+
+        Raises:
+            BaseException: The first error that stopped the batch.
+        """
+        results: list[Any] = [None] * len(calls)
+        n = self._batch_size(batch_size, len(calls))
+        if n == 1:
+            for i, call in enumerate(calls):
+                try:
+                    results[i] = call()
+                except Exception as e:
+                    if stops is None or stops(e):
+                        raise
+                    results[i] = e
+                finally:
+                    callback.relative_update(1)
+            return results
+
+        # Set when the batch stops, so that the running calls make no further attempt.
+        stop = threading.Event()
+        failure: BaseException | None = None
+        running: dict[Future[T], int] = {}
+        submitted = 0
+        with self._create_executor(max_workers=n) as executor:
+            try:
+                with stop_retries_on(stop):
+                    while running or (failure is None and submitted < len(calls)):
+                        while failure is None and submitted < len(calls) and len(running) < n:
+                            # Tracked before it is scheduled, so that an
+                            # interrupt while it is being scheduled still lets
+                            # it be cancelled.
+                            future: Future[T] = Future()
+                            running[future] = submitted
+                            executor.submit_to(future, calls[submitted])
+                            submitted += 1
+                        for future in wait(running, return_when=FIRST_COMPLETED).done:
+                            i = running.pop(future)
+                            callback.relative_update(1)
+                            error = future.exception()
+                            if error is None:
+                                results[i] = future.result()
+                            elif failure is not None:
+                                # A call that ended after the batch stopped.
+                                continue
+                            elif isinstance(error, Exception) and stops and not stops(error):
+                                results[i] = error
+                            else:
+                                failure = error
+                                stop.set()
+            except BaseException:
+                for future in running:
+                    future.cancel()
+                # After the cancellation, which a thread that it frees could
+                # otherwise precede by taking a call that has not started.
+                stop.set()
+                raise
+        if failure is not None:
+            raise failure
+        return results
+
     def _delete_objects(self, paths: list[str], max_workers: int | None = None, **kwargs) -> None:
         """Delete objects with DeleteObjects requests grouped by bucket.
 
@@ -1353,7 +1473,7 @@ class S3FileSystem(AbstractFileSystem):
         self.invalidate_cache(path)
         return object_.to_dict()
 
-    def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
+    def mv(self, path1, path2, recursive=False, maxdepth=None, batch_size=None, **kwargs) -> None:
         """Move files from one S3 location to another.
 
         Copies the files to the destinations that ``copy()`` gives them, and
@@ -1373,12 +1493,17 @@ class S3FileSystem(AbstractFileSystem):
         requires ``s3:GetBucketVersioning``. The result is not cached across
         moves. Directory buckets do not support versioning and need no lookup.
 
+        The files are copied in parallel as with ``copy()``, and nothing is
+        deleted after a failed copy.
+
         Args:
             path1: Source S3 path, glob pattern, or list of paths.
             path2: Destination S3 path, or list of paths when ``path1`` is a
                 list.
             recursive: Whether to move the directories with their contents.
             maxdepth: Maximum depth of a recursive move.
+            batch_size: Number of copies to run at the same time, as in
+                ``copy()``.
             **kwargs: Additional S3 copy parameters passed to ``cp_file()``.
 
         Raises:
@@ -1386,16 +1511,17 @@ class S3FileSystem(AbstractFileSystem):
                 destination is another source, including one left in place,
                 which is checked before anything is copied. A directory with
                 no object at its key, which is not copied, does not conflict.
+                Also if ``batch_size`` is neither positive nor -1.
             OSError: If bucket versioning cannot be read.
         """
         if path1 == path2:
             return
-        copied = [
-            p1
-            for p1, p2 in self._move_pairs(path1, path2, recursive=recursive, maxdepth=maxdepth)
-            if self._copy_file(p1, p2, **kwargs)
-        ]
-        self._delete_objects(copied)
+        pairs = self._move_pairs(path1, path2, recursive=recursive, maxdepth=maxdepth)
+        copied = self._run_batch(
+            [functools.partial(self._copy_file, p1, p2, **kwargs) for p1, p2 in pairs],
+            batch_size,
+        )
+        self._delete_objects([p1 for (p1, _), c in zip(pairs, copied, strict=True) if c])
 
     def _move_pairs(
         self,
@@ -1473,13 +1599,24 @@ class S3FileSystem(AbstractFileSystem):
         )
         return pairing.copy_pairs(sources, destination_is_dir)
 
-    def copy(self, path1, path2, recursive=False, maxdepth=None, on_error=None, **kwargs) -> None:
+    def copy(
+        self,
+        path1,
+        path2,
+        recursive=False,
+        maxdepth=None,
+        on_error=None,
+        batch_size=None,
+        **kwargs,
+    ) -> None:
         """Copy files within S3.
 
         As fsspec's ``copy()``, except that a source with a version ID copies
         that version of the object to a destination named after its key, as
         :meth:`~pyathena.filesystem.s3_path_pairing.S3PathPairing.copy_pairs`
-        pairs them.
+        pairs them, and that the files are copied in parallel, ``batch_size``
+        at a time. An error that ``on_error`` does not ignore starts no
+        further copy and is raised once the running copies have ended.
 
         Args:
             path1: Source S3 path, glob pattern, or list of them.
@@ -1490,56 +1627,83 @@ class S3FileSystem(AbstractFileSystem):
             on_error: ``"raise"`` or ``"ignore"`` for a missing source; by
                 default ``"ignore"`` with ``recursive`` and ``"raise"``
                 otherwise.
+            batch_size: Number of copies to run at the same time; -1 runs
+                all of them at once. By default ``max_workers``, at most the
+                ``max_pool_connections`` of the S3 client.
             **kwargs: Additional S3 copy parameters passed to ``cp_file()``.
+
+        Raises:
+            ValueError: If ``batch_size`` is neither positive nor -1.
         """
-        sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
-        if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
-            pairs = self._copy_pairs(
-                S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
-            )
-            if not pairs:
-                return
-            path1, path2 = [p1 for p1, _ in pairs], [p2 for _, p2 in pairs]
-        super().copy(
-            path1, path2, recursive=recursive, maxdepth=maxdepth, on_error=on_error, **kwargs
+        if on_error is None:
+            on_error = "ignore" if recursive else "raise"
+        pairs = self._copy_pairs(
+            S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
+        )
+        self._run_batch(
+            [functools.partial(self.cp_file, p1, p2, **kwargs) for p1, p2 in pairs],
+            batch_size,
+            stops=lambda e: on_error == "raise" or not isinstance(e, FileNotFoundError),
         )
 
     def get(
-        self, rpath, lpath, recursive=False, callback=_DEFAULT_CALLBACK, maxdepth=None, **kwargs
+        self,
+        rpath,
+        lpath,
+        recursive=False,
+        callback=_DEFAULT_CALLBACK,
+        maxdepth=None,
+        batch_size=None,
+        **kwargs,
     ) -> None:
         """Copy files from S3 to the local filesystem.
 
         As fsspec's ``get()``, except that a source with a version ID
         downloads that version of the object to a local path named after its
         key, as :meth:`~pyathena.filesystem.s3_path_pairing.S3PathPairing.copy_pairs`
-        pairs them. Those destinations are checked to lie under ``lpath``.
+        pairs them, and that the files are downloaded in parallel, as with
+        ``copy()``. The destinations named after the sources are checked to
+        lie under ``lpath``.
 
         Args:
             rpath: Source S3 path, glob pattern, or list of them.
             lpath: Local destination path, or list of paths when ``rpath`` is
                 a list.
             recursive: Whether to copy the directories with their contents.
-            callback: Progress callback.
+            callback: Progress callback. Its branches for the files are
+                created and updated in the threads that download them.
             maxdepth: Maximum depth of a recursive copy.
+            batch_size: Number of downloads to run at the same time, as in
+                ``copy()``.
             **kwargs: Additional parameters passed to ``get_file()``.
 
         Raises:
-            ValueError: If a source with a version ID is paired, and a
-                destination lies outside ``lpath``.
+            ValueError: If a destination named after a source lies outside
+                ``lpath``, or if ``batch_size`` is neither positive nor -1.
         """
-        sources = [rpath] if isinstance(rpath, (str, os.PathLike)) else rpath
-        if isinstance(lpath, (str, os.PathLike)) and any(S3Path.has_version_id(p) for p in sources):
-            root = make_path_posix(lpath)
-            pairs = self._copy_pairs(
-                S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
-                isdir=LocalFileSystem().isdir,
-            )
-            rpath, lpath = [p1 for p1, _ in pairs], [p2 for _, p2 in pairs]
-            check_contained(root, lpath)
-            if not rpath:
-                return
-        super().get(
-            rpath, lpath, recursive=recursive, callback=callback, maxdepth=maxdepth, **kwargs
+        root = make_path_posix(lpath) if isinstance(lpath, (str, os.PathLike)) else lpath
+        pairs = self._copy_pairs(
+            S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
+            isdir=LocalFileSystem().isdir,
+        )
+        if isinstance(root, str):
+            check_contained(root, [lp for _, lp in pairs])
+        if not pairs:
+            return
+
+        def get_file(rpath: str, lpath: str) -> None:
+            """Download a file with a branch of the callback.
+
+            Args:
+                rpath: S3 source path.
+                lpath: Local destination path.
+            """
+            with callback.branched(rpath, lpath) as child:
+                self.get_file(rpath, lpath, callback=child, **kwargs)
+
+        callback.set_size(len(pairs))
+        self._run_batch(
+            [functools.partial(get_file, rp, lp) for rp, lp in pairs], batch_size, callback=callback
         )
 
     def cp_file(
@@ -1721,6 +1885,37 @@ class S3FileSystem(AbstractFileSystem):
                 **kwargs,
             )
 
+    def pipe(self, path, value=None, batch_size=None, **kwargs) -> None:
+        """Write bytes into one or more paths.
+
+        As fsspec's ``pipe()``, except that the values of a dict are written
+        in parallel with ``pipe_file()``, as ``copy()`` copies its files.
+
+        Args:
+            path: S3 path to write ``value`` to, or a dict of the values to
+                write by path.
+            value: The bytes to write to a single path; ignored with a dict.
+            batch_size: Number of writes to run at the same time, as in
+                ``copy()``.
+            **kwargs: Additional parameters passed to ``pipe_file()``.
+
+        Raises:
+            ValueError: If ``path`` is neither a string nor a dict, or if
+                ``batch_size`` is neither positive nor -1.
+        """
+        if isinstance(path, str):
+            self.pipe_file(self._strip_protocol(path), value, **kwargs)
+        elif isinstance(path, dict):
+            self._run_batch(
+                [
+                    functools.partial(self.pipe_file, self._strip_protocol(k), v, **kwargs)
+                    for k, v in path.items()
+                ],
+                batch_size,
+            )
+        else:
+            raise ValueError("path must be str or dict")
+
     def pipe_file(
         self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
     ) -> None:
@@ -1802,6 +1997,95 @@ class S3FileSystem(AbstractFileSystem):
         self.core.put_object(s3_path, value, **request_kwargs)
         self.invalidate_cache(path)
 
+    def cat(self, path, recursive=False, on_error="raise", batch_size=None, **kwargs):
+        """Read the contents of one or more paths.
+
+        As fsspec's ``cat()``, except that the objects are read in parallel
+        with ``cat_file()``, as ``copy()`` copies its files. With
+        ``on_error="raise"``, an error starts no further read and is raised
+        once the running reads have ended.
+
+        Args:
+            path: S3 path, glob pattern, or list of them.
+            recursive: Whether to read the files below the directories.
+            on_error: ``"raise"`` to raise an error of a read, ``"omit"`` to
+                leave out the paths whose read failed, or ``"return"`` to
+                return the error in place of their contents.
+            batch_size: Number of reads to run at the same time, as in
+                ``copy()``.
+            **kwargs: Additional parameters passed to ``expand_path()`` and
+                ``cat_file()``.
+
+        Returns:
+            The contents of the path, or a dict of the contents by path if
+            there are several paths or the path was expanded.
+
+        Raises:
+            ValueError: If ``batch_size`` is neither positive nor -1.
+        """
+        paths = self.expand_path(path, recursive=recursive, **kwargs)
+        if len(paths) > 1 or isinstance(path, list) or paths[0] != self._strip_protocol(path):
+            results = self._run_batch(
+                [functools.partial(self.cat_file, p, **kwargs) for p in paths],
+                batch_size,
+                stops=lambda e: on_error == "raise",
+            )
+            return {
+                p: r
+                for p, r in zip(paths, results, strict=True)
+                if on_error != "omit" or not isinstance(r, Exception)
+            }
+        return self.cat_file(paths[0], **kwargs)
+
+    def cat_ranges(
+        self, paths, starts, ends, max_gap=None, on_error="return", batch_size=None, **kwargs
+    ) -> list[bytes | Exception]:
+        """Read byte ranges of one or more paths.
+
+        As fsspec's ``cat_ranges()``, except that the ranges are read in
+        parallel with ``cat_file()``, as ``copy()`` copies its files. Unless
+        ``on_error`` is ``"return"``, an error starts no further read and is
+        raised once the running reads have ended.
+
+        Args:
+            paths: The S3 paths, one per range.
+            starts: The start offset of each range, or one for all of them.
+            ends: The end offset of each range, or one for all of them.
+            max_gap: Not supported; must be None.
+            on_error: ``"return"`` to return the error of a read in place of
+                its bytes; otherwise the error is raised.
+            batch_size: Number of reads to run at the same time, as in
+                ``copy()``.
+            **kwargs: Additional parameters passed to ``cat_file()``.
+
+        Returns:
+            The bytes of each range, or the error of its read.
+
+        Raises:
+            NotImplementedError: If ``max_gap`` is given.
+            TypeError: If ``paths`` is not a list.
+            ValueError: If the numbers of paths, starts, and ends differ, or
+                if ``batch_size`` is neither positive nor -1.
+        """
+        if max_gap is not None:
+            raise NotImplementedError
+        if not isinstance(paths, list):
+            raise TypeError
+        if not isinstance(starts, list):
+            starts = [starts] * len(paths)
+        if not isinstance(ends, list):
+            ends = [ends] * len(paths)
+        if len(starts) != len(paths) or len(ends) != len(paths):
+            raise ValueError
+        return self._run_batch(
+            [
+                functools.partial(self.cat_file, p, s, e, **kwargs)
+                for p, s, e in zip(paths, starts, ends, strict=True)
+            ],
+            batch_size,
+            stops=lambda e: on_error != "return",
+        )
+
     def cat_file(
         self, path: str, start: int | None = None, end: int | None = None, **kwargs
     ) -> bytes:
@@ -1878,6 +2162,78 @@ class S3FileSystem(AbstractFileSystem):
                 # The range starts at or past the end of the object.
                 return b""
             raise
+
+    def put(
+        self,
+        lpath,
+        rpath,
+        recursive=False,
+        callback=_DEFAULT_CALLBACK,
+        maxdepth=None,
+        batch_size=None,
+        **kwargs,
+    ) -> None:
+        """Copy files from the local filesystem to S3.
+
+        As fsspec's ``put()``, except that the files are uploaded in parallel
+        with ``put_file()``, as ``copy()`` copies its files.
+
+        Args:
+            lpath: Local source path, glob pattern, or list of them.
+            rpath: S3 destination path, or list of paths when ``lpath`` is a
+                list.
+            recursive: Whether to copy the directories with their contents.
+            callback: Progress callback. Its branches for the files are
+                created and updated in the threads that upload them.
+            maxdepth: Maximum depth of a recursive copy.
+            batch_size: Number of uploads to run at the same time, as in
+                ``copy()``.
+            **kwargs: Additional parameters passed to ``put_file()``.
+
+        Raises:
+            ValueError: If ``batch_size`` is neither positive nor -1.
+        """
+        if isinstance(lpath, list) and isinstance(rpath, list):
+            pairs = list(zip(lpath, rpath, strict=False))
+        else:
+            # As fsspec's put() pairs them.
+            source_is_str = isinstance(lpath, str)
+            if source_is_str:
+                lpath = make_path_posix(lpath)
+            local = LocalFileSystem()
+            lpaths = local.expand_path(lpath, recursive=recursive, maxdepth=maxdepth)
+            if source_is_str and (not recursive or maxdepth is not None):
+                # A string source without recursion does not copy directories.
+                lpaths = [p for p in lpaths if not (trailing_sep(p) or local.isdir(p))]
+                if not lpaths:
+                    return
+            dest_is_dir = isinstance(rpath, str) and (trailing_sep(rpath) or self.isdir(rpath))
+            rpath = (
+                self._strip_protocol(rpath)
+                if isinstance(rpath, str)
+                else [self._strip_protocol(p) for p in rpath]
+            )
+            exists = source_is_str and (
+                (has_magic(lpath) and len(lpaths) == 1)
+                or (not has_magic(lpath) and dest_is_dir and not trailing_sep(lpath))
+            )
+            rpaths = other_paths(lpaths, rpath, exists=exists, flatten=not source_is_str)
+            pairs = list(zip(lpaths, rpaths, strict=True))
+
+        def put_file(lpath: str, rpath: str) -> None:
+            """Upload a file with a branch of the callback.
+
+            Args:
+                lpath: Local source path.
+                rpath: S3 destination path.
+            """
+            with callback.branched(lpath, rpath) as child:
+                self.put_file(lpath, rpath, callback=child, **kwargs)
+
+        callback.set_size(len(pairs))
+        self._run_batch(
+            [functools.partial(put_file, lp, rp) for lp, rp in pairs], batch_size, callback=callback
+        )
 
     def put_file(
         self,
