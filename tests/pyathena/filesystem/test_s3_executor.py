@@ -27,6 +27,7 @@ from tests.pyathena.util import (
     forking,
     overlapping_calls,
     run_in_forked_child,
+    shutdown_bounded,
 )
 
 
@@ -292,9 +293,9 @@ class TestS3AioThreadPool:
         def hold_lock():
             with pool._lock:
                 held.set()
-                release.wait(EVENT_TIMEOUT)
+                release.wait()
 
-        holder = threading.Thread(target=hold_lock)
+        holder = threading.Thread(target=hold_lock, daemon=True)
         holder.start()
         try:
             assert held.wait(EVENT_TIMEOUT)
@@ -496,7 +497,7 @@ class TestS3AioExecutor:
         # of the parent held the lock of the executor. Both used to wait
         # forever for the copy of the loop, which reports running.
         loop = asyncio.new_event_loop()
-        thread = threading.Thread(target=loop.run_forever)
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
         thread.start()
         executor = S3AioExecutor(loop=loop)
         held, release = threading.Event(), threading.Event()
@@ -504,7 +505,7 @@ class TestS3AioExecutor:
         def hold_lock():
             with executor._lock:
                 held.set()
-                release.wait(EVENT_TIMEOUT)
+                release.wait()
 
         def child():
             with pytest.raises(RuntimeError, match="forked child"):
@@ -512,7 +513,7 @@ class TestS3AioExecutor:
             executor.shutdown(wait=True)
             return True
 
-        holder = threading.Thread(target=hold_lock)
+        holder = threading.Thread(target=hold_lock, daemon=True)
         # The executor submits only to a loop that runs.
         running = threading.Event()
         loop.call_soon_threadsafe(running.set)
@@ -526,9 +527,12 @@ class TestS3AioExecutor:
             release.set()
             if holder.ident is not None:
                 holder.join(EVENT_TIMEOUT)
-            executor.shutdown()
+            shutdown_bounded(executor)
             loop.call_soon_threadsafe(loop.stop)
             thread.join(EVENT_TIMEOUT)
+            assert not thread.is_alive()
+            # Runs the dispatch tasks that the stop left pending.
+            loop.run_until_complete(asyncio.sleep(0))
             loop.close()
         assert code == 0
 
