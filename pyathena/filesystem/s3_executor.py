@@ -255,9 +255,10 @@ class S3ThreadPool(S3Executor):
         """Schedule a blocking call in a thread of the pool.
 
         As with ``ThreadPoolExecutor``, the returned future can be cancelled
-        only before the call starts. The calls start in the order they were
-        submitted, so that a call that waits for the calls submitted before it
-        does not wait for a thread that it holds.
+        only before the call starts. The calls are queued in the order they
+        were submitted, so that the calls submitted before a call that waits
+        for them are taken by threads before it, and it does not wait for a
+        thread that it holds.
 
         Args:
             fn: The blocking callable.
