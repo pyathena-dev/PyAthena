@@ -44,6 +44,7 @@ from tests.pyathena.util import (
     ThrottledOperation,
     await_bounded,
     cancel_when_started,
+    forking,
     overlapping_calls,
     retried,
     run_bounded,
@@ -128,8 +129,7 @@ class TestAioS3FileSystem:
                 await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
                 stubber.assert_no_pending_responses()
 
-    @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is not available.")
-    @pytest.mark.filterwarnings("ignore:.*fork\\(\\) may lead to deadlocks:DeprecationWarning")
+    @forking
     def test_open_in_forked_child(self):
         # GH-1336: in a forked child, a filesystem created in the parent
         # raises on open(), as fsspec's synchronous methods do there. It used

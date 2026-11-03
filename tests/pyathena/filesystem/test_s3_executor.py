@@ -8,7 +8,6 @@
 import asyncio
 import contextvars
 import gc
-import os
 import threading
 import time
 import traceback
@@ -25,6 +24,7 @@ from pyathena.util import RetryConfig, retry_api_call, stop_retries_on
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
     ThrottledOperation,
+    forking,
     overlapping_calls,
     run_in_forked_child,
 )
@@ -279,8 +279,7 @@ class TestS3AioThreadPool:
         assert not threads[0].is_alive()
         pool.shutdown()
 
-    @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is not available.")
-    @pytest.mark.filterwarnings("ignore:.*fork\\(\\) may lead to deadlocks:DeprecationWarning")
+    @forking
     def test_fork(self):
         # A forked child, whose copy of the pool has no threads, creates new
         # ones, also if a thread of the parent held the lock of the pool.
@@ -490,16 +489,22 @@ class TestS3AioExecutor:
             loop.run_until_complete(asyncio.sleep(0))
             loop.close()
 
-    @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is not available.")
-    @pytest.mark.filterwarnings("ignore:.*fork\\(\\) may lead to deadlocks:DeprecationWarning")
+    @forking
     def test_fork(self):
         # GH-1336: in a forked child, where the event loop of the parent does
-        # not run, submit() raises and shutdown() returns. Both used to wait
+        # not run, submit() raises and shutdown() returns, also if a thread
+        # of the parent held the lock of the executor. Both used to wait
         # forever for the copy of the loop, which reports running.
         loop = asyncio.new_event_loop()
         thread = threading.Thread(target=loop.run_forever)
         thread.start()
         executor = S3AioExecutor(loop=loop)
+        held, release = threading.Event(), threading.Event()
+
+        def hold_lock():
+            with executor._lock:
+                held.set()
+                release.wait(EVENT_TIMEOUT)
 
         def child():
             with pytest.raises(RuntimeError, match="forked child"):
@@ -507,10 +512,16 @@ class TestS3AioExecutor:
             executor.shutdown(wait=True)
             return True
 
+        holder = threading.Thread(target=hold_lock)
         try:
             assert executor.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT) == 3
+            holder.start()
+            assert held.wait(EVENT_TIMEOUT)
             code = run_in_forked_child(child)
         finally:
+            release.set()
+            if holder.ident is not None:
+                holder.join(EVENT_TIMEOUT)
             executor.shutdown()
             loop.call_soon_threadsafe(loop.stop)
             thread.join(EVENT_TIMEOUT)
@@ -561,8 +572,7 @@ class TestS3AioExecutor:
 
 
 class TestS3ThreadPoolExecutor:
-    @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is not available.")
-    @pytest.mark.filterwarnings("ignore:.*fork\\(\\) may lead to deadlocks:DeprecationWarning")
+    @forking
     def test_fork(self):
         # GH-1336: a forked child, whose copy of the executor has no threads,
         # runs the calls submitted there. After the executor had run a call

@@ -507,6 +507,10 @@ class S3AioExecutor(S3Executor):
             the event loop of the parent does not run.
     """
 
+    # The executors of this process, which a forked child detaches from the
+    # event loop of its parent.
+    _instances: ClassVar[weakref.WeakSet[S3AioExecutor]] = weakref.WeakSet()
+
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop | None = None,
@@ -524,16 +528,16 @@ class S3AioExecutor(S3Executor):
             ValueError: If ``max_workers`` is not positive.
         """
         self._loop = loop
-        self._pid = os.getpid()
         self._pool = S3AioThreadPool(max_workers)
         # Orders the dispatches with the shutdown.
         self._lock = threading.Lock()
         self._shutdown = False
+        self._forked = False
+        S3AioExecutor._instances.add(self)
 
     @override
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
-        if self._pid != os.getpid():
-            # The copy of the loop reports running, but nothing runs it.
+        if self._forked:
             raise RuntimeError("S3AioExecutor cannot be used in a forked child process.")
         if self._loop is not None and self._loop.is_running():
             # The future of run_coroutine_threadsafe can be cancelled while
@@ -578,13 +582,6 @@ class S3AioExecutor(S3Executor):
 
     @override
     def shutdown(self, wait: bool = True) -> None:
-        if self._pid != os.getpid():
-            # In a forked child, no function has been dispatched to the
-            # pool, whose threads and lock have been reset, and the lock of
-            # this executor may be held by a thread of the parent.
-            self._shutdown = True
-            self._pool.shutdown(wait=wait)
-            return
         loop = self._loop
         with self._lock:
             self._shutdown = True
@@ -613,3 +610,21 @@ class S3AioExecutor(S3Executor):
                 if not loop.is_running() or sys.is_finalizing():
                     break
             self._pool.shutdown(wait=True)
+
+    @classmethod
+    def _reset_after_fork(cls) -> None:
+        """Detach the executors that a forked child copied from the event loop of its parent.
+
+        The copy of the loop reports running, but nothing runs it, and a lock
+        that a thread of the parent held stays held. Each executor then
+        raises from :meth:`submit`, and :meth:`shutdown` only shuts down its
+        pool.
+        """
+        for executor in list(cls._instances):
+            executor._loop = None
+            executor._lock = threading.Lock()
+            executor._forked = True
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=S3AioExecutor._reset_after_fork)

@@ -11,6 +11,7 @@ import os
 import signal
 import threading
 import time
+import traceback
 from concurrent.futures import Future, wait
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
@@ -279,11 +280,31 @@ def run_bounded(main, timeout=EVENT_TIMEOUT):
     return outcome.get("result")
 
 
+def forking(test):
+    """Mark a test that forks a child process.
+
+    The test is skipped where ``os.fork()`` is not available, and the warning
+    of Python 3.12 and later about forking a multi-threaded process is
+    ignored.
+
+    Args:
+        test: The test function.
+
+    Returns:
+        The marked test function.
+    """
+    test = pytest.mark.filterwarnings(
+        "ignore:.*fork\\(\\) may lead to deadlocks:DeprecationWarning"
+    )(test)
+    return pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is not available.")(test)
+
+
 def run_in_forked_child(child, timeout=2 * EVENT_TIMEOUT):
     """Run a check in a forked child process, failing if the child does not exit in time.
 
     The child exits with the status 0 if the check returns a true value, and
-    1 otherwise or if it raises, instead of returning to pytest. A child that
+    1 otherwise or if it raises, after printing the traceback, instead of
+    returning to pytest. A child that
     a regression blocks is killed, so that the test fails instead of hanging.
 
     Args:
@@ -299,6 +320,9 @@ def run_in_forked_child(child, timeout=2 * EVENT_TIMEOUT):
         try:
             if child():
                 code = 0
+        except BaseException:
+            # Shown in the captured output of the failed test.
+            traceback.print_exc()
         finally:
             os._exit(code)
     status = (0, 0)

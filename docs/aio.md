@@ -345,9 +345,9 @@ a pool of `max_workers` threads of each file.
 An instance created with `asynchronous=True` has no event loop of its own, so its file handles use `S3ThreadPoolExecutor`.
 
 In a forked child process, the event loop of the parent does not run.
-An `AioS3FileSystem` created in the parent raises `RuntimeError` from `open()` there, as
-fsspec's synchronous methods do, and so does `S3AioExecutor.submit()`; a filesystem
-created in the child works.
+An `AioS3FileSystem` created in the parent without `asynchronous=True` raises
+`RuntimeError` from `open()` there, as fsspec's synchronous methods do, and so does
+`S3AioExecutor.submit()`; a filesystem created in the child works.
 
 ### Async file handles
 
