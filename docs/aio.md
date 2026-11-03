@@ -332,19 +332,19 @@ multipart uploads.
 ### Executor strategy
 
 `S3FileSystem` and `S3File` use a pluggable executor abstraction (`S3Executor`) for
-parallel operations. `S3ThreadPool` runs the calls in a pool of `max_workers` threads,
-in the order they were submitted; in a forked child process, the pool creates new
-threads. `S3ThreadPoolExecutor` and `S3AioThreadPool` are aliases of `S3ThreadPool`.
+parallel operations. `S3ThreadPool` queues the calls in the order they were submitted
+and runs them in a pool of `max_workers` threads; in a forked child process, the pool
+creates new threads. `S3ThreadPoolExecutor` and `S3AioThreadPool` are aliases of `S3ThreadPool`.
 `S3AioExecutor` is kept for compatibility: it is an `S3ThreadPool` that ignores its
 `loop` argument, with a `DeprecationWarning` if one is given.
 
 The file handles of `AioS3FileSystem.open()` run their multipart uploads and parallel
 range reads in a pool of `max_workers` threads of each file, as `S3File` does.
 
-In a forked child process, the event loop of the parent does not run, so fsspec's
-synchronous methods of an `AioS3FileSystem` created in the parent, such as `ls()`, raise
-`RuntimeError` there. Its `open()`, and its coroutines run on an event loop of the child,
-work, and so does a filesystem created in the child.
+In a forked child process, create a new filesystem. A filesystem created in the parent
+keeps the parent's boto3 client, which is not meant to be shared across processes, and
+the event loop of the parent does not run in the child, so fsspec's synchronous methods
+of an `AioS3FileSystem` created in the parent, such as `ls()`, raise `RuntimeError` there.
 
 ### Async file handles
 

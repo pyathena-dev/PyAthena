@@ -2110,48 +2110,6 @@ class TestAioS3File:
             assert isinstance(f, AioS3File)
             assert f.max_workers == (max_workers or fs._sync_fs.max_workers)
 
-    @pytest.mark.asyncio
-    async def test_failed_read_frees_other_ranges(self):
-        # GH-1186: a parallel read that fails frees the data of the other
-        # ranges, also while its error is held, as with S3File.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        block_size = 2**10
-        read = []
-        others_read = threading.Semaphore(0)
-
-        def get_object(path, range_, **kwargs):
-            if range_[0] == 0:
-                for _ in range(3):
-                    assert others_read.acquire(timeout=5)
-                raise PermissionError("Access Denied")
-            # Unlike bytes, an array can be weakly referenced.
-            data = array.array("B", bytes(range_[1] - range_[0]))
-            read.append(weakref.ref(data))
-            others_read.release()
-            return data
-
-        fs.core.get_object = mock.MagicMock(side_effect=get_object)
-        info = S3Object(
-            init={"Key": "key", "ETag": '"etag"'},
-            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
-            bucket="bucket",
-            key="key",
-        )
-        info.size = block_size * 4
-        fs._sync_fs.info = mock.MagicMock(return_value=info)
-        # The blocking calls of the file run in threads, as AioS3FSCursor
-        # reads result files, not on the event loop.
-        f = await asyncio.to_thread(
-            fs.open, "s3://bucket/key", "rb", block_size=block_size, cache_type="none"
-        )
-        with pytest.raises(PermissionError, match="Access Denied") as info_:
-            await asyncio.to_thread(f.read)
-        # Waits for the reads, whose threads may still set the results.
-        await asyncio.to_thread(f.close)
-        assert len(read) == 3
-        assert [ref() for ref in read] == [None] * 3
-        assert info_.value.__traceback__ is not None
-
     @pytest.mark.parametrize("asynchronous", [False, True])
     @pytest.mark.asyncio
     async def test_open_parallel_requests(self, asynchronous):

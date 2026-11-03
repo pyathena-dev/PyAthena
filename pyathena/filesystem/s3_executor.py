@@ -182,8 +182,8 @@ class S3ThreadPool(S3Executor):
     It runs at most ``max_workers`` calls at once in threads of its own, so
     that, unlike ``asyncio.to_thread()``, which runs a call in the default
     executor of the event loop, neither the size nor the load of that
-    executor limits or blocks the calls of asyncio code. The calls start in
-    the order they were submitted. The threads are created as the calls need
+    executor limits or blocks the calls of asyncio code. The calls are
+    queued in the order they were submitted. The threads are created as the calls need
     them, and each call runs with a copy of the caller's context variables,
     as with ``asyncio.to_thread()``. In a forked child process, whose copy
     has no threads, the pool creates new ones, as it does after
