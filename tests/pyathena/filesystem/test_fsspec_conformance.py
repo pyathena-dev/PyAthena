@@ -8,7 +8,6 @@
 """fsspec's conformance tests, run against the S3 filesystems on real S3."""
 
 import contextlib
-import functools
 import posixpath
 import uuid
 
@@ -19,33 +18,6 @@ from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
 from tests import ENV
 from tests.pyathena.conftest import connect
-
-
-def _xfail_missing_ls(test):
-    """Mark an inherited conformance test as failing on GH-1330.
-
-    The test is expected to fail with pytest's ``Failed``, as the
-    ``pytest.raises(FileNotFoundError)`` around ``ls()`` does when nothing is
-    raised, so other errors still fail it. The mark goes on a wrapper, so the
-    test function of fsspec's class stays unmarked.
-
-    Args:
-        test: The test function of fsspec's abstract class.
-
-    Returns:
-        The wrapped test, expected to fail.
-    """
-
-    @functools.wraps(test)
-    def wrapper(*args, **kwargs):
-        return test(*args, **kwargs)
-
-    return pytest.mark.xfail(
-        reason="GH-1330: ls() of a missing key prefix returns [] instead of raising "
-        "FileNotFoundError",
-        raises=pytest.fail.Exception,
-        strict=True,
-    )(wrapper)
 
 
 class S3Fixtures(abstract.AbstractFixtures):
@@ -88,9 +60,7 @@ class AioS3Fixtures(S3Fixtures):
 
 
 class TestS3FileSystemCopy(abstract.AbstractCopyTests, S3Fixtures):
-    test_copy_directory_to_new_directory = _xfail_missing_ls(
-        abstract.AbstractCopyTests.test_copy_directory_to_new_directory
-    )
+    pass
 
 
 class TestS3FileSystemGet(abstract.AbstractGetTests, S3Fixtures):
@@ -98,9 +68,7 @@ class TestS3FileSystemGet(abstract.AbstractGetTests, S3Fixtures):
 
 
 class TestS3FileSystemPut(abstract.AbstractPutTests, S3Fixtures):
-    test_put_directory_to_new_directory = _xfail_missing_ls(
-        abstract.AbstractPutTests.test_put_directory_to_new_directory
-    )
+    pass
 
 
 class TestS3FileSystemPipe(abstract.AbstractPipeTests, S3Fixtures):
@@ -112,9 +80,7 @@ class TestS3FileSystemOpen(abstract.AbstractOpenTests, S3Fixtures):
 
 
 class TestAioS3FileSystemCopy(abstract.AbstractCopyTests, AioS3Fixtures):
-    test_copy_directory_to_new_directory = _xfail_missing_ls(
-        abstract.AbstractCopyTests.test_copy_directory_to_new_directory
-    )
+    pass
 
 
 class TestAioS3FileSystemGet(abstract.AbstractGetTests, AioS3Fixtures):
@@ -122,6 +88,4 @@ class TestAioS3FileSystemGet(abstract.AbstractGetTests, AioS3Fixtures):
 
 
 class TestAioS3FileSystemPut(abstract.AbstractPutTests, AioS3Fixtures):
-    test_put_directory_to_new_directory = _xfail_missing_ls(
-        abstract.AbstractPutTests.test_put_directory_to_new_directory
-    )
+    pass

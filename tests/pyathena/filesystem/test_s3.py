@@ -237,7 +237,13 @@ class TestS3FileSystem:
             pytest.param(
                 False, lambda fs: fs.exists("s3://bucket/d/key", refresh=True), id="exists"
             ),
-            pytest.param(False, lambda fs: fs.ls("s3://bucket/d/key", refresh=True), id="ls"),
+            pytest.param(
+                False,
+                lambda fs: pytest.raises(
+                    FileNotFoundError, fs.ls, "s3://bucket/d/key", refresh=True
+                ),
+                id="ls",
+            ),
             # The listed entry has no version, so it is looked up again.
             pytest.param(True, lambda fs: fs.isfile("s3://bucket/d/key"), id="version_aware"),
         ],
@@ -665,12 +671,23 @@ class TestS3FileSystem:
 
         self._serve_keys(fs, ())
 
-        assert fs.ls("s3://bucket/dir", refresh=True) == []
+        with pytest.raises(FileNotFoundError):
+            fs.ls("s3://bucket/dir", refresh=True)
         # The next listing is requested again instead of returning the
         # deleted object from the cache.
         fs._call.reset_mock()
-        assert fs.ls("s3://bucket/dir") == []
+        with pytest.raises(FileNotFoundError):
+            fs.ls("s3://bucket/dir")
         assert fs._call.call_args_list[0].args[0] is fs._client.list_objects_v2
+
+    @pytest.mark.parametrize("path", ["s3://bucket", "s3://bucket/?versionId=v1"])
+    def test_ls_empty_bucket(self, path):
+        # An existing bucket without objects is listed as empty, unlike a key
+        # path that matches nothing.
+        fs = self._make_fs()
+        self._serve_keys(fs, ())
+
+        assert fs.ls(path) == []
 
     def test_find_withdirs_does_not_modify_cached_listing(self):
         fs = self._make_fs()
@@ -900,9 +917,11 @@ class TestS3FileSystem:
 
         fs._call.side_effect = call
 
-        assert fs.ls("s3://bucket/key", refresh=True) == []
+        with pytest.raises(FileNotFoundError):
+            fs.ls("s3://bucket/key", refresh=True)
         # The next lookups must not return the deleted object and bucket from the cache.
-        assert fs.ls("s3://bucket/key") == []
+        with pytest.raises(FileNotFoundError):
+            fs.ls("s3://bucket/key")
         assert not fs.exists("s3://bucket/key")
         with pytest.raises(FileNotFoundError):
             fs.info("s3://bucket", refresh=True)
@@ -4113,6 +4132,14 @@ class TestS3FileSystem:
         assert actual[2].size == 2
         assert fs.ls("s3://bucket/path", versions=True) == [f.name for f in actual]
 
+    def test_ls_versions_missing_path(self):
+        fs = self._make_fs()
+        fs.version_aware = True
+        fs._call.return_value = {"IsTruncated": False}
+
+        with pytest.raises(FileNotFoundError):
+            fs.ls("s3://bucket/path/missing", versions=True)
+
     def test_ls_versions_object_path_falls_back_to_the_key(self):
         fs = self._make_fs()
         fs.version_aware = True
@@ -4855,7 +4882,9 @@ class TestS3FileSystem:
 
         assert len(fs.ls(f"{dir_}/prefix")) == 5
         assert len(fs.ls(f"{dir_}/prefix/")) == 5
-        assert len(fs.ls(f"{dir_}/prefix/test_")) == 0
+        # The start of an object's key is neither an object nor a directory.
+        with pytest.raises(FileNotFoundError):
+            fs.ls(f"{dir_}/prefix/test_")
         assert len(fs.ls(f"{dir_}/prefix2")) == 1
 
         test_1 = fs.ls(f"{dir_}/prefix/test_1")
