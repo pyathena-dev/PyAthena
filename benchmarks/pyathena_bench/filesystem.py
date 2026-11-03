@@ -135,10 +135,10 @@ async def transfer(
     The synchronous filesystem and s3fs run on the calling thread; s3fs waits
     for each operation, a coroutine on fsspec's IO loop. As ``AioS3FSCursor``
     reads result files, the asyncio filesystem's file and local-file transfers
-    run in ``asyncio.to_thread()``: its files dispatch their range requests
-    and part uploads through ``S3AioExecutor`` to the filesystem's event loop,
-    and its ``get_file()`` and ``put_file()`` run the synchronous filesystem's
-    in the filesystem's thread pool. Its copy is a coroutine awaited on the
+    run in ``asyncio.to_thread()``: its files run their range requests and
+    part uploads in a pool of ``max_workers`` threads of the file, and its
+    ``get_file()`` and ``put_file()`` run the synchronous filesystem's in the
+    filesystem's thread pool. Its copy is a coroutine awaited on the
     trial's event loop.
 
     Args:

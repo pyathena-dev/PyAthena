@@ -282,14 +282,14 @@ its coroutines run the blocking boto3 calls in threads that PyAthena owns, sized
 |---|---|---|
 | **Blocking calls** | Caller's thread | Thread pool of the filesystem |
 | **Parallelism** | `ThreadPoolExecutor` | `asyncio.gather` on a thread pool |
-| **File handles** | `S3File` with thread pool | `AioS3File` with `S3AioExecutor`; `AioS3StreamedFile` from `open_async()` |
+| **File handles** | `S3File` with thread pool | `AioS3File` with thread pool; `AioS3StreamedFile` from `open_async()` |
 | **Bulk delete** | Thread pool per batch | `asyncio.gather` per batch |
 | **Multipart copy** | Thread pool per copy | Thread pool of the filesystem |
 | **Best for** | Synchronous applications | Async frameworks (FastAPI, aiohttp, etc.) |
 
 ### Threads
 
-The threads of `AioS3FileSystem` belong to `S3AioThreadPool` instances, not to the
+The threads of `AioS3FileSystem` belong to `S3ThreadPool` instances, not to the
 default executor of the event loop, so `loop.set_default_executor()` neither limits nor
 blocks them:
 
@@ -332,22 +332,20 @@ multipart uploads.
 ### Executor strategy
 
 `S3FileSystem` and `S3File` use a pluggable executor abstraction (`S3Executor`) for
-parallel operations. Two implementations are provided:
+parallel operations. `S3ThreadPool` runs the calls in a pool of `max_workers` threads,
+in the order they were submitted; in a forked child process, the pool creates new
+threads. `S3ThreadPoolExecutor` and `S3AioThreadPool` are aliases of `S3ThreadPool`.
+`S3AioExecutor` is kept for compatibility: it is an `S3ThreadPool` that ignores its
+`loop` argument, with a `DeprecationWarning` if one is given.
 
-- `S3ThreadPoolExecutor` — runs the calls in a pool of `max_workers` threads (default
-  for sync usage); in a forked child process, the pool creates new threads
-- `S3AioExecutor` — dispatches work via `asyncio.run_coroutine_threadsafe` to an
-  `S3AioThreadPool` of its own
+The file handles of `AioS3FileSystem.open()` run their multipart uploads and parallel
+range reads in a pool of `max_workers` threads of each file, as `S3File` does, without
+the event loop.
 
-`AioS3FileSystem` automatically uses `S3AioExecutor` for the file handles of `open()`,
-so multipart uploads and parallel range reads are dispatched through the event loop to
-a pool of `max_workers` threads of each file.
-An instance created with `asynchronous=True` has no event loop of its own, so its file handles use `S3ThreadPoolExecutor`.
-
-In a forked child process, the event loop of the parent does not run.
-An `AioS3FileSystem` created in the parent without `asynchronous=True` raises
-`RuntimeError` from `open()` there, as fsspec's synchronous methods do, and so does
-`S3AioExecutor.submit()`; a filesystem created in the child works.
+In a forked child process, the event loop of the parent does not run. The coroutines of
+an `AioS3FileSystem` created in the parent, and fsspec's synchronous methods that run
+them, raise `RuntimeError` there, while its `open()` works. A filesystem created in the
+child works.
 
 ### Async file handles
 

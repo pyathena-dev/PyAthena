@@ -49,13 +49,14 @@ S3 Executor
 .. autoclass:: pyathena.filesystem.s3_executor.S3Executor
    :members:
 
-.. autoclass:: pyathena.filesystem.s3_executor.S3ThreadPoolExecutor
+.. autoclass:: pyathena.filesystem.s3_executor.S3ThreadPool
    :members:
+
+.. autodata:: pyathena.filesystem.s3_executor.S3ThreadPoolExecutor
+
+.. autodata:: pyathena.filesystem.s3_executor.S3AioThreadPool
 
 .. autoclass:: pyathena.filesystem.s3_executor.S3AioExecutor
-   :members:
-
-.. autoclass:: pyathena.filesystem.s3_executor.S3AioThreadPool
    :members:
 
 S3 Paths

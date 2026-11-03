@@ -39,7 +39,7 @@ from pyathena.filesystem.s3_core import (
     S3MultipartCopyPlan,
     S3ObjectSummary,
 )
-from pyathena.filesystem.s3_executor import S3ThreadPoolExecutor
+from pyathena.filesystem.s3_executor import S3ThreadPool
 from pyathena.filesystem.s3_object import S3Metadata, S3MultipartUpload, S3MultipartUploadPart
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.util import RetryConfig, stop_retries_on
@@ -201,7 +201,7 @@ class TestS3Core:
         future: Future[dict[str, Any]] = Future()
         gc.disable()
         try:
-            with S3ThreadPoolExecutor(max_workers=1) as executor:
+            with S3ThreadPool(max_workers=1) as executor:
                 executor.submit_to(future, core.call, send, Body=body)
                 del body
             assert isinstance(future.exception(), PermissionError)

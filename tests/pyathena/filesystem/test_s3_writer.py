@@ -18,7 +18,7 @@ import pytest
 from botocore.stub import Stubber
 
 from pyathena.filesystem.s3_core import S3Core
-from pyathena.filesystem.s3_executor import S3ThreadPoolExecutor
+from pyathena.filesystem.s3_executor import S3ThreadPool
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3MultipartUpload,
@@ -231,8 +231,8 @@ class TestS3MultipartWriter:
             writer.abort()
 
 
-class _DroppingExecutor(S3ThreadPoolExecutor):
-    """Drops requests unrun, as S3AioExecutor does when its event loop shuts down."""
+class _DroppingExecutor(S3ThreadPool):
+    """Drops requests unrun, as an executor that cancels its queued calls at shutdown does."""
 
     def __init__(self, drop) -> None:
         super().__init__(max_workers=1)
@@ -316,7 +316,7 @@ class TestS3WriteSession:
         error_ref = weakref.ref(error)
         gc.disable()
         try:
-            with S3ThreadPoolExecutor(max_workers=1) as executor:
+            with S3ThreadPool(max_workers=1) as executor:
                 session, requests = _make_session(executor, part_errors={1: error})
                 del error
                 _start(session)
@@ -348,9 +348,9 @@ class TestS3WriteSession:
 
     @pytest.mark.parametrize("dropped", ["creation", "part"])
     def test_dropped_request_fails_the_write(self, dropped):
-        # A request that the executor drops without running it, as
-        # S3AioExecutor does when its event loop shuts down, fails the write,
-        # so that the upload is never completed without it.
+        # A request that the executor drops without running it, as an
+        # executor that cancels its queued calls at shutdown does, fails the
+        # write, so that the upload is never completed without it.
         executor = _DroppingExecutor(
             lambda kwargs: dropped == "creation" or "part_number" in kwargs
         )
@@ -382,7 +382,7 @@ class TestS3WriteSession:
             deferred.append(future)
             called.release()
 
-        with S3ThreadPoolExecutor(max_workers=2) as executor:
+        with S3ThreadPool(max_workers=2) as executor:
             session, requests = _make_session(
                 executor,
                 max_workers=2 if operation == "abort" else 1,
@@ -444,7 +444,7 @@ class TestS3WriteSession:
         # whether the notification or a later ready() drops it, so that
         # concurrent.futures.wait() returns for it.
         gate = threading.Event()
-        with S3ThreadPoolExecutor(max_workers=1) as executor:
+        with S3ThreadPool(max_workers=1) as executor:
             session, requests = _make_session(executor, gate=gate)
             _start(session)
             session.submit_part(1, b"abcd")
