@@ -339,8 +339,7 @@ threads. `S3ThreadPoolExecutor` and `S3AioThreadPool` are aliases of `S3ThreadPo
 `loop` argument, with a `DeprecationWarning` if one is given.
 
 The file handles of `AioS3FileSystem.open()` run their multipart uploads and parallel
-range reads in a pool of `max_workers` threads of each file, as `S3File` does, without
-the event loop.
+range reads in a pool of `max_workers` threads of each file, as `S3File` does.
 
 In a forked child process, the event loop of the parent does not run, so fsspec's
 synchronous methods of an `AioS3FileSystem` created in the parent, such as `ls()`, raise

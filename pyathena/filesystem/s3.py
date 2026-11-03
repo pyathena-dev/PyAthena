@@ -1099,16 +1099,17 @@ class S3FileSystem(AbstractFileSystem):
         )
 
     def _create_executor(self, max_workers: int) -> S3Executor:
-        """Create an executor strategy for parallel operations.
+        """Create the executor of the parallel requests of a file or an operation.
 
-        Subclasses can override to provide alternative execution strategies
-        (e.g., asyncio-based execution).
+        The files of ``S3FileSystem`` and ``AioS3FileSystem`` and the
+        parallel operations of ``S3FileSystem`` take their executors from
+        this method.
 
         Args:
             max_workers: Maximum number of parallel workers.
 
         Returns:
-            An S3Executor instance.
+            A new ``S3ThreadPool``.
         """
         return S3ThreadPool(max_workers=max_workers)
 
