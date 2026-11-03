@@ -513,7 +513,11 @@ class TestS3AioExecutor:
             return True
 
         holder = threading.Thread(target=hold_lock)
+        # The executor submits only to a loop that runs.
+        running = threading.Event()
+        loop.call_soon_threadsafe(running.set)
         try:
+            assert running.wait(EVENT_TIMEOUT)
             assert executor.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT) == 3
             holder.start()
             assert held.wait(EVENT_TIMEOUT)
