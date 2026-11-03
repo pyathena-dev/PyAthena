@@ -848,10 +848,15 @@ class AioS3FileSystem(AsyncFileSystem):
         Returns:
             An ``S3AioExecutor`` on the event loop of this filesystem, or an
             ``S3ThreadPoolExecutor`` if it has none.
+
+        Raises:
+            RuntimeError: If called in a forked child process of the process
+                that created this instance, whose event loop does not run
+                there.
         """
         if self._loop is None:
             return S3ThreadPoolExecutor(max_workers=max_workers)
-        return S3AioExecutor(loop=self._loop, max_workers=max_workers)
+        return S3AioExecutor(loop=self.loop, max_workers=max_workers)
 
     def _open(
         self,

@@ -178,28 +178,32 @@ class S3Executor(metaclass=ABCMeta):
 
 
 class S3ThreadPoolExecutor(S3Executor):
-    """Executor that delegates to a ``ThreadPoolExecutor``.
+    """Executor that runs the submitted calls in a pool of threads.
 
     This is the default executor used by ``S3File`` and ``S3FileSystem``
-    for synchronous parallel operations.
+    for synchronous parallel operations. The calls run in an
+    :class:`S3AioThreadPool`, so that a forked child process, whose copy of
+    the executor has no threads, creates new ones.
     """
 
     def __init__(self, max_workers: int) -> None:
-        """Initialize the executor with a new ``ThreadPoolExecutor``.
+        """Initialize the executor without starting any thread.
 
         Args:
             max_workers: The maximum number of threads of the thread pool.
+
+        Raises:
+            ValueError: If ``max_workers`` is not positive.
         """
-        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._pool = S3AioThreadPool(max_workers)
 
     @override
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
-        context = contextvars.copy_context()
-        return self._executor.submit(context.run, fn, *args, **kwargs)
+        return self._pool.submit(fn, *args, **kwargs)
 
     @override
     def shutdown(self, wait: bool = True) -> None:
-        self._executor.shutdown(wait=wait)
+        self._pool.shutdown(wait=wait)
 
 
 class S3AioThreadPool(S3Executor):
@@ -498,7 +502,9 @@ class S3AioExecutor(S3Executor):
         max_workers: The maximum number of submitted functions that run at once.
 
     Raises:
-        RuntimeError: If the event loop is not running when ``submit`` is called.
+        RuntimeError: If the event loop is not running when ``submit`` is
+            called, or ``submit`` is called in a forked child process, where
+            the event loop of the parent does not run.
     """
 
     def __init__(
@@ -518,6 +524,7 @@ class S3AioExecutor(S3Executor):
             ValueError: If ``max_workers`` is not positive.
         """
         self._loop = loop
+        self._pid = os.getpid()
         self._pool = S3AioThreadPool(max_workers)
         # Orders the dispatches with the shutdown.
         self._lock = threading.Lock()
@@ -525,6 +532,9 @@ class S3AioExecutor(S3Executor):
 
     @override
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
+        if self._pid != os.getpid():
+            # The copy of the loop reports running, but nothing runs it.
+            raise RuntimeError("S3AioExecutor cannot be used in a forked child process.")
         if self._loop is not None and self._loop.is_running():
             # The future of run_coroutine_threadsafe can be cancelled while
             # the function keeps running in its thread, so the returned future
@@ -568,6 +578,13 @@ class S3AioExecutor(S3Executor):
 
     @override
     def shutdown(self, wait: bool = True) -> None:
+        if self._pid != os.getpid():
+            # In a forked child, no function has been dispatched to the
+            # pool, whose threads and lock have been reset, and the lock of
+            # this executor may be held by a thread of the parent.
+            self._shutdown = True
+            self._pool.shutdown(wait=wait)
+            return
         loop = self._loop
         with self._lock:
             self._shutdown = True

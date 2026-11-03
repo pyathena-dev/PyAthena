@@ -47,6 +47,7 @@ from tests.pyathena.util import (
     overlapping_calls,
     retried,
     run_bounded,
+    run_in_forked_child,
     shutdown_bounded,
     stub_multipart_copy,
     wait_until,
@@ -126,6 +127,24 @@ class TestAioS3FileSystem:
                 release()
                 await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
                 stubber.assert_no_pending_responses()
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is not available.")
+    @pytest.mark.filterwarnings("ignore:.*fork\\(\\) may lead to deadlocks:DeprecationWarning")
+    def test_open_in_forked_child(self):
+        # GH-1336: in a forked child, a filesystem created in the parent
+        # raises on open(), as fsspec's synchronous methods do there. It used
+        # to return a file whose reads waited forever for the event loop of
+        # the parent.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+
+        def child():
+            with pytest.raises(RuntimeError, match="not fork-safe"):
+                fs.open("s3://bucket/key", "rb")
+            return True
+
+        assert run_in_forked_child(child) == 0
 
     @pytest.mark.parametrize("size", [0, 10])
     @pytest.mark.asyncio

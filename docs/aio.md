@@ -334,7 +334,8 @@ multipart uploads.
 `S3FileSystem` and `S3File` use a pluggable executor abstraction (`S3Executor`) for
 parallel operations. Two implementations are provided:
 
-- `S3ThreadPoolExecutor` — wraps `ThreadPoolExecutor` (default for sync usage)
+- `S3ThreadPoolExecutor` — runs the calls in a pool of `max_workers` threads (default
+  for sync usage); in a forked child process, the pool creates new threads
 - `S3AioExecutor` — dispatches work via `asyncio.run_coroutine_threadsafe` to an
   `S3AioThreadPool` of its own
 
@@ -342,6 +343,11 @@ parallel operations. Two implementations are provided:
 so multipart uploads and parallel range reads are dispatched through the event loop to
 a pool of `max_workers` threads of each file.
 An instance created with `asynchronous=True` has no event loop of its own, so its file handles use `S3ThreadPoolExecutor`.
+
+In a forked child process, the event loop of the parent does not run.
+An `AioS3FileSystem` created in the parent raises `RuntimeError` from `open()` there, as
+fsspec's synchronous methods do, and so does `S3AioExecutor.submit()`; a filesystem
+created in the child works.
 
 ### Async file handles
 

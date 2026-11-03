@@ -7,6 +7,8 @@
 
 import asyncio
 import io
+import os
+import signal
 import threading
 import time
 from concurrent.futures import Future, wait
@@ -275,6 +277,41 @@ def run_bounded(main, timeout=EVENT_TIMEOUT):
     if "error" in outcome:
         raise outcome["error"]
     return outcome.get("result")
+
+
+def run_in_forked_child(child, timeout=2 * EVENT_TIMEOUT):
+    """Run a check in a forked child process, failing if the child does not exit in time.
+
+    The child exits with the status 0 if the check returns a true value, and
+    1 otherwise or if it raises, instead of returning to pytest. A child that
+    a regression blocks is killed, so that the test fails instead of hanging.
+
+    Args:
+        child: The check, called without arguments in the child.
+        timeout: The longest run of the child, in seconds.
+
+    Returns:
+        The exit code of the child.
+    """
+    pid = os.fork()
+    if pid == 0:
+        code = 1
+        try:
+            if child():
+                code = 0
+        finally:
+            os._exit(code)
+    status = (0, 0)
+    try:
+        deadline = time.monotonic() + timeout
+        while (status := os.waitpid(pid, os.WNOHANG)) == (0, 0):
+            assert time.monotonic() < deadline, f"the child did not exit within {timeout} s"
+            time.sleep(0.05)
+    finally:
+        if status == (0, 0):
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+    return os.waitstatus_to_exitcode(status[1])
 
 
 def shutdown_bounded(pool, timeout=EVENT_TIMEOUT):
