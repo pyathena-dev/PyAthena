@@ -178,28 +178,32 @@ class S3Executor(metaclass=ABCMeta):
 
 
 class S3ThreadPoolExecutor(S3Executor):
-    """Executor that delegates to a ``ThreadPoolExecutor``.
+    """Executor that runs the submitted calls in a pool of threads.
 
     This is the default executor used by ``S3File`` and ``S3FileSystem``
-    for synchronous parallel operations.
+    for synchronous parallel operations. The calls run in an
+    :class:`S3AioThreadPool`, so that a forked child process, whose copy of
+    the executor has no threads, creates new ones.
     """
 
     def __init__(self, max_workers: int) -> None:
-        """Initialize the executor with a new ``ThreadPoolExecutor``.
+        """Initialize the executor without starting any thread.
 
         Args:
             max_workers: The maximum number of threads of the thread pool.
+
+        Raises:
+            ValueError: If ``max_workers`` is not positive.
         """
-        self._executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._pool = S3AioThreadPool(max_workers)
 
     @override
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
-        context = contextvars.copy_context()
-        return self._executor.submit(context.run, fn, *args, **kwargs)
+        return self._pool.submit(fn, *args, **kwargs)
 
     @override
     def shutdown(self, wait: bool = True) -> None:
-        self._executor.shutdown(wait=wait)
+        self._pool.shutdown(wait=wait)
 
 
 class S3AioThreadPool(S3Executor):
@@ -498,8 +502,14 @@ class S3AioExecutor(S3Executor):
         max_workers: The maximum number of submitted functions that run at once.
 
     Raises:
-        RuntimeError: If the event loop is not running when ``submit`` is called.
+        RuntimeError: If the event loop is not running when ``submit`` is
+            called, or ``submit`` is called in a forked child process, where
+            the event loop of the parent does not run.
     """
+
+    # The executors of this process, which a forked child detaches from the
+    # event loop of its parent.
+    _instances: ClassVar[weakref.WeakSet[S3AioExecutor]] = weakref.WeakSet()
 
     def __init__(
         self,
@@ -522,9 +532,13 @@ class S3AioExecutor(S3Executor):
         # Orders the dispatches with the shutdown.
         self._lock = threading.Lock()
         self._shutdown = False
+        self._forked = False
+        S3AioExecutor._instances.add(self)
 
     @override
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
+        if self._forked:
+            raise RuntimeError("S3AioExecutor cannot be used in a forked child process.")
         if self._loop is not None and self._loop.is_running():
             # The future of run_coroutine_threadsafe can be cancelled while
             # the function keeps running in its thread, so the returned future
@@ -596,3 +610,21 @@ class S3AioExecutor(S3Executor):
                 if not loop.is_running() or sys.is_finalizing():
                     break
             self._pool.shutdown(wait=True)
+
+    @classmethod
+    def _reset_after_fork(cls) -> None:
+        """Detach the executors that a forked child copied from the event loop of its parent.
+
+        The copy of the loop reports running, but nothing runs it, and a lock
+        that a thread of the parent held stays held. Each executor then
+        raises from :meth:`submit`, and :meth:`shutdown` only shuts down its
+        pool.
+        """
+        for executor in list(cls._instances):
+            executor._loop = None
+            executor._lock = threading.Lock()
+            executor._forked = True
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=S3AioExecutor._reset_after_fork)

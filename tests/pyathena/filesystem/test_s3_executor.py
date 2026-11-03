@@ -8,8 +8,6 @@
 import asyncio
 import contextvars
 import gc
-import os
-import signal
 import threading
 import time
 import traceback
@@ -23,7 +21,14 @@ from botocore.exceptions import ClientError
 
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3AioThreadPool, S3ThreadPoolExecutor
 from pyathena.util import RetryConfig, retry_api_call, stop_retries_on
-from tests.pyathena.util import EVENT_TIMEOUT, ThrottledOperation, overlapping_calls
+from tests.pyathena.util import (
+    EVENT_TIMEOUT,
+    ThrottledOperation,
+    forking,
+    overlapping_calls,
+    run_in_forked_child,
+    shutdown_bounded,
+)
 
 
 class TestS3AioThreadPool:
@@ -275,8 +280,7 @@ class TestS3AioThreadPool:
         assert not threads[0].is_alive()
         pool.shutdown()
 
-    @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork() is not available.")
-    @pytest.mark.filterwarnings("ignore:.*fork\\(\\) may lead to deadlocks:DeprecationWarning")
+    @forking
     def test_fork(self):
         # A forked child, whose copy of the pool has no threads, creates new
         # ones, also if a thread of the parent held the lock of the pool.
@@ -289,38 +293,22 @@ class TestS3AioThreadPool:
         def hold_lock():
             with pool._lock:
                 held.set()
-                release.wait(EVENT_TIMEOUT)
+                release.wait()
 
-        holder = threading.Thread(target=hold_lock)
+        holder = threading.Thread(target=hold_lock, daemon=True)
         holder.start()
         try:
             assert held.wait(EVENT_TIMEOUT)
-            pid = os.fork()
-        finally:
-            release.set()
-        if pid == 0:
-            # The child exits here, whatever happens, instead of running pytest.
-            code = 1
-            try:
-                if pool.submit(sum, [3, 4]).result(timeout=EVENT_TIMEOUT) == 7:
-                    code = 0
-            finally:
-                os._exit(code)
-        status = (0, 0)
-        try:
             # A child whose pool waits for the threads of the parent would
             # not exit.
-            deadline = time.monotonic() + 2 * EVENT_TIMEOUT
-            while (status := os.waitpid(pid, os.WNOHANG)) == (0, 0):
-                assert time.monotonic() < deadline, "the child did not exit"
-                time.sleep(0.05)
+            code = run_in_forked_child(
+                lambda: pool.submit(sum, [3, 4]).result(timeout=EVENT_TIMEOUT) == 7
+            )
         finally:
-            if status == (0, 0):
-                os.kill(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
+            release.set()
             holder.join(EVENT_TIMEOUT)
             pool.shutdown()
-        assert os.waitstatus_to_exitcode(status[1]) == 0
+        assert code == 0
 
 
 class TestS3AioExecutor:
@@ -502,6 +490,52 @@ class TestS3AioExecutor:
             loop.run_until_complete(asyncio.sleep(0))
             loop.close()
 
+    @forking
+    def test_fork(self):
+        # GH-1336: in a forked child, where the event loop of the parent does
+        # not run, submit() raises and shutdown() returns, also if a thread
+        # of the parent held the lock of the executor. Both used to wait
+        # forever for the copy of the loop, which reports running.
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        executor = S3AioExecutor(loop=loop)
+        held, release = threading.Event(), threading.Event()
+
+        def hold_lock():
+            with executor._lock:
+                held.set()
+                release.wait()
+
+        def child():
+            with pytest.raises(RuntimeError, match="forked child"):
+                executor.submit(sum, [3, 4])
+            executor.shutdown(wait=True)
+            return True
+
+        holder = threading.Thread(target=hold_lock, daemon=True)
+        # The executor submits only to a loop that runs.
+        running = threading.Event()
+        loop.call_soon_threadsafe(running.set)
+        try:
+            assert running.wait(EVENT_TIMEOUT)
+            assert executor.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT) == 3
+            holder.start()
+            assert held.wait(EVENT_TIMEOUT)
+            code = run_in_forked_child(child)
+        finally:
+            release.set()
+            if holder.ident is not None:
+                holder.join(EVENT_TIMEOUT)
+            shutdown_bounded(executor)
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(EVENT_TIMEOUT)
+            assert not thread.is_alive()
+            # Runs the dispatch tasks that the stop left pending.
+            loop.run_until_complete(asyncio.sleep(0))
+            loop.close()
+        assert code == 0
+
     def test_submit_without_running_loop(self):
         with pytest.raises(RuntimeError, match="requires a running event loop"):
             S3AioExecutor().submit(sum, [1, 2])
@@ -543,6 +577,23 @@ class TestS3AioExecutor:
         assert running.done()
         assert not running.cancelled()
         assert pending.cancelled()
+
+
+class TestS3ThreadPoolExecutor:
+    @forking
+    def test_fork(self):
+        # GH-1336: a forked child, whose copy of the executor has no threads,
+        # runs the calls submitted there. After the executor had run a call
+        # in the parent, they used to wait forever.
+        executor = S3ThreadPoolExecutor(max_workers=1)
+        try:
+            assert executor.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT) == 3
+            code = run_in_forked_child(
+                lambda: executor.submit(sum, [3, 4]).result(timeout=EVENT_TIMEOUT) == 7
+            )
+        finally:
+            executor.shutdown()
+        assert code == 0
 
 
 class TestS3Executor:
