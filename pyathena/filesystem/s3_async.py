@@ -32,7 +32,7 @@ from fsspec.utils import check_contained
 from pyathena.aio.util import create_in_thread
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem, S3FileTarget
 from pyathena.filesystem.s3_core import S3Core
-from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool
+from pyathena.filesystem.s3_executor import S3ThreadPool
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3Metadata,
@@ -829,20 +829,6 @@ class AioS3FileSystem(AsyncFileSystem):
             raise FileNotFoundError(path)
         return sorted(out)
 
-    def _create_executor(self, max_workers: int) -> S3Executor:
-        """Create the executor for the parallel operations of a file.
-
-        The operations run in threads, as those of ``S3File`` do, without the
-        event loop.
-
-        Args:
-            max_workers: The maximum number of operations that run at once.
-
-        Returns:
-            The executor of the wrapped ``S3FileSystem``.
-        """
-        return self._sync_fs._create_executor(max_workers=max_workers)
-
     def _open(
         self,
         path: str,
@@ -873,7 +859,7 @@ class AioS3FileSystem(AsyncFileSystem):
             path,
             mode,
             max_workers=max_workers,
-            executor=self._create_executor(max_workers=max_workers),
+            executor=self._sync_fs._create_executor(max_workers=max_workers),
             block_size=block_size,
             cache_type=cache_type,
             autocommit=autocommit,

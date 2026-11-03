@@ -151,13 +151,15 @@ class TestAioS3FileSystem:
         fs._sync_fs.info = mock.MagicMock(return_value=info)
 
         def read():
+            calls = fs.core.get_object.call_count
             with fs.open("s3://bucket/key", "rb", block_size=block_size, cache_type="none") as f:
-                return f.read() == bytes(size)
+                data = f.read()
+            # The ranges of the read, each a request of its own.
+            return data == bytes(size) and fs.core.get_object.call_count - calls > 1
 
         # Read in the parent too, whose file threads the child does not have.
         assert read()
         assert run_in_forked_child(read) == 0
-        assert fs.core.get_object.call_count > 1
 
     @pytest.mark.parametrize("size", [0, 10])
     @pytest.mark.asyncio

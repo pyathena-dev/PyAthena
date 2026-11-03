@@ -342,10 +342,10 @@ The file handles of `AioS3FileSystem.open()` run their multipart uploads and par
 range reads in a pool of `max_workers` threads of each file, as `S3File` does, without
 the event loop.
 
-In a forked child process, the event loop of the parent does not run. The coroutines of
-an `AioS3FileSystem` created in the parent, and fsspec's synchronous methods that run
-them, raise `RuntimeError` there, while its `open()` works. A filesystem created in the
-child works.
+In a forked child process, the event loop of the parent does not run, so fsspec's
+synchronous methods of an `AioS3FileSystem` created in the parent, such as `ls()`, raise
+`RuntimeError` there. Its `open()`, and its coroutines run on an event loop of the child,
+work, and so does a filesystem created in the child.
 
 ### Async file handles
 

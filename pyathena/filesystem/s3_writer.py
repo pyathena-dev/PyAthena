@@ -969,8 +969,8 @@ class _S3WriteSession:
             return
         if self._state is _S3WriteState.CREATING:
             if creation.cancelled():
-                # Such as by an executor that cancels its queued calls as it
-                # shuts down.
+                # Such as by an executor passed to the file that cancels its
+                # queued calls as it shuts down.
                 self._fail(CancelledError("The creation of the multipart upload was cancelled."))
             elif (error := creation.exception()) is not None:
                 self._fail(error)
@@ -993,8 +993,9 @@ class _S3WriteSession:
         if request not in self._requests:
             return
         if request.cancelled():
-            # Not by abort(), but such as by an executor that cancels its
-            # queued calls as it shuts down, the upload lacks the part.
+            # Not by abort(), but such as by an executor passed to the file
+            # that cancels its queued calls as it shuts down, the upload
+            # lacks the part.
             error: BaseException | None = CancelledError(
                 "A part request was cancelled before it ran."
             )

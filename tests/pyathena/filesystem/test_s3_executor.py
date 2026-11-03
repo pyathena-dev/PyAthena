@@ -20,7 +20,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPool
-from pyathena.util import RetryConfig, retry_api_call, stop_retries_on
+from pyathena.util import RetryConfig, override, retry_api_call, stop_retries_on
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
     ThrottledOperation,
@@ -331,11 +331,13 @@ class _DeferringExecutor(S3Executor):
     def __init__(self) -> None:
         self.submitted: list[Future[Any]] = []
 
+    @override
     def submit(self, fn, *args, **kwargs):
         future: Future[Any] = Future()
         self.submitted.append(future)
         return future
 
+    @override
     def shutdown(self, wait=True):
         pass
 

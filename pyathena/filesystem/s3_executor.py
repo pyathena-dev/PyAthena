@@ -190,7 +190,7 @@ class S3ThreadPool(S3Executor):
     :meth:`release`. The pool can be shared by several threads and event
     loops.
 
-    ``S3ThreadPoolExecutor`` and ``S3ThreadPool`` are aliases of this
+    ``S3ThreadPoolExecutor`` and ``S3AioThreadPool`` are aliases of this
     class.
 
     Args:
