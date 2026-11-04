@@ -413,26 +413,14 @@ class TestS3PoolScope:
         assert events == []
 
     def test_interrupted_submit(self):
-        # GH-1332: an interrupt before a call reaches the pool cancels the
-        # call and gives its place to the next one, so that the scope neither
-        # stops running calls nor waits for the interrupted one.
+        # GH-1332: an interrupt before the pool takes a call cancels the call,
+        # so that the shutdown of the scope does not wait for it, and the
+        # scope runs the next calls.
         pool = S3ThreadPool(1)
         scope = _S3PoolScope(pool, 1)
-        add_done_callback = Future.add_done_callback
-        interrupts = [KeyboardInterrupt]
-
-        def interrupt_once(future, fn):
-            # The first callback is the scope's, added after it reserved a
-            # place for the call.
-            if interrupts:
-                raise interrupts.pop()
-            add_done_callback(future, fn)
-
         try:
             with (
-                mock.patch.object(
-                    Future, "add_done_callback", autospec=True, side_effect=interrupt_once
-                ),
+                mock.patch.object(pool, "submit", side_effect=KeyboardInterrupt),
                 pytest.raises(KeyboardInterrupt),
             ):
                 scope.submit(sum, [1, 2])
@@ -440,6 +428,25 @@ class TestS3PoolScope:
             shutdown_bounded(scope)
         finally:
             pool.shutdown()
+
+    def test_waiting_calls_run_after_pool_shutdown(self):
+        # GH-1332: once the pool takes no more calls, as when the interpreter
+        # exits, the calls that wait in a scope run in the thread of the call
+        # that ends before them, as the calls queued in a pool of their own
+        # used to drain, instead of failing.
+        pool = S3ThreadPool(1)
+        scope = _S3PoolScope(pool, 1)
+        release = threading.Event()
+        try:
+            running = scope.submit(release.wait, EVENT_TIMEOUT)
+            waiting = scope.submit(sum, [1, 2])
+            pool.shutdown(wait=False)
+            release.set()
+            assert running.result(EVENT_TIMEOUT)
+            assert waiting.result(EVENT_TIMEOUT) == 3
+        finally:
+            release.set()
+            shutdown_bounded(scope)
 
     def test_release_waits_for_waiting_calls(self):
         # GH-1332: a release of the pool waits for the calls that wait in a

@@ -1391,6 +1391,24 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         """
         return self.fs.core.operation_params(method, self.s3_additional_kwargs)
 
+    async def read(self, length: int = -1) -> bytes:
+        """Read bytes from the file.
+
+        Args:
+            length: The number of bytes to read; -1 reads to the end.
+
+        Returns:
+            The bytes read.
+
+        Raises:
+            RuntimeError: In a forked child process of the process that
+                opened the file.
+            ValueError: If the file is closed or not open for reading.
+        """
+        self._check_process()
+        data: bytes = await super().read(length)
+        return data
+
     async def write(self, data: bytes) -> int:
         """Write data to the buffer, uploading each full block as a part.
 

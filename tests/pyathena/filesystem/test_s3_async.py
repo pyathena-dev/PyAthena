@@ -2258,7 +2258,7 @@ class TestAioS3StreamedFile:
         asyncio.run(f.write(b"x"))
 
         async def use():
-            for call in (lambda: f.write(b"y"), f.flush, lambda: f._fetch_range(0, 1)):
+            for call in (lambda: f.write(b"y"), f.flush, lambda: f.read(0)):
                 with pytest.raises(RuntimeError, match="parent of this forked process"):
                     await call()
             await f.close()
@@ -2712,8 +2712,9 @@ class TestAioS3StreamedFile:
                 await await_bounded(close() if cancelled == "close" else flush_and_exit())
         finally:
             release.set()
-        # Waits for the commit, and for an abort queued after it.
-        await asyncio.to_thread(shutdown_bounded, f._requests)
+        # Waits for the commit, and for an abort queued after it, in the
+        # threads of the filesystem.
+        await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
 
         assert f.closed
         assert released == [True]
@@ -2726,20 +2727,15 @@ class TestAioS3StreamedFile:
         # leaving the block with an exception after the flush is cancelled
         # while its commit waits for a thread does not abort the upload.
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
-        started = threading.Event()
         release = threading.Event()
         released = []
-        respond = fs.core.upload_part.side_effect
 
-        def upload_part(**kwargs):
-            started.set()
+        def hold():
             # The finally block of the test releases it. The wait is bounded,
             # and its timeout recorded, so that a regression that blocks the
             # event loop fails instead of hanging or passing.
             released.append(release.wait(EVENT_TIMEOUT))
-            return respond(**kwargs)
 
-        fs.core.upload_part = mock.MagicMock(side_effect=upload_part)
         queued = threading.Event()
         submit = S3ThreadPool.submit
 
@@ -2748,13 +2744,15 @@ class TestAioS3StreamedFile:
                 queued.set()
             return submit(pool, fn, *args, **kwargs)
 
-        # The part holds the only thread, for which the commit waits.
-        f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size, max_workers=1)
+        fs._thread_pool = S3ThreadPool(1)
+        f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
 
         async def flush_and_exit():
             async with f:
                 await f.write(b"a" * block_size)
-                assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+                # The commit waits for the only thread of the filesystem,
+                # which this call holds.
+                fs._thread_pool.submit(hold)
                 flush = asyncio.ensure_future(f.flush(force=True))
                 await wait_until(queued.is_set)
                 flush.cancel()
@@ -2766,12 +2764,12 @@ class TestAioS3StreamedFile:
                 pytest.raises(asyncio.CancelledError),
             ):
                 # Bounded, so that a regression whose exit waits for the
-                # held part fails here and releases it.
+                # held thread fails here and releases it.
                 await await_bounded(flush_and_exit())
         finally:
             release.set()
         # Waits for the commit, and for an abort queued after it.
-        await asyncio.to_thread(shutdown_bounded, f._requests)
+        await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
 
         assert f.closed
         assert released == [True]
