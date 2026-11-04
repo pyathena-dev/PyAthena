@@ -475,8 +475,10 @@ class _S3PoolScope(S3Executor):
     requests while others keep using the pool.
 
     A call counts toward ``max_workers`` once the pool has accepted it, so
-    that an interrupt of the submitter at any point leaves no place taken:
-    at worst, one more call runs at once for a while.
+    that an interrupt of the submitter at any point leaves no place taken.
+    A call whose submission an interrupt stopped after the pool accepted it
+    may then run without counting, so that each such interrupt can let one
+    more call run at once.
 
     Args:
         pool: The shared pool.
@@ -515,7 +517,7 @@ class _S3PoolScope(S3Executor):
 
         As with ``ThreadPoolExecutor``, the returned future can be cancelled
         only before the call starts. An interrupt of the submission cancels
-        the call.
+        the call unless it has started.
 
         Args:
             fn: The callable to run.
@@ -550,9 +552,10 @@ class _S3PoolScope(S3Executor):
         except BaseException:
             # A call that the pool has not taken, or that has not started,
             # never runs, and nothing waits for it; one that has started
-            # runs to its end.
+            # runs to its end. The work item marks the cancelled future as
+            # notified once, also when the pool or the scope runs it later.
             if future.cancel():
-                future.set_running_or_notify_cancel()
+                call.item.run()
                 with self._lock:
                     self._futures.discard(future)
             raise
@@ -585,9 +588,10 @@ class _S3PoolScope(S3Executor):
         Args:
             call: The call.
         """
-        # The work item settles the future also on a failure.
-        call.context.run(call.item.run)
-        self._next(call)
+        try:
+            call.context.run(call.item.run)
+        finally:
+            self._next(call)
 
     def _next(self, ended: _S3ScopeCall) -> None:
         """Free the place of a call that has ended, and fill the free places.

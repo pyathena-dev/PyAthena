@@ -429,6 +429,38 @@ class TestS3PoolScope:
         finally:
             pool.shutdown()
 
+    def test_interrupted_submit_after_acceptance(self):
+        # GH-1332: an interrupt after the pool accepted a call that has not
+        # started cancels the call, which then neither runs nor keeps its
+        # place when the pool gets to it, so that the next calls still run.
+        pool = S3ThreadPool(1)
+        scope = _S3PoolScope(pool, 1)
+        release = threading.Event()
+        events = []
+
+        class InterruptedSet(set):
+            def add(self, element):
+                super().add(element)
+                # Once, after the pool has accepted the call.
+                scope._entered = set(self)
+                raise KeyboardInterrupt
+
+        try:
+            # Holds the only thread of the pool, so that the call does not start.
+            holding = pool.submit(release.wait, EVENT_TIMEOUT)
+            scope._entered = InterruptedSet()
+            with pytest.raises(KeyboardInterrupt):
+                scope.submit(events.append, "interrupted call")
+            following = scope.submit(sum, [1, 2])
+            release.set()
+            assert holding.result(EVENT_TIMEOUT)
+            assert following.result(EVENT_TIMEOUT) == 3
+            shutdown_bounded(scope)
+        finally:
+            release.set()
+            pool.shutdown()
+        assert events == []
+
     def test_waiting_calls_run_after_pool_shutdown(self):
         # GH-1332: once the pool takes no more calls, as when the interpreter
         # exits, the calls that wait in a scope run in the thread of the call
