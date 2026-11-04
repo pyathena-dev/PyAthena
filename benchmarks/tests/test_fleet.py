@@ -49,6 +49,20 @@ SETTINGS = Settings(scales={"small": 10000, "xlarge": 10000000})
 
 
 @pytest.fixture(autouse=True)
+def steady_wall_clock(monkeypatch):
+    """Make ``time.time()`` advance with the monotonic clock during each test.
+
+    Leases compare wall-clock times, and most tests' leases last two seconds
+    or less, so a step of the host's system clock, which on some WSL2 hosts
+    jumps forward about three seconds every half minute, would otherwise
+    expire them early. The patch replaces ``time.time`` for the whole process,
+    so the tests' own lease times follow the same clock.
+    """
+    offset = time.time() - time.monotonic()
+    monkeypatch.setattr(time, "time", lambda: offset + time.monotonic())
+
+
+@pytest.fixture(autouse=True)
 def no_instance_metadata(monkeypatch):
     """Make instance metadata report no interruption notice, as on an EC2 host without one.
 
