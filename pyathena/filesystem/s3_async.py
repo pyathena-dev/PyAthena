@@ -721,10 +721,10 @@ class AioS3FileSystem(AsyncFileSystem):
             await self._thread_pool.run_shielded(_abort)
             raise
 
-        semaphore = asyncio.Semaphore(max_workers)
-        failed = False
+        # At most max_workers copies at once in the request pool.
+        requests = self._sync_fs._create_executor(max_workers=max_workers)
         # Set when an annotation copy fails, so that the running ones make no
-        # further attempt.
+        # further attempt, and the waiting ones do not start.
         stop = threading.Event()
         # The index of the copy that failed first, whose error is raised
         # instead of those of the copies that its failure stopped. Recorded
@@ -762,19 +762,13 @@ class AioS3FileSystem(AsyncFileSystem):
                 raise
 
         async def _copy_annotation(i: int, name: str) -> None:
-            nonlocal failed
-            async with semaphore:
-                if failed:
-                    # Do not start more copies after one failed, as
-                    # S3FileSystem does.
-                    return
-                try:
-                    await self._sync_fs._request_pool.run(_copy_annotation_in_thread, i, name)
-                except Exception:
-                    # The running copies make no further attempt.
-                    failed = True
-                    stop.set()
-                    raise
+            try:
+                await requests.run(_copy_annotation_in_thread, i, name)
+            except Exception:
+                # The running copies make no further attempt, and the waiting
+                # ones do not start, as in S3FileSystem.
+                stop.set()
+                raise
 
         results = await asyncio.gather(
             *[_copy_annotation(i, name) for i, name in enumerate(plan.annotations)],

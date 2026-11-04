@@ -108,7 +108,8 @@ filesystem, with `max_workers` threads. Each file or operation runs at most its 
 defaults to the `max_pool_connections` of its S3 client: 10 unless configured, or that
 of the client of the connection given with `connection`. A client that the filesystem
 builds takes its `max_pool_connections` from `max_workers` unless `config_kwargs` sets
-it. `close()`, or the end of a `with` block, releases the threads of the pool once they
+it. For more parallel requests, raise `max_workers`, and with `connection`, also the
+`max_pool_connections` of its S3 client, such as with its `s3_config`. `close()`, or the end of a `with` block, releases the threads of the pool once they
 are idle, and the filesystem stays usable.
 
 In a forked child process, create a new filesystem. A file that the parent opened raises
