@@ -412,6 +412,62 @@ class TestS3PoolScope:
         assert running.result(EVENT_TIMEOUT)
         assert events == []
 
+    def test_interrupted_submit(self):
+        # GH-1332: an interrupt before a call reaches the pool cancels the
+        # call and gives its place to the next one, so that the scope neither
+        # stops running calls nor waits for the interrupted one.
+        pool = S3ThreadPool(1)
+        scope = _S3PoolScope(pool, 1)
+        add_done_callback = Future.add_done_callback
+        interrupts = [KeyboardInterrupt]
+
+        def interrupt_once(future, fn):
+            # The first callback is the scope's, added after it reserved a
+            # place for the call.
+            if interrupts:
+                raise interrupts.pop()
+            add_done_callback(future, fn)
+
+        try:
+            with (
+                mock.patch.object(
+                    Future, "add_done_callback", autospec=True, side_effect=interrupt_once
+                ),
+                pytest.raises(KeyboardInterrupt),
+            ):
+                scope.submit(sum, [1, 2])
+            assert scope.submit(sum, [3, 4]).result(EVENT_TIMEOUT) == 7
+            shutdown_bounded(scope)
+        finally:
+            pool.shutdown()
+
+    def test_release_waits_for_waiting_calls(self):
+        # GH-1332: a release of the pool waits for the calls that wait in a
+        # scope, so that it ends the threads that run them. A waiting call
+        # used to enter the pool after its release had ended the threads,
+        # and to start threads that nothing released.
+        pool = S3ThreadPool(1)
+        scope = _S3PoolScope(pool, 1)
+        release = threading.Event()
+        threads = []
+
+        def record():
+            threads.append(threading.current_thread())
+            return release.wait(EVENT_TIMEOUT)
+
+        try:
+            calls = [scope.submit(record) for _ in range(2)]
+            pool.release()
+            release.set()
+            assert all(c.result(EVENT_TIMEOUT) for c in calls)
+            for thread in threads:
+                thread.join(EVENT_TIMEOUT)
+                assert not thread.is_alive()
+        finally:
+            release.set()
+            shutdown_bounded(scope)
+            pool.shutdown()
+
 
 class TestS3AioExecutor:
     def test_loop_ignored(self):

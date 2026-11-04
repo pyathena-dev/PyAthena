@@ -2426,6 +2426,10 @@ class AthenaPandasResultSet(AthenaResultSet):
         super().close()
         self._closed_event.set()
         self._df_iter.close()
+        # Ends the idle threads of the request pool of the filesystem, which
+        # a read that is still running keeps until it ends.
+        if (fs := getattr(self, "_fs", None)) is not None:
+            fs.close()
         self._df = pd.DataFrame()
         self._df_iter = PandasDataFrameIterator(self._df, _no_trunc_date)
         self._row_iter = iter(())

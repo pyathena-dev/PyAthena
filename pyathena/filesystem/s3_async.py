@@ -351,8 +351,8 @@ class AioS3FileSystem(AsyncFileSystem):
         """Delete objects with DeleteObjects requests.
 
         See :meth:`S3FileSystem.rm`. The DeleteObjects requests run in
-        parallel with ``asyncio.gather`` in the request pool of the internal
-        ``S3FileSystem``.
+        parallel with ``asyncio.gather``, at most ``max_workers`` at once, in
+        the request pool of the internal ``S3FileSystem``.
 
         Args:
             path: S3 path (s3://bucket/key) or list of paths to delete.
@@ -386,11 +386,12 @@ class AioS3FileSystem(AsyncFileSystem):
             OSError: If S3 could not delete some of the objects.
         """
         batches, params = self._sync_fs._delete_batches(paths, **kwargs)
+        # At most max_workers requests at once, as S3FileSystem.rm() sends,
+        # so that a large deletion does not queue ahead of the requests of
+        # the files that share the request pool.
+        requests = self._sync_fs._create_executor(max_workers=self._sync_fs.max_workers)
         results = await asyncio.gather(
-            *[
-                self._sync_fs._request_pool.run(self._sync_fs._delete_batch, batch, **params)
-                for batch in batches
-            ],
+            *[requests.run(self._sync_fs._delete_batch, batch, **params) for batch in batches],
             return_exceptions=True,
         )
         self._sync_fs._raise_delete_errors(results)
@@ -1178,8 +1179,9 @@ class AioS3File(S3File):
     """The file handle that ``AioS3FileSystem.open()`` returns.
 
     Functionally identical to ``S3File``, whose parallel operations (range
-    reads, multipart uploads) it runs in a pool of ``max_workers`` threads of
-    the file; it exists as a distinct type for ``isinstance`` checks. For
+    reads, multipart uploads) it runs in the request pool of the filesystem,
+    at most ``max_workers`` of them at once; it exists as a distinct type for
+    ``isinstance`` checks. For
     reads and writes that are coroutines, see ``AioS3StreamedFile``.
     """
 

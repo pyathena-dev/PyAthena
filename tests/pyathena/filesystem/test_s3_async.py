@@ -2904,13 +2904,12 @@ class TestAioS3StreamedFile:
         with pytest.raises(PermissionError, match="Access Denied") as info_:
             await f.read()
         await f.close()
-        # The threads have set the results once the pool of the file is shut
-        # down, and the event loop runs their callbacks on the next iterations.
+        # The threads have set the results once the requests of the file are
+        # shut down, and leave the frames of the calls, and the event loop
+        # runs their callbacks, right after.
         await asyncio.to_thread(f._requests.shutdown, True)
-        for _ in range(3):
-            await asyncio.sleep(0)
         assert len(read) == 3
-        assert [ref() for ref in read] == [None] * 3
+        await wait_until(lambda: [ref() for ref in read] == [None] * 3)
         assert info_.value.__traceback__ is not None
 
     @pytest.mark.asyncio
@@ -3065,10 +3064,10 @@ class TestAioS3StreamedFile:
         # The retries of the held range stopped.
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1
-        for _ in range(3):
-            await asyncio.sleep(0)
         assert len(read) == 4
-        assert [ref() for ref in read] == [None] * 4
+        # The threads leave the frames of the calls, and the event loop runs
+        # their callbacks, right after the results are set.
+        await wait_until(lambda: [ref() for ref in read] == [None] * 4)
         assert info_.value.__traceback__ is not None
 
     @pytest.mark.asyncio

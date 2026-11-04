@@ -500,7 +500,7 @@ class _S3PoolScope(S3Executor):
         self._futures: set[Future[Any]] = set()
         # The calls that wait for a place in the pool, and the number of
         # places that the calls of the scope hold.
-        self._waiting: deque[tuple[contextvars.Context, _S3WorkItem[Any]]] = deque()
+        self._waiting: deque[tuple[contextvars.Context, _S3WorkItem[Any], Future[Any]]] = deque()
         self._running = 0
         self._shutdown = False
 
@@ -535,10 +535,26 @@ class _S3PoolScope(S3Executor):
             if enter:
                 self._running += 1
             else:
-                self._waiting.append((context, item))
-        future.add_done_callback(self._untrack)
-        if enter:
-            self._enter(context, item)
+                self._waiting.append((context, item, future))
+        entered = False
+        try:
+            future.add_done_callback(self._untrack)
+            if enter:
+                entered = self._enter(context, item)
+                if not entered:
+                    # The pool rejected the call, whose future has its error.
+                    self._next()
+        except BaseException:
+            # An interrupt before the call reached the pool: its place goes to
+            # the next call, and its future is cancelled, so that nothing
+            # waits for it.
+            if enter and not entered:
+                self._next()
+            if future.cancel():
+                future.set_running_or_notify_cancel()
+            with self._lock:
+                self._futures.discard(future)
+            raise
         return future
 
     @override
@@ -557,42 +573,61 @@ class _S3PoolScope(S3Executor):
         if wait:
             futures.wait(pending)
 
-    def _enter(self, context: contextvars.Context, item: _S3WorkItem[Any]) -> None:
+    def _enter(self, context: contextvars.Context, item: _S3WorkItem[Any]) -> bool:
         """Hand a call to the pool, in the place that the scope holds for it.
+
+        Args:
+            context: The context of the submitter of the call.
+            item: The call.
+
+        Returns:
+            Whether the pool accepted the call. If it rejected it, such as
+            after its shutdown, the future of the call has the error.
+        """
+        try:
+            self._pool.submit(self._run, context, item)
+        except Exception as e:
+            rejected: Future[None] = Future()
+            rejected.set_running_or_notify_cancel()
+            rejected.set_exception(e)
+            item.settle(rejected)
+            return False
+        return True
+
+    def _run(self, context: contextvars.Context, item: _S3WorkItem[Any]) -> None:
+        """Run a call in the pool, then give its place to the next waiting call.
+
+        The place is handed on in the thread of the call, before the call
+        ends in the pool, so that an interrupt of the submitter cannot keep
+        it, and a release of the pool waits for the calls that wait here.
 
         Args:
             context: The context of the submitter of the call.
             item: The call.
         """
         try:
-            entered = self._pool.submit(context.run, item.run)
-        except BaseException as e:
-            # Such as after the shutdown of the pool: the future of the call
-            # gets the error, and the place goes to the next call.
-            rejected: Future[None] = Future()
-            rejected.set_running_or_notify_cancel()
-            rejected.set_exception(e)
-            item.settle(rejected)
-            self._leave(rejected)
-            if not isinstance(e, Exception):
-                raise
-            return
-        entered.add_done_callback(item.settle)
-        entered.add_done_callback(self._leave)
+            context.run(item.run)
+        finally:
+            self._next()
 
-    def _leave(self, entered: Future[Any]) -> None:
-        """Give the place of a call that has ended to the next waiting call.
+    def _next(self) -> None:
+        """Give a place of the scope to the next waiting call, or free it.
 
-        Args:
-            entered: The finished future of the call in the pool.
+        Calls that were cancelled while they waited are settled without
+        entering the pool, and so are those that the pool rejects.
         """
-        with self._lock:
-            if self._waiting:
-                context, item = self._waiting.popleft()
-            else:
-                self._running -= 1
+        while True:
+            with self._lock:
+                if not self._waiting:
+                    self._running -= 1
+                    return
+                context, item, future = self._waiting.popleft()
+            if future.cancelled():
+                # Marks the future as notified, without running the call.
+                item.run()
+                continue
+            if self._enter(context, item):
                 return
-        self._enter(context, item)
 
     def _untrack(self, future: Future[Any]) -> None:
         """Stop tracking a call that has ended or was cancelled.
