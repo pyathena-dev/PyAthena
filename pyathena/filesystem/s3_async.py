@@ -32,12 +32,7 @@ from fsspec.utils import check_contained
 from pyathena.aio.util import create_in_thread
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem, S3FileTarget
 from pyathena.filesystem.s3_core import S3Core
-from pyathena.filesystem.s3_executor import (
-    S3AioExecutor,
-    S3AioThreadPool,
-    S3Executor,
-    S3ThreadPoolExecutor,
-)
+from pyathena.filesystem.s3_executor import S3ThreadPool
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3Metadata,
@@ -63,7 +58,7 @@ class AioS3FileSystem(AsyncFileSystem):
     """An async filesystem interface for Amazon S3 using fsspec's AsyncFileSystem.
 
     This class wraps ``S3FileSystem`` to provide native asyncio support. Its
-    coroutines run the blocking boto3 calls in an ``S3AioThreadPool`` with
+    coroutines run the blocking boto3 calls in an ``S3ThreadPool`` with
     ``max_workers`` threads that the filesystem owns, instead of the default
     executor of the event loop, and run parallel requests with
     ``asyncio.gather``.
@@ -72,11 +67,9 @@ class AioS3FileSystem(AsyncFileSystem):
     all boto3 calls, while this class delegates to it in the threads of its pool.
     This avoids diamond inheritance issues and keeps all boto3 logic in one place.
 
-    File handles created by ``_open`` use ``S3AioExecutor`` so that parallel
-    operations (range reads, multipart uploads) are dispatched through the event
-    loop to a pool of ``max_workers`` threads of each file. An instance created
-    with ``asynchronous=True`` has no event loop of its own, so its file handles
-    use a ``ThreadPoolExecutor``. :meth:`open_async` returns an
+    File handles created by ``_open`` run their parallel operations (range
+    reads, multipart uploads) in an ``S3ThreadPool`` of ``max_workers``
+    threads of each file, as ``S3File`` does. :meth:`open_async` returns an
     ``AioS3StreamedFile``, whose reads and writes are coroutines.
     :meth:`close`, or the end of a ``with`` or ``async with`` block, releases
     the threads of the filesystem, which stays usable.
@@ -146,7 +139,7 @@ class AioS3FileSystem(AsyncFileSystem):
         # The blocking calls of the coroutines run in threads of this pool,
         # not in the default executor of the event loop. Created first, so
         # that None takes its default for the files and copies too.
-        self._thread_pool = S3AioThreadPool(max_workers)
+        self._thread_pool = S3ThreadPool(max_workers)
         max_workers = self._thread_pool.max_workers
         self._sync_fs = S3FileSystem(
             connection=connection,
@@ -172,8 +165,8 @@ class AioS3FileSystem(AsyncFileSystem):
     def close(self) -> None:
         """Release the threads of the filesystem, which stays usable, once they are idle.
 
-        See :meth:`S3AioThreadPool.release()
-        <pyathena.filesystem.s3_executor.S3AioThreadPool.release>`. Files opened
+        See :meth:`S3ThreadPool.release()
+        <pyathena.filesystem.s3_executor.S3ThreadPool.release>`. Files opened
         before have threads of their own and are not affected.
         """
         self._thread_pool.release()
@@ -836,28 +829,6 @@ class AioS3FileSystem(AsyncFileSystem):
             raise FileNotFoundError(path)
         return sorted(out)
 
-    def _create_executor(self, max_workers: int) -> S3Executor:
-        """Create the executor for the parallel operations of a file.
-
-        An instance created with ``asynchronous=True`` has no event loop of
-        its own, so its files run the operations in a thread pool.
-
-        Args:
-            max_workers: The maximum number of operations that run at once.
-
-        Returns:
-            An ``S3AioExecutor`` on the event loop of this filesystem, or an
-            ``S3ThreadPoolExecutor`` if it has none.
-
-        Raises:
-            RuntimeError: If this instance has an event loop and the call is
-                made in a forked child process of the process that created
-                it, where the loop does not run.
-        """
-        if self._loop is None:
-            return S3ThreadPoolExecutor(max_workers=max_workers)
-        return S3AioExecutor(loop=self.loop, max_workers=max_workers)
-
     def _open(
         self,
         path: str,
@@ -888,7 +859,7 @@ class AioS3FileSystem(AsyncFileSystem):
             path,
             mode,
             max_workers=max_workers,
-            executor=self._create_executor(max_workers=max_workers),
+            executor=self._sync_fs._create_executor(max_workers=max_workers),
             block_size=block_size,
             cache_type=cache_type,
             autocommit=autocommit,
@@ -1194,17 +1165,12 @@ class AioS3FileSystem(AsyncFileSystem):
 
 
 class AioS3File(S3File):
-    """Async-aware S3 file handle using ``S3AioExecutor``.
+    """The file handle that ``AioS3FileSystem.open()`` returns.
 
-    Functionally identical to ``S3File``; exists as a distinct type for
-    ``isinstance`` checks and to document the async execution model.
-    All parallel operations (range reads, multipart uploads) are dispatched
-    through the ``S3Executor`` interface — the ``S3AioExecutor``
-    provided by ``AioS3FileSystem`` dispatches them through the event loop to
-    a pool of ``max_workers`` threads of the file.
-    For an ``AioS3FileSystem`` created with ``asynchronous=True``, it is an
-    ``S3ThreadPoolExecutor``. For reads and writes that are coroutines, see
-    ``AioS3StreamedFile``.
+    Functionally identical to ``S3File``, whose parallel operations (range
+    reads, multipart uploads) it runs in a pool of ``max_workers`` threads of
+    the file; it exists as a distinct type for ``isinstance`` checks. For
+    reads and writes that are coroutines, see ``AioS3StreamedFile``.
     """
 
 
@@ -1212,7 +1178,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
     """An S3 file whose reads and writes are coroutines.
 
     Returned by :meth:`AioS3FileSystem.open_async`. The requests of the file
-    run in an ``S3AioThreadPool`` of ``max_workers`` threads of its own, and
+    run in an ``S3ThreadPool`` of ``max_workers`` threads of its own, and
     the coroutines wait for them without blocking the event loop:
 
     - A read splits the requested range into ranges of the block size, read
@@ -1298,7 +1264,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         if mode not in {"rb", "wb", "ab", "xb"}:
             raise NotImplementedError("File mode not supported")
         # Created first, so that an invalid max_workers raises before the lookups.
-        self._pool = S3AioThreadPool(max_workers)
+        self._pool = S3ThreadPool(max_workers)
         self.max_workers = self._pool.max_workers
         target = S3FileTarget.resolve(
             fs._sync_fs,

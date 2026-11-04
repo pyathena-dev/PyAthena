@@ -238,8 +238,8 @@ The `[filesystem]` section of `config.toml` sets the swept values, 8 and 40 work
 The suite's scales are the object sizes in bytes in `[filesystem] sizes`, not the row counts in `[scales]`: 64 MiB (small), 256 MiB (medium), 1 GiB (large), and 6 GiB (xlarge) by default.
 A `get` also writes the object to the trial's temporary directory, which the parent process measures as the peak temp dir and removes; on the Amazon Linux 2023 hosts, that directory is on the tmpfs `/tmp`, so the object stays in memory outside the process's RSS. A `put` reads a sparse file, which no disk bounds.
 
-The `sync` API calls the filesystem on the trial's thread, and a file's parallel requests run in an `S3ThreadPoolExecutor`.
-The `aio` API runs a read, get, write, or put in `asyncio.to_thread()`, as `AioS3FSCursor` reads result files, and a file's parallel requests run through `S3AioExecutor`, dispatched on the filesystem's event loop, fsspec's IO thread, to a pool of `max_workers` threads of the file; its `get_file()` and `put_file()` run the synchronous filesystem's in the filesystem's thread pool.
+The `sync` API calls the filesystem on the trial's thread, and a file's parallel requests run in an `S3ThreadPool`.
+The `aio` API runs a read, get, write, or put in `asyncio.to_thread()`, as `AioS3FSCursor` reads result files, and a file's parallel requests run in a pool of `max_workers` threads of the file, as in the `sync` API; its `get_file()` and `put_file()` run the synchronous filesystem's in the filesystem's thread pool.
 Its copy is a coroutine awaited on the trial's event loop, whose part copies run in the filesystem's pool of `max_workers` threads.
 Both event loops keep Python's default executor, which runs only the trial's `asyncio.to_thread()` call.
 Before #1159, the parallel requests of the `aio` API ran in the default executors, whose `min(32, os.cpu_count() + 4)` threads bound them.

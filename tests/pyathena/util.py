@@ -346,7 +346,7 @@ def shutdown_bounded(pool, timeout=EVENT_TIMEOUT):
     from exiting through this wait.
 
     Args:
-        pool: The executor, such as an ``S3AioThreadPool``.
+        pool: The executor, such as an ``S3ThreadPool``.
         timeout: The longest wait, in seconds.
 
     Raises:

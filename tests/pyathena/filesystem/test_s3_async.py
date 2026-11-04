@@ -23,7 +23,7 @@ from fsspec.callbacks import Callback
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3File, AioS3FileSystem, AioS3StreamedFile
 from pyathena.filesystem.s3_core import S3Core, S3MultipartCopyPlan
-from pyathena.filesystem.s3_executor import S3AioThreadPool
+from pyathena.filesystem.s3_executor import S3ThreadPool
 from pyathena.filesystem.s3_object import (
     S3Metadata,
     S3MultipartUpload,
@@ -130,21 +130,36 @@ class TestAioS3FileSystem:
                 stubber.assert_no_pending_responses()
 
     @forking
-    def test_open_in_forked_child(self):
-        # GH-1336: in a forked child, a filesystem created in the parent
-        # raises on open(), as fsspec's synchronous methods do there. It used
-        # to return a file whose reads waited forever for the event loop of
-        # the parent.
-        fs = AioS3FileSystem(
-            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+    def test_read_in_forked_child(self):
+        # GH-1332: in a forked child, a file that a filesystem created in the
+        # parent opens reads its ranges in parallel. Its open() raised there
+        # since GH-1336, and before that, its reads waited forever for the
+        # event loop of the parent.
+        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
+        block_size = 2**10
+        size = block_size * 4
+        fs.core.get_object = mock.MagicMock(
+            side_effect=lambda path, range_, **kwargs: bytes(range_[1] - range_[0])
         )
+        info = S3Object(
+            init={"Key": "key", "ETag": '"etag"'},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="key",
+        )
+        info.size = size
+        fs._sync_fs.info = mock.MagicMock(return_value=info)
 
-        def child():
-            with pytest.raises(RuntimeError, match="not fork-safe"):
-                fs.open("s3://bucket/key", "rb")
-            return True
+        def read():
+            calls = fs.core.get_object.call_count
+            with fs.open("s3://bucket/key", "rb", block_size=block_size, cache_type="none") as f:
+                data = f.read()
+            # The ranges of the read, each a request of its own.
+            return data == bytes(size) and fs.core.get_object.call_count - calls > 1
 
-        assert run_in_forked_child(child) == 0
+        # Read in the parent too, whose file threads the child does not have.
+        assert read()
+        assert run_in_forked_child(read) == 0
 
     @pytest.mark.parametrize("size", [0, 10])
     @pytest.mark.asyncio
@@ -1080,7 +1095,7 @@ class TestAioS3FileSystem:
         # The HeadObject of the source, with 2 parts of the default block size.
         size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
         sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
-        submit_to = S3AioThreadPool.submit_to
+        submit_to = S3ThreadPool.submit_to
 
         async def copy():
             async with asyncio.timeout(EVENT_TIMEOUT):
@@ -1107,7 +1122,7 @@ class TestAioS3FileSystem:
 
         with (
             mock.patch.object(
-                S3AioThreadPool, "submit_to", autospec=True, side_effect=interrupt_completion
+                S3ThreadPool, "submit_to", autospec=True, side_effect=interrupt_completion
             ),
             pytest.raises(KeyboardInterrupt),
         ):
@@ -1142,7 +1157,7 @@ class TestAioS3FileSystem:
         operation = ThrottledOperation(operation_name="UploadPartCopy")
         throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
         submitted = threading.Event()
-        submit_to = S3AioThreadPool.submit_to
+        submit_to = S3ThreadPool.submit_to
 
         def record_part(pool, future, fn, *args, **kwargs):
             submit_to(pool, future, fn, *args, **kwargs)
@@ -1162,7 +1177,7 @@ class TestAioS3FileSystem:
 
         sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         with (
-            mock.patch.object(S3AioThreadPool, "submit_to", autospec=True, side_effect=record_part),
+            mock.patch.object(S3ThreadPool, "submit_to", autospec=True, side_effect=record_part),
             pytest.raises(PermissionError, match="Access Denied"),
         ):
             # The retries stop, or part 2 is cancelled, before the bound.
@@ -2095,48 +2110,6 @@ class TestAioS3File:
             assert isinstance(f, AioS3File)
             assert f.max_workers == (max_workers or fs._sync_fs.max_workers)
 
-    @pytest.mark.asyncio
-    async def test_failed_read_frees_other_ranges(self):
-        # GH-1186: a parallel read that fails frees the data of the other
-        # ranges, also while its error is held, as with S3File.
-        fs = AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True)
-        block_size = 2**10
-        read = []
-        others_read = threading.Semaphore(0)
-
-        def get_object(path, range_, **kwargs):
-            if range_[0] == 0:
-                for _ in range(3):
-                    assert others_read.acquire(timeout=5)
-                raise PermissionError("Access Denied")
-            # Unlike bytes, an array can be weakly referenced.
-            data = array.array("B", bytes(range_[1] - range_[0]))
-            read.append(weakref.ref(data))
-            others_read.release()
-            return data
-
-        fs.core.get_object = mock.MagicMock(side_effect=get_object)
-        info = S3Object(
-            init={"Key": "key", "ETag": '"etag"'},
-            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
-            bucket="bucket",
-            key="key",
-        )
-        info.size = block_size * 4
-        fs._sync_fs.info = mock.MagicMock(return_value=info)
-        # The executor of the file dispatches through the event loop, which
-        # the blocking calls must not hold.
-        f = await asyncio.to_thread(
-            fs.open, "s3://bucket/key", "rb", block_size=block_size, cache_type="none"
-        )
-        with pytest.raises(PermissionError, match="Access Denied") as info_:
-            await asyncio.to_thread(f.read)
-        # Waits for the reads, whose threads may still set the results.
-        await asyncio.to_thread(f.close)
-        assert len(read) == 3
-        assert [ref() for ref in read] == [None] * 3
-        assert info_.value.__traceback__ is not None
-
     @pytest.mark.parametrize("asynchronous", [False, True])
     @pytest.mark.asyncio
     async def test_open_parallel_requests(self, asynchronous):
@@ -2269,7 +2242,7 @@ class TestAioS3StreamedFile:
         active: list[int] = []
         uploads: dict[int, Future[S3MultipartUploadPart]] = {}
         in_flight: list[int] = []
-        submit_to = S3AioThreadPool.submit_to
+        submit_to = S3ThreadPool.submit_to
 
         def record_upload(pool, future, fn, *args, **kwargs):
             # The parts submitted and not finished, including those that
@@ -2310,9 +2283,7 @@ class TestAioS3StreamedFile:
 
         releaser = asyncio.ensure_future(release())
         f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size, max_workers=2)
-        with mock.patch.object(
-            S3AioThreadPool, "submit_to", autospec=True, side_effect=record_upload
-        ):
+        with mock.patch.object(S3ThreadPool, "submit_to", autospec=True, side_effect=record_upload):
             await f.write(b"a" * block_size * 4)
             written.set()
             await f.close()
@@ -2532,7 +2503,7 @@ class TestAioS3StreamedFile:
         }
 
         queued = threading.Event()
-        submit = S3AioThreadPool.submit
+        submit = S3ThreadPool.submit
 
         def record_commit(pool, fn, *args, **kwargs):
             if getattr(fn, "__name__", None) == "_complete_upload":
@@ -2560,7 +2531,7 @@ class TestAioS3StreamedFile:
         await f.write(b"a" * block_size * 3)
         started = time.monotonic()
         with (
-            mock.patch.object(S3AioThreadPool, "submit", autospec=True, side_effect=record_commit),
+            mock.patch.object(S3ThreadPool, "submit", autospec=True, side_effect=record_commit),
             pytest.raises(PermissionError, match="Access Denied"),
         ):
             await f.close()
@@ -2723,7 +2694,7 @@ class TestAioS3StreamedFile:
 
         fs.core.upload_part = mock.MagicMock(side_effect=upload_part)
         queued = threading.Event()
-        submit = S3AioThreadPool.submit
+        submit = S3ThreadPool.submit
 
         def record_commit(pool, fn, *args, **kwargs):
             if getattr(fn, "__name__", None) == "_complete_upload":
@@ -2744,9 +2715,7 @@ class TestAioS3StreamedFile:
 
         try:
             with (
-                mock.patch.object(
-                    S3AioThreadPool, "submit", autospec=True, side_effect=record_commit
-                ),
+                mock.patch.object(S3ThreadPool, "submit", autospec=True, side_effect=record_commit),
                 pytest.raises(asyncio.CancelledError),
             ):
                 # Bounded, so that a regression whose exit waits for the
@@ -2768,7 +2737,7 @@ class TestAioS3StreamedFile:
         # committing it and aborts the upload. The upload used to be left
         # incomplete with a commit that nothing sends.
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
-        submit = S3AioThreadPool.submit
+        submit = S3ThreadPool.submit
 
         def interrupt_commit(pool, fn, *args, **kwargs):
             if getattr(fn, "__name__", None) == "_complete_upload":
@@ -2784,7 +2753,7 @@ class TestAioS3StreamedFile:
             await f.write(b"a" * block_size)
             try:
                 with mock.patch.object(
-                    S3AioThreadPool, "submit", autospec=True, side_effect=interrupt_commit
+                    S3ThreadPool, "submit", autospec=True, side_effect=interrupt_commit
                 ):
                     await f.close()
             finally:
@@ -2999,7 +2968,7 @@ class TestAioS3StreamedFile:
                 return [
                     t
                     for t in asyncio.all_tasks()
-                    if t.get_coro().__qualname__ == "S3AioThreadPool.run" and not t.done()
+                    if t.get_coro().__qualname__ == "S3ThreadPool.run" and not t.done()
                 ]
 
             # At least the held read is found.

@@ -42,7 +42,7 @@ from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3MultipartCopyPlan
 from pyathena.filesystem.s3_errors import S3ClientError
-from pyathena.filesystem.s3_executor import S3AioExecutor, S3ThreadPoolExecutor
+from pyathena.filesystem.s3_executor import S3ThreadPool
 from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
@@ -3706,7 +3706,7 @@ class TestS3FileSystem:
         fs.core.abort_multipart_upload = mock.MagicMock(
             side_effect=lambda *_, **__: events.append("abort")
         )
-        executor = S3ThreadPoolExecutor(max_workers=2)
+        executor = S3ThreadPool(max_workers=2)
         submit = executor.submit
         submitted = []
 
@@ -4267,7 +4267,7 @@ class TestS3FileSystem:
             return throttled()
 
         fs.core.put_object_acl = put_object_acl
-        executor = S3ThreadPoolExecutor(max_workers=1)
+        executor = S3ThreadPool(max_workers=1)
         submit = executor.submit
 
         submitted = []
@@ -5987,7 +5987,7 @@ class TestS3File:
             return upload
 
         fs.core.create_multipart_upload.side_effect = create
-        executor = S3ThreadPoolExecutor(max_workers=1)
+        executor = S3ThreadPool(max_workers=1)
         ready = _S3WriteSession.ready
 
         def interrupt_ready(session):
@@ -6087,7 +6087,7 @@ class TestS3File:
         fs = self._make_append_fs(b"a" * 6 if operation == "append" else b"")
         events = []
         fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
-        executor = S3ThreadPoolExecutor(max_workers=2)
+        executor = S3ThreadPool(max_workers=2)
         submit = executor.submit
         submitted = []
 
@@ -6196,7 +6196,7 @@ class TestS3File:
             "s3://bucket/key.txt",
             mode="wb",
             block_size=4,
-            executor=S3AioExecutor(asyncio.get_running_loop(), max_workers=1),
+            executor=S3ThreadPool(max_workers=1),
         )
 
         def write():
@@ -6278,7 +6278,7 @@ class TestS3File:
             data,
             autocommit=autocommit,
             block_size=4,
-            executor=executor or S3ThreadPoolExecutor(max_workers=1),
+            executor=executor or S3ThreadPool(max_workers=1),
         )
         file.fs.core.create_multipart_upload.return_value = S3MultipartUpload(
             {"Bucket": "bucket", "Key": "key.txt", "UploadId": "uploadid"}
@@ -6499,7 +6499,7 @@ class TestS3File:
     def test_write_exceeding_max_parts(self, existing, mode, writes, closing, autocommit):
         fs = self._make_append_fs(existing)
         fs.core.MULTIPART_UPLOAD_MAX_PARTS = 3
-        executor = S3ThreadPoolExecutor(max_workers=1)
+        executor = S3ThreadPool(max_workers=1)
         f = S3File(
             fs,
             "s3://bucket/key.txt",
@@ -6564,7 +6564,7 @@ class TestS3File:
         fs.core.upload_part.side_effect = upload_part
         # More threads than parts, so that only the write limits the parts
         # in flight.
-        executor = S3ThreadPoolExecutor(max_workers=8)
+        executor = S3ThreadPool(max_workers=8)
         submit_to = executor.submit_to
         uploads: dict[int, Future] = {}
         in_flight = []
@@ -6625,7 +6625,7 @@ class TestS3File:
             block_size=4,
             autocommit=autocommit,
             max_workers=max_workers,
-            executor=S3ThreadPoolExecutor(max_workers=max_workers),
+            executor=S3ThreadPool(max_workers=max_workers),
         )
         try:
             for _ in range(max_workers):
@@ -6715,7 +6715,7 @@ class TestS3File:
             raise PermissionError("Access Denied")
 
         fs.core.upload_part_copy.side_effect = upload_part_copy
-        executor = S3ThreadPoolExecutor(max_workers=max_workers)
+        executor = S3ThreadPool(max_workers=max_workers)
         f = S3File(
             fs,
             "s3://bucket/key.txt",
@@ -6972,7 +6972,7 @@ class TestS3File:
         # copies of a large append, are cancelled. The parts used to be
         # collected in part-number order.
         file = self._make_multipart_write_file(
-            b"x" * 16, autocommit=False, executor=S3ThreadPoolExecutor(max_workers=2)
+            b"x" * 16, autocommit=False, executor=S3ThreadPool(max_workers=2)
         )
         events = []
         file.fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
@@ -7018,7 +7018,7 @@ class TestS3File:
         # interrupted, the interrupt propagates, the executor is shut down,
         # and the upload is kept so that discard() retries the abort; a later
         # commit() raises instead of completing it.
-        executor = S3ThreadPoolExecutor(max_workers=1)
+        executor = S3ThreadPool(max_workers=1)
         file = self._make_multipart_write_file(b"x" * 16, autocommit=False, executor=executor)
         file._upload_chunk(final=True)
         file.fs.core.complete_multipart_upload.side_effect = RuntimeError("complete failed")
@@ -7079,7 +7079,7 @@ class TestS3File:
         fs.core.create_multipart_upload = retried(
             operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)
         )
-        executor = S3ThreadPoolExecutor(max_workers=1)
+        executor = S3ThreadPool(max_workers=1)
         ready = _S3WriteSession.ready
 
         def interrupt_ready(session):
@@ -7105,36 +7105,6 @@ class TestS3File:
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1
         assert file.closed
-
-    def test_discard_on_event_loop_thread(self):
-        # GH-976: the parts that have not started are cancelled and not
-        # waited for, so a rollback on the thread of the event loop that
-        # would run them does not block.
-        files = []
-
-        async def rollback():
-            executor = S3AioExecutor(loop=asyncio.get_running_loop())
-            file = self._make_write_file(b"", autocommit=False, block_size=4, executor=executor)
-            files.append(file)
-            file.fs.core.create_multipart_upload.return_value = S3MultipartUpload(
-                {"Bucket": "bucket", "Key": "key.txt", "UploadId": "uploadid"}
-            )
-            file._session.start()
-            await asyncio.wrap_future(file._session.ready())
-            # Dispatched by the event loop, which this rollback blocks.
-            for part_number in (1, 2):
-                file._session.submit_part(part_number, b"x" * 4)
-            file.discard()
-
-        thread = threading.Thread(target=asyncio.run, args=(rollback(),), daemon=True)
-        thread.start()
-        thread.join(5)
-
-        assert not thread.is_alive()
-        (file,) = files
-        file.fs.core.upload_part.assert_not_called()
-        file.fs._call.assert_called_once()
-        assert file.fs._call.call_args.args[0] == S3_CLIENT.abort_multipart_upload
 
     @pytest.mark.parametrize("autocommit", [True, False])
     def test_upload_chunk_multipart(self, autocommit):

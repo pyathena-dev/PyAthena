@@ -36,7 +36,7 @@ import pyathena
 from pyathena.connection import Connection
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3DeleteResult
 from pyathena.filesystem.s3_errors import S3ClientError
-from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPoolExecutor
+from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool
 from pyathena.filesystem.s3_object import (
     S3Metadata,
     S3MultipartUpload,
@@ -1099,18 +1099,19 @@ class S3FileSystem(AbstractFileSystem):
         )
 
     def _create_executor(self, max_workers: int) -> S3Executor:
-        """Create an executor strategy for parallel operations.
+        """Create the executor of the parallel requests of a file or an operation.
 
-        Subclasses can override to provide alternative execution strategies
-        (e.g., asyncio-based execution).
+        The files of ``S3FileSystem`` and ``AioS3FileSystem`` and the
+        parallel operations of ``S3FileSystem`` take their executors from
+        this method.
 
         Args:
             max_workers: Maximum number of parallel workers.
 
         Returns:
-            An S3Executor instance.
+            A new ``S3ThreadPool``.
         """
-        return S3ThreadPoolExecutor(max_workers=max_workers)
+        return S3ThreadPool(max_workers=max_workers)
 
     def _delete_objects(self, paths: list[str], max_workers: int | None = None, **kwargs) -> None:
         """Delete objects with DeleteObjects requests grouped by bucket.
@@ -2882,7 +2883,7 @@ class S3File(AbstractBufferedFile):
                 in flight, waiting for one of them to finish before it submits
                 another.
             executor: The executor for parallel operations. If None, a new
-                ``S3ThreadPoolExecutor`` is created.
+                ``S3ThreadPool`` is created.
             block_size: The block size for reads and writes. Must be between
                 ``S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE`` and
                 ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE``, inclusive, unless reading.
@@ -2928,7 +2929,7 @@ class S3File(AbstractBufferedFile):
         self.s3_additional_kwargs: dict[str, Any] = target.request_kwargs
         self._details: S3Object | dict[str, Any] = target.details
 
-        self._executor: S3Executor = executor or S3ThreadPoolExecutor(max_workers=max_workers)
+        self._executor: S3Executor = executor or S3ThreadPool(max_workers=max_workers)
         # The requests and the state of the write; None when reading.
         self._session: _S3WriteSession | None = None
         if mode != "rb":

@@ -12,13 +12,12 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import os
-import sys
 import threading
 import traceback
+import warnings
 import weakref
 from abc import ABCMeta, abstractmethod
 from collections.abc import Callable
-from concurrent import futures
 from concurrent.futures import Future
 from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import cpu_count
@@ -84,8 +83,8 @@ class _S3WorkItem(Generic[T]):
     def settle(self, submitted: Future[Any]) -> None:
         """Resolve the future if the executor dropped the callable before it ran.
 
-        This happens, for example, when the event loop of an
-        :class:`S3AioExecutor` shuts down.
+        This happens, for example, when an executor cancels the calls that
+        have not started as it shuts down.
 
         Args:
             submitted: The finished future of the submitted :meth:`run`.
@@ -150,9 +149,9 @@ class S3Executor(metaclass=ABCMeta):
         scheduling midway, before :meth:`submit` returns. Cancelling the
         future keeps a callable that has not started from running; a started
         callable sets the future's result or exception. If the executor drops
-        the callable before it starts, as :class:`S3AioExecutor` does when its
-        event loop shuts down, the future is cancelled or gets the error that
-        the executor reported.
+        the callable before it starts, such as by cancelling it at its
+        shutdown, the future is cancelled or gets the error that the
+        executor reported.
 
         The arguments of a failed callable, such as the body of a part, are
         freed when it fails: its error keeps the frames that it was raised
@@ -177,47 +176,22 @@ class S3Executor(metaclass=ABCMeta):
         self.shutdown(wait=True)
 
 
-class S3ThreadPoolExecutor(S3Executor):
-    """Executor that runs the submitted calls in a pool of threads.
+class S3ThreadPool(S3Executor):
+    """A thread pool for the requests of the S3 filesystems.
 
-    This is the default executor used by ``S3File`` and ``S3FileSystem``
-    for synchronous parallel operations. The calls run in an
-    :class:`S3AioThreadPool`, so that a forked child process, whose copy of
-    the executor has no threads, creates new ones.
-    """
-
-    def __init__(self, max_workers: int) -> None:
-        """Initialize the executor without starting any thread.
-
-        Args:
-            max_workers: The maximum number of threads of the thread pool.
-
-        Raises:
-            ValueError: If ``max_workers`` is not positive.
-        """
-        self._pool = S3AioThreadPool(max_workers)
-
-    @override
-    def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
-        return self._pool.submit(fn, *args, **kwargs)
-
-    @override
-    def shutdown(self, wait: bool = True) -> None:
-        self._pool.shutdown(wait=wait)
-
-
-class S3AioThreadPool(S3Executor):
-    """A thread pool that runs the blocking calls of asyncio code.
-
-    Unlike ``asyncio.to_thread()``, which runs a call in the default executor
-    of the event loop, this pool runs at most ``max_workers`` calls at once in
-    threads of its own, so that neither the size nor the load of the default
-    executor limits or blocks them. The threads are created as the calls need
+    It runs at most ``max_workers`` calls at once in threads of its own, so
+    that, unlike ``asyncio.to_thread()``, which runs a call in the default
+    executor of the event loop, neither the size nor the load of that
+    executor limits or blocks the calls of asyncio code. The calls are
+    queued in the order they were submitted. The threads are created as the calls need
     them, and each call runs with a copy of the caller's context variables,
     as with ``asyncio.to_thread()``. In a forked child process, whose copy
     has no threads, the pool creates new ones, as it does after
-    :meth:`release`. The pool can be shared by several event loops and
-    threads.
+    :meth:`release`. The pool can be shared by several threads and event
+    loops.
+
+    ``S3ThreadPoolExecutor`` and ``S3AioThreadPool`` are aliases of this
+    class.
 
     Args:
         max_workers: The maximum number of calls that run at once.
@@ -227,7 +201,7 @@ class S3AioThreadPool(S3Executor):
     """
 
     # The pools of this process, which a forked child resets.
-    _instances: ClassVar[weakref.WeakSet[S3AioThreadPool]] = weakref.WeakSet()
+    _instances: ClassVar[weakref.WeakSet[S3ThreadPool]] = weakref.WeakSet()
     # The executors that a forked child copied from its parent. They are
     # kept, since collecting one would put to a queue whose lock a thread of
     # the parent may have held.
@@ -274,16 +248,17 @@ class S3AioThreadPool(S3Executor):
                 live._end_call(future)
 
         self._end_call_callback = end_call
-        S3AioThreadPool._instances.add(self)
+        S3ThreadPool._instances.add(self)
 
     @override
     def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
         """Schedule a blocking call in a thread of the pool.
 
         As with ``ThreadPoolExecutor``, the returned future can be cancelled
-        only before the call starts. The calls start in the order they were
-        submitted, so that a call that waits for the calls submitted before it
-        does not wait for a thread that it holds.
+        only before the call starts. The calls are queued in the order they
+        were submitted, so that the calls submitted before a call that waits
+        for them are taken by threads before it, and it does not wait for a
+        thread that it holds.
 
         Args:
             fn: The blocking callable.
@@ -483,148 +458,50 @@ class S3AioThreadPool(S3Executor):
 
 
 if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=S3AioThreadPool._reset_after_fork)
+    os.register_at_fork(after_in_child=S3ThreadPool._reset_after_fork)
 
 
-class S3AioExecutor(S3Executor):
-    """Executor that schedules work on an asyncio event loop.
+class S3AioExecutor(S3ThreadPool):
+    """A thread pool kept for compatibility, an :class:`S3ThreadPool`.
 
-    Uses ``asyncio.run_coroutine_threadsafe()`` to dispatch blocking functions
-    through the event loop to an ``S3AioThreadPool`` of its own, returning
-    ``concurrent.futures.Future`` objects that are compatible with
-    ``as_completed()``, ``wait()`` and ``Future.cancel()``. As with
-    ``ThreadPoolExecutor``, a future cannot be cancelled once its function has
-    started. At most ``max_workers`` of the submitted functions run at once,
-    whatever the size of the default executor of the event loop.
+    It used to dispatch the calls through an asyncio event loop. The calls
+    now run directly in the pool, so they need no running loop, and they run
+    to their end when the loop stops.
 
     Args:
-        loop: A running asyncio event loop.
-        max_workers: The maximum number of submitted functions that run at once.
+        loop: Ignored, with a ``DeprecationWarning`` if given.
+        max_workers: The maximum number of calls that run at once.
 
     Raises:
-        RuntimeError: If the event loop is not running when ``submit`` is
-            called, or ``submit`` is called in a forked child process, where
-            the event loop of the parent does not run.
+        ValueError: If ``max_workers`` is not positive.
     """
-
-    # The executors of this process, which a forked child detaches from the
-    # event loop of its parent.
-    _instances: ClassVar[weakref.WeakSet[S3AioExecutor]] = weakref.WeakSet()
 
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop | None = None,
         max_workers: int = (cpu_count() or 1) * 5,
     ) -> None:
-        """Initialize the executor with the event loop to schedule work on.
+        """Initialize the pool without starting any thread.
 
         Args:
-            loop: The asyncio event loop. ``submit`` raises ``RuntimeError``
-                if it is None or not running.
-            max_workers: The maximum number of submitted functions that run
-                at once.
+            loop: Ignored, with a ``DeprecationWarning`` if given.
+            max_workers: The maximum number of calls that run at once.
 
         Raises:
             ValueError: If ``max_workers`` is not positive.
         """
-        self._loop = loop
-        self._pool = S3AioThreadPool(max_workers)
-        # Orders the dispatches with the shutdown.
-        self._lock = threading.Lock()
-        self._shutdown = False
-        self._forked = False
-        S3AioExecutor._instances.add(self)
-
-    @override
-    def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
-        if self._forked:
-            raise RuntimeError("S3AioExecutor cannot be used in a forked child process.")
-        if self._loop is not None and self._loop.is_running():
-            # The future of run_coroutine_threadsafe can be cancelled while
-            # the function keeps running in its thread, so the returned future
-            # is started and resolved by the function's thread instead.
-            future: Future[T] = Future()
-            item = _S3WorkItem(future, fn, args, kwargs)
-            with self._lock:
-                if self._shutdown:
-                    raise RuntimeError("cannot schedule new futures after shutdown")
-                # The task runs in a copy of the submitter's context, which
-                # call_soon_threadsafe() schedules it with, and so does the
-                # function in the thread of the pool.
-                task = asyncio.run_coroutine_threadsafe(self._dispatch(item.run), self._loop)
-            task.add_done_callback(item.settle)
-            return future
-        raise RuntimeError(
-            "S3AioExecutor requires a running event loop. "
-            "Use S3ThreadPoolExecutor for synchronous usage."
-        )
-
-    async def _dispatch(self, run: Callable[[], None]) -> None:
-        """Hand a submitted function to the pool and wait for it.
-
-        Unlike :meth:`S3AioThreadPool.run`, a cancellation of this task, such
-        as by the shutdown of the event loop, does not stop the retries of a
-        function that has started, which the caller still waits for.
-
-        Args:
-            run: The function of the work item.
-        """
-        await asyncio.wrap_future(self._pool.submit(run))
-
-    async def _shutdown_pool(self) -> None:
-        """Shut down the pool once the functions submitted before have reached it.
-
-        Run as a task of the event loop, which starts its tasks in the order
-        they were scheduled, so the tasks that dispatch the functions
-        submitted before have handed them to the pool.
-        """
-        self._pool.shutdown(wait=False)
-
-    @override
-    def shutdown(self, wait: bool = True) -> None:
-        loop = self._loop
-        with self._lock:
-            self._shutdown = True
-            closing = None
-            if loop is not None and loop.is_running():
-                # A function reaches the pool only when the event loop runs
-                # its task, so the pool is shut down after the dispatches.
-                closing = asyncio.run_coroutine_threadsafe(self._shutdown_pool(), loop)
-        if loop is None or closing is None:
-            self._pool.shutdown(wait=wait)
-            return
-        try:
-            on_loop = asyncio.get_running_loop() is loop
-        except RuntimeError:
-            on_loop = False
-        # On the thread of the event loop, such as when a file is garbage
-        # collected there, waiting would keep the loop from dispatching.
-        if wait and not on_loop:
-            # The task is cancelled if the event loop shuts down before it
-            # runs, and never runs if the loop stops instead; the functions
-            # that it has not dispatched then do not reach the pool either.
-            while not futures.wait([closing], timeout=0.1).done:
-                # The thread of a loop that runs in a daemon thread, such as
-                # fsspec's, stops when the interpreter exits, while the loop
-                # still reports running.
-                if not loop.is_running() or sys.is_finalizing():
-                    break
-            self._pool.shutdown(wait=True)
-
-    @classmethod
-    def _reset_after_fork(cls) -> None:
-        """Detach the executors that a forked child copied from the event loop of its parent.
-
-        The copy of the loop reports running, but nothing runs it, and a lock
-        that a thread of the parent held stays held. Each executor then
-        raises from :meth:`submit`, and :meth:`shutdown` only shuts down its
-        pool.
-        """
-        for executor in list(cls._instances):
-            executor._loop = None
-            executor._lock = threading.Lock()
-            executor._forked = True
+        if loop is not None:
+            warnings.warn(
+                "The loop argument of S3AioExecutor is ignored: the calls run in the pool "
+                "without the event loop. S3AioExecutor is kept for compatibility; use "
+                "S3ThreadPool instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        super().__init__(max_workers)
 
 
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=S3AioExecutor._reset_after_fork)
+#: An alias of :class:`S3ThreadPool`, kept for compatibility.
+S3ThreadPoolExecutor = S3ThreadPool
+#: An alias of :class:`S3ThreadPool`, kept for compatibility.
+S3AioThreadPool = S3ThreadPool
