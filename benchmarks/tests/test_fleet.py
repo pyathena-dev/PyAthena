@@ -48,6 +48,21 @@ from pyathena_bench.fleet import (
 SETTINGS = Settings(scales={"small": 10000, "xlarge": 10000000})
 
 
+@pytest.fixture(autouse=True)
+def no_instance_metadata(monkeypatch):
+    """Make instance metadata report no interruption notice, as on an EC2 host without one.
+
+    Without this, the default notice check of :func:`work` requests the
+    metadata service, whose two-second timeout outlasts the tests' leases on
+    hosts where the request is neither answered nor refused.
+    """
+
+    def no_instance_action(path):
+        raise urllib.error.HTTPError(path, 404, "Not Found", None, None)
+
+    monkeypatch.setattr("pyathena_bench.fleet.instance_metadata", no_instance_action)
+
+
 class FakeS3:
     """In-memory S3 with conditional writes, as used by the fleet queue."""
 
@@ -1449,10 +1464,6 @@ class TestWork:
             lambda seconds: submit(queue, [job("a")], config, manifest),
         )
 
-        def no_instance_action(path):
-            raise urllib.error.HTTPError(path, 404, "Not Found", None, None)
-
-        monkeypatch.setattr("pyathena_bench.fleet.instance_metadata", no_instance_action)
         ran = work(queue, tmp_path / "w", api_slots=1, runner=lambda *a: 0, settle=no_queries,
                    wait=True)  # fmt: skip
         # The default notice reads the rehearsal file, which the worker removed when it started.
