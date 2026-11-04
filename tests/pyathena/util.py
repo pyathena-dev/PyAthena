@@ -246,6 +246,23 @@ async def await_bounded(awaitable, timeout=EVENT_TIMEOUT):
     return task.result()
 
 
+def mock_connection(max_pool_connections=10):
+    """Return a mock connection whose S3 client has a connection pool of the given size.
+
+    The filesystems size their request pool from the ``max_pool_connections``
+    of the S3 client when ``max_workers`` is not given.
+
+    Args:
+        max_pool_connections: The connection pool size of the S3 client.
+
+    Returns:
+        The mock connection.
+    """
+    connection = MagicMock()
+    connection.s3_client.meta.config.max_pool_connections = max_pool_connections
+    return connection
+
+
 def run_bounded(main, timeout=EVENT_TIMEOUT):
     """Run a coroutine with ``asyncio.run()``, failing if it does not end within the timeout.
 

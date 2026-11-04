@@ -100,6 +100,21 @@ transaction commits, and the multipart upload is aborted.
 `max_workers` is an argument of `S3FileSystem`, `AioS3FileSystem`, `open`, `put`, and
 `pipe`.
 
+The requests that the files and operations of a filesystem run in parallel (range
+reads, parts, part copies, the ACLs of a recursive `chmod`, the DeleteObjects batches of
+`rm`, and the aborts of `clear_multipart_uploads`) share one request pool of the
+filesystem, with `max_workers` threads. Each file or operation runs at most its own
+`max_workers` requests at once in that pool. The `max_workers` of the filesystem
+defaults to the `max_pool_connections` of its S3 client: 10 unless configured, or that
+of the client of the connection given with `connection`. A client that the filesystem
+builds takes its `max_pool_connections` from `max_workers` unless `config_kwargs` sets
+it. `close()`, or the end of a `with` block, releases the threads of the pool once they
+are idle, and the filesystem stays usable.
+
+In a forked child process, create a new filesystem. A file that the parent opened raises
+`RuntimeError` there from its reads, writes, and flushes, `commit()`, and `discard()`,
+and closing it only marks it closed, without uploading or aborting anything.
+
 A file returned by `open` whose write or commit has failed, or which has been
 discarded, cannot be committed: its `commit()` raises `S3MultipartStateError`. Inside a
 transaction, a write error that the caller catches therefore makes the transaction fail
@@ -642,6 +657,7 @@ for source, destination in pairing.copy_pairs(sources):
 ## Async filesystem
 
 `AioS3FileSystem` provides the same functionality on top of fsspec's
-`AsyncFileSystem`, running its blocking calls in thread pools sized by `max_workers`.
+`AsyncFileSystem`, running its blocking calls in a thread pool sized by `max_workers`,
+and its parallel requests in the request pool of its internal `S3FileSystem`.
 Its `open_async()` returns a file whose reads and writes are coroutines.
 See {ref}`aio-s3-filesystem` for details.

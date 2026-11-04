@@ -20,6 +20,7 @@ from pyathena.s3fs.converter import DefaultS3FSTypeConverter
 from pyathena.s3fs.reader import AthenaCSVReader, EmptyStringAsNullCSVReader
 from pyathena.s3fs.result_set import AthenaS3FSResultSet
 from pyathena.util import RetryConfig
+from tests.pyathena.util import mock_connection
 
 
 class _TupleCSVReader:
@@ -53,7 +54,7 @@ def _result_set(
         filesystem = MagicMock()
         filesystem._open.return_value = stream
         filesystem_class = MagicMock(return_value=filesystem)
-    connection = MagicMock()
+    connection = mock_connection()
     connection.s3_client.head_object.return_value = {"ContentLength": len(data.encode())}
     connection.client.get_query_results.return_value = {
         "ResultSet": {

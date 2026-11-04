@@ -17,7 +17,9 @@ import traceback
 import warnings
 import weakref
 from abc import ABCMeta, abstractmethod
+from collections import deque
 from collections.abc import Callable
+from concurrent import futures
 from concurrent.futures import Future
 from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import cpu_count
@@ -140,6 +142,93 @@ class S3Executor(metaclass=ABCMeta):
     def shutdown(self, wait: bool = True) -> None:
         """Shut down the executor, freeing any resources."""
         ...
+
+    async def run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+        """Run a blocking call in the executor and wait for it.
+
+        Cancelling the waiting task cancels a call that has not started, and
+        stops the retries of the AWS API calls that a running call makes, as
+        :func:`~pyathena.aio.util.run_in_thread` does; the call itself keeps
+        running until it returns or raises.
+
+        Args:
+            fn: The blocking callable.
+            *args: Positional arguments passed to the callable.
+            **kwargs: Keyword arguments passed to the callable.
+
+        Returns:
+            The return value of the call.
+
+        Raises:
+            RuntimeError: If the executor has been shut down.
+        """
+        stop = threading.Event()
+        # Orders the end of the call with a cancellation, after which work
+        # that the call left running, such as the parts of a write in a
+        # transaction, is not stopped.
+        lock = threading.Lock()
+        returned = False
+
+        def call() -> T:
+            """Run the call in a scope that the cancellation stops until it returns."""
+            nonlocal returned
+            try:
+                with stop_retries_on(stop):
+                    return fn(*args, **kwargs)
+            finally:
+                with lock:
+                    returned = True
+
+        try:
+            return await asyncio.wrap_future(self.submit(call))
+        except asyncio.CancelledError:
+            with lock:
+                if not returned:
+                    stop.set()
+            raise
+
+    async def run_shielded(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+        """Run a blocking call that a cancellation of the waiting task does not stop.
+
+        The call runs to its end, even if it has not started when the waiting
+        task is cancelled, and its retries are not stopped; its outcome is then
+        dropped. See :meth:`wait_shielded`.
+
+        Args:
+            fn: The blocking callable.
+            *args: Positional arguments passed to the callable.
+            **kwargs: Keyword arguments passed to the callable.
+
+        Returns:
+            The return value of the call.
+
+        Raises:
+            RuntimeError: If the executor has been shut down.
+        """
+        return await self.wait_shielded(self.submit(fn, *args, **kwargs))
+
+    async def wait_shielded(self, future: Future[T]) -> T:
+        """Wait for a submitted call that a cancellation of the waiting task does not cancel.
+
+        Unlike awaiting ``asyncio.wrap_future(future)``, a cancellation of
+        the waiting task leaves the future to the caller, which can still
+        wait for it or cancel it, and its outcome is retrieved, so that
+        asyncio does not log a failure that ends after the cancellation as
+        never retrieved.
+
+        Args:
+            future: The future of a call submitted to this executor.
+
+        Returns:
+            The return value of the call.
+        """
+        waiter = asyncio.wrap_future(future)
+        waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
+        # Unlike shield(), which on Python 3.14 and later also logs the failure
+        # of a future that ends after a cancellation, wait() leaves the future
+        # alone when the waiting task is cancelled.
+        await asyncio.wait([waiter])
+        return waiter.result()
 
     def submit_to(self, future: Future[T], fn: Callable[..., T], *args: Any, **kwargs: Any) -> None:
         """Submit a callable whose outcome resolves a future of the caller.
@@ -278,93 +367,6 @@ class S3ThreadPool(S3Executor):
         future.add_done_callback(self._end_call_callback)
         return future
 
-    async def run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-        """Run a blocking call in a thread of the pool and wait for it.
-
-        Cancelling the waiting task cancels a call that has not started, and
-        stops the retries of the AWS API calls that a running call makes, as
-        :func:`~pyathena.aio.util.run_in_thread` does; the call itself keeps
-        running until it returns or raises.
-
-        Args:
-            fn: The blocking callable.
-            *args: Positional arguments passed to the callable.
-            **kwargs: Keyword arguments passed to the callable.
-
-        Returns:
-            The return value of the call.
-
-        Raises:
-            RuntimeError: If the pool has been shut down.
-        """
-        stop = threading.Event()
-        # Orders the end of the call with a cancellation, after which work
-        # that the call left running, such as the parts of a write in a
-        # transaction, is not stopped.
-        lock = threading.Lock()
-        returned = False
-
-        def call() -> T:
-            """Run the call in a scope that the cancellation stops until it returns."""
-            nonlocal returned
-            try:
-                with stop_retries_on(stop):
-                    return fn(*args, **kwargs)
-            finally:
-                with lock:
-                    returned = True
-
-        try:
-            return await asyncio.wrap_future(self.submit(call))
-        except asyncio.CancelledError:
-            with lock:
-                if not returned:
-                    stop.set()
-            raise
-
-    async def run_shielded(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
-        """Run a blocking call that a cancellation of the waiting task does not stop.
-
-        The call runs to its end, even if it has not started when the waiting
-        task is cancelled, and its retries are not stopped; its outcome is then
-        dropped. See :meth:`wait_shielded`.
-
-        Args:
-            fn: The blocking callable.
-            *args: Positional arguments passed to the callable.
-            **kwargs: Keyword arguments passed to the callable.
-
-        Returns:
-            The return value of the call.
-
-        Raises:
-            RuntimeError: If the pool has been shut down.
-        """
-        return await self.wait_shielded(self.submit(fn, *args, **kwargs))
-
-    async def wait_shielded(self, future: Future[T]) -> T:
-        """Wait for a submitted call that a cancellation of the waiting task does not cancel.
-
-        Unlike awaiting ``asyncio.wrap_future(future)``, a cancellation of
-        the waiting task leaves the future to the caller, which can still
-        wait for it or cancel it, and its outcome is retrieved, so that
-        asyncio does not log a failure that ends after the cancellation as
-        never retrieved.
-
-        Args:
-            future: The future of a call submitted to this pool.
-
-        Returns:
-            The return value of the call.
-        """
-        waiter = asyncio.wrap_future(future)
-        waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
-        # Unlike shield(), which on Python 3.14 and later also logs the failure
-        # of a future that ends after a cancellation, wait() leaves the future
-        # alone when the waiting task is cancelled.
-        await asyncio.wait([waiter])
-        return waiter.result()
-
     @override
     def shutdown(self, wait: bool = True) -> None:
         """Stop accepting calls and release the threads once they are idle.
@@ -459,6 +461,147 @@ class S3ThreadPool(S3Executor):
 
 if hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=S3ThreadPool._reset_after_fork)
+
+
+class _S3PoolScope(S3Executor):
+    """The calls of one file or operation in a pool that others share.
+
+    At most ``max_workers`` calls of the scope are in the pool at once; the
+    others wait in the scope, in the order they were submitted, and enter the
+    pool as earlier ones end. Each call runs with a copy of the context of its
+    submitter. :meth:`shutdown` stops accepting calls and, with ``wait``,
+    waits for those submitted, without shutting the pool down, so that a file
+    or an operation drains its own requests while others keep using the pool.
+
+    Args:
+        pool: The shared pool.
+        max_workers: The maximum number of calls of the scope in the pool.
+
+    Raises:
+        ValueError: If ``max_workers`` is not positive.
+    """
+
+    def __init__(self, pool: S3ThreadPool, max_workers: int) -> None:
+        """Initialize the scope on a shared pool.
+
+        Args:
+            pool: The shared pool.
+            max_workers: The maximum number of calls of the scope in the pool.
+
+        Raises:
+            ValueError: If ``max_workers`` is not positive.
+        """
+        if max_workers <= 0:
+            raise ValueError("max_workers must be greater than 0")
+        self.max_workers = max_workers
+        self._pool = pool
+        self._lock = threading.Lock()
+        # The futures of the calls that were submitted and have not ended.
+        self._futures: set[Future[Any]] = set()
+        # The calls that wait for a place in the pool, and the number of
+        # places that the calls of the scope hold.
+        self._waiting: deque[tuple[contextvars.Context, _S3WorkItem[Any]]] = deque()
+        self._running = 0
+        self._shutdown = False
+
+    @override
+    def submit(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> Future[T]:
+        """Submit a call, which enters the pool once fewer than ``max_workers`` calls are there.
+
+        As with ``ThreadPoolExecutor``, the returned future can be cancelled
+        only before the call starts.
+
+        Args:
+            fn: The callable to run.
+            *args: Positional arguments passed to the callable.
+            **kwargs: Keyword arguments passed to the callable.
+
+        Returns:
+            The future of the call.
+
+        Raises:
+            RuntimeError: If the scope has been shut down.
+        """
+        future: Future[T] = Future()
+        item = _S3WorkItem(future, fn, args, kwargs)
+        # Captured here, since a waiting call enters the pool from the thread
+        # of the call that ends before it.
+        context = contextvars.copy_context()
+        with self._lock:
+            if self._shutdown:
+                raise RuntimeError("cannot schedule new futures after shutdown")
+            self._futures.add(future)
+            enter = self._running < self.max_workers
+            if enter:
+                self._running += 1
+            else:
+                self._waiting.append((context, item))
+        future.add_done_callback(self._untrack)
+        if enter:
+            self._enter(context, item)
+        return future
+
+    @override
+    def shutdown(self, wait: bool = True) -> None:
+        """Stop accepting calls and, with ``wait``, wait for those submitted.
+
+        The pool keeps running, also for the calls of this scope that have
+        not entered it yet.
+
+        Args:
+            wait: Whether to wait for the calls submitted through this scope.
+        """
+        with self._lock:
+            self._shutdown = True
+            pending = list(self._futures)
+        if wait:
+            futures.wait(pending)
+
+    def _enter(self, context: contextvars.Context, item: _S3WorkItem[Any]) -> None:
+        """Hand a call to the pool, in the place that the scope holds for it.
+
+        Args:
+            context: The context of the submitter of the call.
+            item: The call.
+        """
+        try:
+            entered = self._pool.submit(context.run, item.run)
+        except BaseException as e:
+            # Such as after the shutdown of the pool: the future of the call
+            # gets the error, and the place goes to the next call.
+            rejected: Future[None] = Future()
+            rejected.set_running_or_notify_cancel()
+            rejected.set_exception(e)
+            item.settle(rejected)
+            self._leave(rejected)
+            if not isinstance(e, Exception):
+                raise
+            return
+        entered.add_done_callback(item.settle)
+        entered.add_done_callback(self._leave)
+
+    def _leave(self, entered: Future[Any]) -> None:
+        """Give the place of a call that has ended to the next waiting call.
+
+        Args:
+            entered: The finished future of the call in the pool.
+        """
+        with self._lock:
+            if self._waiting:
+                context, item = self._waiting.popleft()
+            else:
+                self._running -= 1
+                return
+        self._enter(context, item)
+
+    def _untrack(self, future: Future[Any]) -> None:
+        """Stop tracking a call that has ended or was cancelled.
+
+        Args:
+            future: The future of the call.
+        """
+        with self._lock:
+            self._futures.discard(future)
 
 
 class S3AioExecutor(S3ThreadPool):

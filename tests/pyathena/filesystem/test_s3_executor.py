@@ -19,7 +19,7 @@ from unittest import mock
 import pytest
 from botocore.exceptions import ClientError
 
-from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPool
+from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPool, _S3PoolScope
 from pyathena.util import RetryConfig, override, retry_api_call, stop_retries_on
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
@@ -27,6 +27,7 @@ from tests.pyathena.util import (
     forking,
     overlapping_calls,
     run_in_forked_child,
+    shutdown_bounded,
 )
 
 
@@ -308,6 +309,108 @@ class TestS3ThreadPool:
             holder.join(EVENT_TIMEOUT)
             pool.shutdown()
         assert code == 0
+
+
+class TestS3PoolScope:
+    def test_window(self):
+        # GH-1332: at most max_workers calls of a scope are in the shared
+        # pool at once, as a file with its own pool of that size used to run.
+        pool = S3ThreadPool(4)
+        call, state = overlapping_calls(2)
+        scope = _S3PoolScope(pool, 2)
+        try:
+            calls = [scope.submit(call) for _ in range(4)]
+            wait(calls, timeout=EVENT_TIMEOUT)
+        finally:
+            shutdown_bounded(scope)
+            pool.shutdown()
+        assert all(c.done() for c in calls)
+        assert state["peak"] == 2
+
+    def test_waiting_call_context(self):
+        # GH-1332: a call that waits for a place in the pool runs with the
+        # context of its submitter, so that its stop scope reaches its
+        # retries, although it enters the pool from the thread of the call
+        # that ends before it.
+        variable: contextvars.ContextVar[str] = contextvars.ContextVar("variable")
+        stop = threading.Event()
+        stop.set()
+        operation = ThrottledOperation()
+        release = threading.Event()
+
+        def work():
+            with pytest.raises(ClientError):
+                retry_api_call(operation, RetryConfig(attempt=3, multiplier=0))
+            return variable.get()
+
+        pool = S3ThreadPool(2)
+        scope = _S3PoolScope(pool, 1)
+        try:
+            blocking = scope.submit(release.wait, EVENT_TIMEOUT)
+            variable.set("submitter")
+            with stop_retries_on(stop):
+                waiting = scope.submit(work)
+            variable.set("other")
+            release.set()
+            assert waiting.result(EVENT_TIMEOUT) == "submitter"
+            assert blocking.result(EVENT_TIMEOUT)
+        finally:
+            release.set()
+            shutdown_bounded(scope)
+            pool.shutdown()
+        assert operation.calls == 1
+
+    def test_shutdown_waits_for_own_calls(self):
+        # GH-1332: shutting a scope down waits for its own calls, also those
+        # that wait for a place, and not for those of another scope; the pool
+        # keeps running for the other scopes.
+        pool = S3ThreadPool(2)
+        own_release, other_release = threading.Event(), threading.Event()
+        own, other = _S3PoolScope(pool, 1), _S3PoolScope(pool, 1)
+        events = []
+
+        def slow_append(event):
+            # Still running when a shutdown that does not wait returns.
+            time.sleep(0.2)
+            events.append(event)
+
+        try:
+            other_call = other.submit(other_release.wait, EVENT_TIMEOUT)
+            own.submit(own_release.wait, EVENT_TIMEOUT)
+            own.submit(slow_append, "waiting call")
+            own_release.set()
+            shutdown_bounded(own)
+            assert events == ["waiting call"]
+            assert not other_call.done()
+            with pytest.raises(RuntimeError, match="after shutdown"):
+                own.submit(sum, [1, 2])
+            # The pool, whose other thread the other scope holds, still runs calls.
+            assert pool.submit(sum, [1, 2]).result(EVENT_TIMEOUT) == 3
+        finally:
+            own_release.set()
+            other_release.set()
+            shutdown_bounded(other)
+            pool.shutdown()
+        assert other_call.result(EVENT_TIMEOUT)
+
+    def test_cancel_waiting_call(self):
+        # GH-1332: a call that waits for a place in the pool can be cancelled
+        # through its future, and then never runs.
+        pool = S3ThreadPool(2)
+        scope = _S3PoolScope(pool, 1)
+        release = threading.Event()
+        events = []
+        try:
+            running = scope.submit(release.wait, EVENT_TIMEOUT)
+            waiting = scope.submit(events.append, "waiting call")
+            assert waiting.cancel()
+            release.set()
+            shutdown_bounded(scope)
+        finally:
+            release.set()
+            pool.shutdown()
+        assert running.result(EVENT_TIMEOUT)
+        assert events == []
 
 
 class TestS3AioExecutor:

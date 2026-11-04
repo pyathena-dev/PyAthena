@@ -55,7 +55,11 @@ from tests.pyathena.util import (
     MULTIPART_COPY_KWARGS,
     MULTIPART_COPY_SIZE,
     ThrottledOperation,
+    forking,
+    mock_connection,
+    overlapping_calls,
     retried,
+    run_in_forked_child,
     stub_multipart_copy,
 )
 
@@ -86,6 +90,7 @@ class TestS3FileSystem:
         # The requests of the core and of the filesystem go to one mock.
         fs._call = fs._core.call = mock.MagicMock()
         fs.max_workers = 4
+        fs._request_pool = S3ThreadPool(fs.max_workers)
         fs.default_block_size = S3FileSystem.DEFAULT_BLOCK_SIZE
         fs.allow_bucket_creation = False
         fs.allow_bucket_deletion = False
@@ -2679,6 +2684,114 @@ class TestS3FileSystem:
 
         with fs.open("s3://bucket/key", "wb") as f:
             assert f.max_workers == fs.max_workers
+
+    @pytest.mark.parametrize(
+        ("max_workers", "config_kwargs", "pool_size", "pool_connections"),
+        [
+            (None, {}, 10, 10),
+            (None, {"max_pool_connections": 25}, 25, 25),
+            (4, {}, 4, 4),
+            (4, {"max_pool_connections": 25}, 4, 25),
+        ],
+    )
+    def test_request_pool_size(self, max_workers, config_kwargs, pool_size, pool_connections):
+        # GH-1332: the request pool defaults to the connection pool of the S3
+        # client, and a client that the filesystem builds takes its
+        # connection pool from max_workers unless config_kwargs sets it.
+        # max_workers used to default to cpu_count() * 5.
+        fs = S3FileSystem(
+            max_workers=max_workers,
+            config_kwargs=config_kwargs,
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            skip_instance_cache=True,
+        )
+        assert fs.max_workers == pool_size
+        assert fs._request_pool.max_workers == pool_size
+        assert fs._client.meta.config.max_pool_connections == pool_connections
+
+    def test_request_pool_size_of_connection(self):
+        # GH-1332: with a connection, the request pool takes the connection
+        # pool of its S3 client.
+        fs = S3FileSystem(connection=mock_connection(7), skip_instance_cache=True)
+        assert fs.max_workers == 7
+
+    def test_files_share_request_pool(self):
+        # GH-1332: the reads of the files of a filesystem run in its request
+        # pool, which bounds them together. Each file used to have a pool of
+        # max_workers threads of its own.
+        fs = self._make_fs()
+        fs._request_pool = S3ThreadPool(2)
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = 64
+        call, state = overlapping_calls(2)
+
+        def get_object(path, range_, **kwargs):
+            call()
+            return bytes(range_[1] - range_[0])
+
+        fs.core.get_object = get_object
+
+        def read(_):
+            with fs.open(
+                "s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=2
+            ) as f:
+                return f.read()
+
+        with ThreadPoolExecutor(max_workers=2) as readers:
+            assert list(readers.map(read, range(2))) == [bytes(64)] * 2
+        assert state["peak"] == 2
+        # Closing the files leaves the pool running.
+        assert fs._request_pool.submit(sum, [1, 2]).result(EVENT_TIMEOUT) == 3
+        fs._request_pool.shutdown()
+
+    @pytest.mark.parametrize("exit_with", ["close", "with"])
+    def test_close_releases_threads(self, exit_with):
+        # GH-1332: close(), also at the end of a with block, ends the threads
+        # of the request pool, and the filesystem stays usable with new ones.
+        fs = self._make_fs()
+        threads = []
+
+        def record():
+            threads.append(threading.current_thread())
+
+        if exit_with == "close":
+            fs._request_pool.submit(record).result(EVENT_TIMEOUT)
+            fs.close()
+        else:
+            with fs:
+                fs._request_pool.submit(record).result(EVENT_TIMEOUT)
+        threads[0].join(EVENT_TIMEOUT)
+        assert not threads[0].is_alive()
+
+        fs._request_pool.submit(record).result(EVENT_TIMEOUT)
+        assert threads[1] is not threads[0]
+        fs.close()
+
+    @forking
+    def test_file_inherited_across_fork(self):
+        # GH-1332: in a forked child, a file that the parent opened raises on
+        # use, and closing it, also at garbage collection, only marks it
+        # closed, without uploading or aborting anything: the upload belongs
+        # to the parent.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        f = fs.open("s3://bucket/key", "wb")
+        f.write(b"x")
+
+        def child():
+            for use in (lambda: f.write(b"y"), f.flush, f.commit, f.discard, f.read):
+                with pytest.raises(RuntimeError, match="parent of this forked process"):
+                    use()
+            requests = fs._call.call_count + len(fs._core.client.method_calls)
+            f.close()
+            return f.closed and fs._call.call_count + len(fs._core.client.method_calls) == requests
+
+        try:
+            assert run_in_forked_child(child) == 0
+        finally:
+            f._close_without_commit()
 
     def test_open_version_id(self):
         fs = self._make_fs()

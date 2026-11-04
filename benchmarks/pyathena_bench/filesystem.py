@@ -136,7 +136,7 @@ async def transfer(
     for each operation, a coroutine on fsspec's IO loop. As ``AioS3FSCursor``
     reads result files, the asyncio filesystem's file and local-file transfers
     run in ``asyncio.to_thread()``: its files run their range requests and
-    part uploads in a pool of ``max_workers`` threads of the file, and its
+    part uploads in the request pool of the filesystem, and its
     ``get_file()`` and ``put_file()`` run the synchronous filesystem's in the
     filesystem's thread pool. Its copy is a coroutine awaited on the
     trial's event loop.
