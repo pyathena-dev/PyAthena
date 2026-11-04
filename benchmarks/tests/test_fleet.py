@@ -52,7 +52,7 @@ SETTINGS = Settings(scales={"small": 10000, "xlarge": 10000000})
 def steady_wall_clock(monkeypatch):
     """Make ``time.time()`` advance with the monotonic clock during each test.
 
-    Leases compare wall-clock times, and most tests' leases last two seconds
+    Leases compare wall-clock times, and some tests use leases of two seconds
     or less, so a step of the host's system clock, which on some WSL2 hosts
     jumps forward about three seconds every half minute, would otherwise
     expire them early. The patch replaces ``time.time`` for the whole process,
