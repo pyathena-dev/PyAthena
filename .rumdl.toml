@@ -56,6 +56,9 @@ siblings-only = true
 allowed-elements = ["details", "summary", "br", "kbd", "sub", "sup", "div", "img", "p", "a"]
 
 # Options whose rumdl defaults differ from markdownlint's
+[MD001]
+front-matter-title = false
+
 [MD010]
 code-blocks = true
 spaces-per-tab = 1
