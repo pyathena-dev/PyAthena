@@ -20,7 +20,6 @@ import traceback
 import warnings
 from concurrent.futures import Future, wait
 from io import BytesIO
-from multiprocessing import cpu_count
 from typing import TYPE_CHECKING, Any, cast
 
 from fsspec.asyn import AbstractAsyncStreamedFile, AsyncFileSystem, sync
@@ -32,7 +31,7 @@ from fsspec.utils import check_contained
 from pyathena.aio.util import create_in_thread
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem, S3FileTarget
 from pyathena.filesystem.s3_core import S3Core
-from pyathena.filesystem.s3_executor import S3ThreadPool, _S3PoolScope
+from pyathena.filesystem.s3_executor import S3ThreadPool
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3Metadata,
@@ -1234,7 +1233,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         path: str,
         mode: str = "rb",
         version_id: str | None = None,
-        max_workers: int = (cpu_count() or 1) * 5,
+        max_workers: int | None = None,
         block_size: int = S3FileSystem.DEFAULT_BLOCK_SIZE,
         size: int | None = None,
         s3_additional_kwargs: dict[str, Any] | None = None,
@@ -1251,7 +1250,8 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             mode: The file mode: ``rb``, ``wb``, ``ab``, or ``xb``.
             version_id: The version ID to read.
             max_workers: The number of parallel requests of the file, in the
-                request pool of the filesystem.
+                request pool of the filesystem. If None, the ``max_workers``
+                of the filesystem.
             block_size: The block size for reads and writes. Must be between
                 ``S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE`` and
                 ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE``, inclusive, unless
@@ -1276,12 +1276,14 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         # The requests of the file, at most max_workers at once in the
         # request pool of the filesystem. Created first, so that an invalid
         # max_workers raises before the lookups.
-        self._requests = cast(_S3PoolScope, fs._sync_fs._create_executor(max_workers=max_workers))
+        if max_workers is None:
+            max_workers = fs._sync_fs.max_workers
+        self._requests = fs._sync_fs._create_executor(max_workers=max_workers)
         # The scheduled commit, which close() waits for.
         self._commit_future: Future[None] | None = None
         self.max_workers = max_workers
-        # The process that opened the file; a forked child rejects it.
-        self._pid = os.getpid()
+        # The forks at the opening; a forked child rejects the file.
+        self._forks_at_open = S3File._forks
         target = S3FileTarget.resolve(
             fs._sync_fs,
             path,
@@ -1358,7 +1360,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             True in a forked child process of the process that opened the
             file.
         """
-        return getattr(self, "_pid", os.getpid()) != os.getpid()
+        return getattr(self, "_forks_at_open", S3File._forks) != S3File._forks
 
     def _check_process(self) -> None:
         """Reject the use of a file that the parent of a forked process opened.

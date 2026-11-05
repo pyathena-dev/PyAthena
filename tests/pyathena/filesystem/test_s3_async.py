@@ -2279,6 +2279,16 @@ class TestAioS3StreamedFile:
         core.put_object.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_default_max_workers(self, fs):
+        # GH-1332: a streamed file constructed without max_workers takes that
+        # of the filesystem, as open_async() passes it; None used to raise.
+        f = await asyncio.to_thread(AioS3StreamedFile, fs, "s3://bucket/key", "wb")
+        try:
+            assert f.max_workers == fs._sync_fs.max_workers
+        finally:
+            await f._close_without_commit()
+
+    @pytest.mark.asyncio
     async def test_write_parts_in_flight(self, fs):
         # GH-1159: a write keeps at most max_workers parts in flight, and waits
         # for one to finish without blocking the event loop, on which the

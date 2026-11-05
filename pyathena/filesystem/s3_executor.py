@@ -265,6 +265,10 @@ class S3Executor(metaclass=ABCMeta):
         self.shutdown(wait=True)
 
 
+# The pool, weakly referenced, whose thread this is.
+_pool_thread = threading.local()
+
+
 class S3ThreadPool(S3Executor):
     """A thread pool for the requests of the S3 filesystems.
 
@@ -426,6 +430,15 @@ class S3ThreadPool(S3Executor):
         executor, self._executor = self._executor, None
         return executor
 
+    def owns_current_thread(self) -> bool:
+        """Whether the calling thread is a thread of this pool.
+
+        Returns:
+            True in a thread that this pool started.
+        """
+        pool = getattr(_pool_thread, "pool", None)
+        return pool is not None and pool() is self
+
     @classmethod
     def _reset_after_fork(cls) -> None:
         """Drop the threads and locks that a forked child copied from its parent.
@@ -455,7 +468,11 @@ class S3ThreadPool(S3Executor):
         if self._shutdown:
             raise RuntimeError("cannot schedule new futures after shutdown")
         if self._executor is None:
-            self._executor = ThreadPoolExecutor(max_workers=self.max_workers)
+            pool = weakref.ref(self)
+            self._executor = ThreadPoolExecutor(
+                max_workers=self.max_workers,
+                initializer=lambda: setattr(_pool_thread, "pool", pool),
+            )
         return self._executor
 
 
@@ -508,6 +525,8 @@ class _S3PoolScope(S3Executor):
         # The calls that wait for a place in the pool, and those that the
         # pool has accepted and that have not ended.
         self._waiting: deque[_S3ScopeCall] = deque()
+        # The waiting calls that have not been cancelled, by future.
+        self._waiting_calls: dict[Future[Any], _S3ScopeCall] = {}
         self._entered: set[_S3ScopeCall] = set()
         self._shutdown = False
 
@@ -536,6 +555,15 @@ class _S3PoolScope(S3Executor):
         call = _S3ScopeCall(
             contextvars.copy_context(), _S3WorkItem(future, fn, args, kwargs), future
         )
+        if self._pool.owns_current_thread():
+            # A thread of the pool, such as one in which garbage collection
+            # closes a file, runs the call itself instead of waiting for a
+            # place in the pool that it holds (T1).
+            with self._lock:
+                if self._shutdown:
+                    raise RuntimeError("cannot schedule new futures after shutdown")
+            call.item.run()
+            return future
         try:
             with self._lock:
                 if self._shutdown:
@@ -543,13 +571,14 @@ class _S3PoolScope(S3Executor):
                 self._futures.add(future)
                 # Behind any waiting call, so that the calls enter in order,
                 # also when a place frees before a waiting call takes it.
-                enter = not self._waiting and len(self._entered) < self.max_workers
+                enter = not self._waiting_calls and len(self._entered) < self.max_workers
                 if enter:
                     # Counted only once the pool has accepted it.
                     self._pool.submit(self._run, call)
                     self._entered.add(call)
                 else:
                     self._waiting.append(call)
+                    self._waiting_calls[future] = call
             future.add_done_callback(self._untrack)
         except BaseException:
             # A call that the pool has not taken, or that has not started,
@@ -621,20 +650,29 @@ class _S3PoolScope(S3Executor):
                 if not self._waiting or len(self._entered) >= self.max_workers:
                     return
                 call = self._waiting.popleft()
-                if call.future.cancelled():
+                if self._waiting_calls.pop(call.future, None) is None:
+                    # Cancelled while it waited, and already settled.
+                    continue
+                error: Exception | None = None
+                try:
+                    self._pool.submit(self._run, call)
+                except RuntimeError:
+                    # The pool takes no more calls, as when the interpreter
+                    # exits: this thread runs the call.
                     run_inline = True
+                except Exception as e:
+                    # Such as a failure to start a thread: the call fails.
+                    run_inline, error = False, e
                 else:
                     run_inline = False
-                    try:
-                        self._pool.submit(self._run, call)
-                    except RuntimeError:
-                        # The pool takes no more calls.
-                        run_inline = True
-                    else:
-                        self._entered.add(call)
+                    self._entered.add(call)
             if run_inline:
-                # A cancelled call is only marked as notified.
                 call.context.run(call.item.run)
+            elif error is not None:
+                rejected: Future[None] = Future()
+                rejected.set_running_or_notify_cancel()
+                rejected.set_exception(error)
+                call.item.settle(rejected)
 
     def _untrack(self, future: Future[Any]) -> None:
         """Stop tracking a call that has ended or was cancelled.
@@ -645,18 +683,14 @@ class _S3PoolScope(S3Executor):
         Args:
             future: The future of the call.
         """
-        dropped = None
         with self._lock:
             self._futures.discard(future)
-            if future.cancelled():
-                for call in self._waiting:
-                    if call.future is future:
-                        self._waiting.remove(call)
-                        dropped = call
-                        break
+            dropped = self._waiting_calls.pop(future, None) if future.cancelled() else None
         if dropped is not None:
-            # Marks the future as notified, without running the call.
+            # Marks the future as notified and drops the arguments, without
+            # running the call; the entry left in the queue is skipped.
             dropped.item.run()
+            dropped.context = contextvars.Context()
 
 
 class _S3ScopeCall:

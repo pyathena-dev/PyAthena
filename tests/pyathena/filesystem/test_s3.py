@@ -42,7 +42,7 @@ from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3MultipartCopyPlan
 from pyathena.filesystem.s3_errors import S3ClientError
-from pyathena.filesystem.s3_executor import S3ThreadPool
+from pyathena.filesystem.s3_executor import S3ThreadPool, _S3PoolScope
 from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
@@ -2746,6 +2746,29 @@ class TestS3FileSystem:
         assert state["peak"] == 2
         # Closing the files leaves the pool running.
         assert fs._request_pool.submit(sum, [1, 2]).result(EVENT_TIMEOUT) == 3
+        fs._request_pool.shutdown()
+
+    def test_file_without_executor_shares_request_pool(self):
+        # GH-1332 (F1): a file constructed without an executor or max_workers
+        # takes the max_workers of the filesystem and runs its reads in the
+        # request pool of the filesystem; it used to start a pool of
+        # cpu_count() * 5 threads of its own.
+        fs = self._make_fs()
+        fs._request_pool = S3ThreadPool(2)
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = 64
+        call, state = overlapping_calls(2)
+
+        def get_object(path, range_, **kwargs):
+            call()
+            return bytes(range_[1] - range_[0])
+
+        fs.core.get_object = get_object
+        with S3File(fs, "s3://bucket/key", "rb", cache_type="none", block_size=16) as f:
+            assert f.max_workers == fs.max_workers
+            assert f.read() == bytes(64)
+        # The file's max_workers is 4, but the pool of the filesystem has 2.
+        assert state["peak"] == 2
         fs._request_pool.shutdown()
 
     @pytest.mark.parametrize("exit_with", ["close", "with"])
@@ -6440,6 +6463,12 @@ class TestS3File:
         ):
             setattr(fs.core, name, mock.MagicMock())
         fs._get_lookup_kwargs.side_effect = S3FileSystem._get_lookup_kwargs
+        # The request pool, whose scopes the files take by default.
+        fs.max_workers = 4
+        fs._request_pool = S3ThreadPool(fs.max_workers)
+        fs._create_executor.side_effect = lambda max_workers: _S3PoolScope(
+            fs._request_pool, max_workers
+        )
         return fs
 
     @staticmethod

@@ -16,8 +16,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from io import BytesIO
-from multiprocessing import cpu_count
-from typing import Any, BinaryIO, cast
+from typing import Any, BinaryIO, ClassVar, cast
 from urllib.parse import unquote_plus
 
 import botocore.exceptions
@@ -1133,7 +1132,7 @@ class S3FileSystem(AbstractFileSystem):
             unversioned_paths, recursive=recursive, maxdepth=maxdepth
         )
 
-    def _create_executor(self, max_workers: int) -> S3Executor:
+    def _create_executor(self, max_workers: int) -> _S3PoolScope:
         """Create the executor of the parallel requests of a file or an operation.
 
         The files of ``S3FileSystem`` and ``AioS3FileSystem`` and the
@@ -2883,6 +2882,9 @@ class S3File(AbstractBufferedFile):
 
     fs: S3FileSystem
     buffer: BytesIO | None
+    # The forks of this process so far, which a file compares with those at
+    # its opening to tell that it was inherited across a fork.
+    _forks: ClassVar[int] = 0
 
     def __init__(
         self,
@@ -2890,7 +2892,7 @@ class S3File(AbstractBufferedFile):
         path: str,
         mode: str = "rb",
         version_id: str | None = None,
-        max_workers: int = (cpu_count() or 1) * 5,
+        max_workers: int | None = None,
         executor: S3Executor | None = None,
         block_size: int = S3FileSystem.DEFAULT_BLOCK_SIZE,
         cache_type: str = "bytes",
@@ -2919,13 +2921,13 @@ class S3File(AbstractBufferedFile):
             version_id: The version ID to read. Must match the version ID in
                 the path if both are given. A version cannot be given, in
                 either form, for writing or appending.
-            max_workers: The number of parallel workers for range reads, part
-                copies, and part uploads. A write keeps at most
+            max_workers: The number of parallel requests of the file: range
+                reads, part copies, and part uploads. A write keeps at most
                 ``max_workers`` parts, including the part copies of an append,
                 in flight, waiting for one of them to finish before it submits
-                another.
-            executor: The executor for parallel operations. If None, a new
-                ``S3ThreadPool`` is created.
+                another. If None, the ``max_workers`` of the filesystem.
+            executor: The executor for parallel operations. If None, one on
+                the request pool of the filesystem (``fs._create_executor()``).
             block_size: The block size for reads and writes. Must be between
                 ``S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE`` and
                 ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE``, inclusive, unless reading.
@@ -2953,10 +2955,12 @@ class S3File(AbstractBufferedFile):
                 ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE`` for writing, or
                 ``max_workers`` is not positive.
         """
+        if max_workers is None:
+            max_workers = fs.max_workers
         if max_workers <= 0:
             raise ValueError("max_workers must be greater than 0")
-        # The process that opened the file; a forked child rejects it.
-        self._pid = os.getpid()
+        # The forks at the opening; a forked child rejects the file.
+        self._forks_at_open = S3File._forks
         self.max_workers = max_workers
         # The arguments are validated, and the objects looked up, before the
         # base class initializer: a file that fails here is never opened, so
@@ -2976,7 +2980,7 @@ class S3File(AbstractBufferedFile):
         self.s3_additional_kwargs: dict[str, Any] = target.request_kwargs
         self._details: S3Object | dict[str, Any] = target.details
 
-        self._executor: S3Executor = executor or S3ThreadPool(max_workers=max_workers)
+        self._executor: S3Executor = executor or fs._create_executor(max_workers=max_workers)
         # The requests and the state of the write; None when reading.
         self._session: _S3WriteSession | None = None
         if mode != "rb":
@@ -3071,6 +3075,11 @@ class S3File(AbstractBufferedFile):
         self._check_process()
         super().flush(force=force)
 
+    @classmethod
+    def _count_fork(cls) -> None:
+        """Count a fork, in the child process."""
+        cls._forks += 1
+
     def _inherited(self) -> bool:
         """Whether this process is a forked child of the process that opened the file.
 
@@ -3078,7 +3087,7 @@ class S3File(AbstractBufferedFile):
             True in a forked child process of the process that opened the
             file.
         """
-        return getattr(self, "_pid", os.getpid()) != os.getpid()
+        return getattr(self, "_forks_at_open", S3File._forks) != S3File._forks
 
     def _check_process(self) -> None:
         """Reject the use of a file that the parent of a forked process opened.
@@ -3485,3 +3494,7 @@ class S3File(AbstractBufferedFile):
         else:
             ranges.append((start, end))
         return ranges
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=S3File._count_fork)

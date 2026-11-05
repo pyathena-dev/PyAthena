@@ -350,14 +350,9 @@ class TestS3PoolScope:
                     scope.submit(release.wait, EVENT_TIMEOUT)
                 future = interrupt(scope.submit, events.append, "call")
                 release.set()
+                # A place left taken would keep the next call waiting forever.
                 assert scope.submit(sum, [1, 2]).result(EVENT_TIMEOUT) == 3
                 shutdown_bounded(scope)
-                # A call frees its place right after its future is settled.
-                deadline = time.monotonic() + EVENT_TIMEOUT
-                while scope._entered:
-                    assert time.monotonic() < deadline, "a place was never freed"
-                    time.sleep(0.001)
-                assert not scope._waiting
                 if future is not None:
                     assert future.done()
                 assert events in ([], ["call"])
@@ -385,11 +380,8 @@ class TestS3PoolScope:
                     future.set_running_or_notify_cancel()
                 release.set()
                 assert not wait([future], timeout=EVENT_TIMEOUT).not_done
+                assert scope.submit(sum, [1, 2]).result(EVENT_TIMEOUT) == 3
                 shutdown_bounded(scope)
-                deadline = time.monotonic() + EVENT_TIMEOUT
-                while scope._entered:
-                    assert time.monotonic() < deadline, "a place was never freed"
-                    time.sleep(0.001)
                 assert events == ([] if future.cancelled() else ["call"])
             finally:
                 release.set()
@@ -399,9 +391,9 @@ class TestS3PoolScope:
 
     def test_concurrent_submitter_does_not_pass_waiting_call(self):
         # GH-1332 (S3): a call submitted from another thread at the moment a
-        # place frees does not enter ahead of a call that waits for it. The
-        # place used to be freed and handed on under two acquisitions of the
-        # lock, between which a new submitter took it.
+        # place frees does not enter ahead of a call that waits for it. A
+        # barrier case (spec section 6.2): the submitter is started from the
+        # internal point where the place is freed, before it is handed on.
         pool = S3ThreadPool(2)
         scope = _S3PoolScope(pool, 1)
         release = threading.Event()
@@ -452,7 +444,6 @@ class TestS3PoolScope:
             assert waiting.cancel()
             gc.collect()
             assert body_ref() is None
-            assert not scope._waiting
         finally:
             release.set()
             shutdown_bounded(scope)
@@ -486,6 +477,46 @@ class TestS3PoolScope:
             release.set()
             shutdown_bounded(scope)
             assert running.result(EVENT_TIMEOUT)
+        finally:
+            release.set()
+            pool.shutdown()
+
+    def test_submit_from_pool_thread(self):
+        # GH-1332 (T1): a call submitted to a scope from a thread of its own
+        # pool, as when garbage collection there closes a file, runs in that
+        # thread instead of waiting for a place in the pool that it holds.
+        pool = S3ThreadPool(1)
+        scope = _S3PoolScope(pool, 1)
+        try:
+            nested = pool.submit(lambda: scope.submit(sum, [1, 2]).result(EVENT_TIMEOUT))
+            assert nested.result(2 * EVENT_TIMEOUT) == 3
+            shutdown_bounded(scope)
+        finally:
+            pool.shutdown()
+
+    def test_waiting_call_rejected_by_pool(self):
+        # GH-1332 (S5): a waiting call that the pool fails to take, such as
+        # when a thread cannot start, fails instead of being lost, so that
+        # the shutdown of the scope returns.
+        pool = S3ThreadPool(2)
+        scope = _S3PoolScope(pool, 1)
+        release = threading.Event()
+        submit = pool.submit
+
+        def failing_submit(fn, *args, **kwargs):
+            if threading.current_thread() is not threading.main_thread():
+                raise OSError("can't start new thread")
+            return submit(fn, *args, **kwargs)
+
+        try:
+            running = scope.submit(release.wait, EVENT_TIMEOUT)
+            with mock.patch.object(pool, "submit", side_effect=failing_submit):
+                waiting = scope.submit(sum, [1, 2])
+                release.set()
+                with pytest.raises(OSError, match="can't start new thread"):
+                    waiting.result(EVENT_TIMEOUT)
+            assert running.result(EVENT_TIMEOUT)
+            shutdown_bounded(scope)
         finally:
             release.set()
             pool.shutdown()
