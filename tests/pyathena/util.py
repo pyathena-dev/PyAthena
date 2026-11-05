@@ -1604,3 +1604,6 @@ class LocalBucketFileSystem(DirFileSystem):
         file = super().open(path, *args, **kwargs)
         self.opened.append((kwargs, file))
         return file
+
+    def close(self):
+        """Do nothing, as PyAthena's filesystems release their idle threads here."""
