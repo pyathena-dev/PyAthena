@@ -56,6 +56,7 @@ from tests.pyathena.util import (
     MULTIPART_COPY_SIZE,
     ThrottledOperation,
     forking,
+    interrupt_each_opcode,
     mock_connection,
     overlapping_calls,
     retried,
@@ -3607,6 +3608,45 @@ class TestS3FileSystem:
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert sorted(read) == [0, 16]
         assert operation.calls == 2
+
+    def test_read_interrupted_at_each_opcode_frees_ranges(self):
+        # GH-1332 (F5): an interrupt at any point of a parallel read, including
+        # after its wait returns, cancels the reads that have not started and
+        # frees the data of the others while the caller holds the interrupt.
+        # The data used to stay in the frame that the traceback keeps after
+        # the wait.
+        def case(interrupt):
+            fs = self._make_fs()
+            fs.info = mock.MagicMock(return_value=self._file_object("key"))
+            fs.info.return_value.size = 64
+            read = []
+
+            def get_object(path, range_, **kwargs):
+                # Unlike bytes, an array can be weakly referenced.
+                data = array.array("B", bytes(range_[1] - range_[0]))
+                read.append(weakref.ref(data))
+                return data
+
+            fs.core.get_object = get_object
+            f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4)
+            try:
+                result = interrupt(f._fetch_range, 0, 64)
+                f.close()
+                if not interrupt.fired:
+                    assert result == bytes(64)
+                    return
+                assert interrupt.error.__traceback__ is not None
+                # The threads leave the frames of the reads right after the
+                # close has waited for them.
+                deadline = time.monotonic() + EVENT_TIMEOUT
+                while any(ref() is not None for ref in read):
+                    assert time.monotonic() < deadline, "the data of a read was kept"
+                    time.sleep(0.001)
+            finally:
+                f.close()
+                fs._request_pool.shutdown()
+
+        assert interrupt_each_opcode(S3File._fetch_range, case) > 0
 
     def test_interrupted_read_frees_ranges(self):
         # GH-1186: an interrupted parallel read cancels the reads that have

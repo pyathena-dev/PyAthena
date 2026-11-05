@@ -3428,6 +3428,7 @@ class S3File(AbstractBufferedFile):
             # Set on failure, so that the running reads make no further attempt.
             stop = threading.Event()
             futures: list[Future[bytes]] = []
+            done: set[Future[bytes]] = set()
             try:
                 with stop_retries_on(stop):
                     for r in ranges:
@@ -3440,30 +3441,28 @@ class S3File(AbstractBufferedFile):
                             futures[-1], self.fs.core.get_object, path, r, **request_kwargs
                         )
                 done = wait(futures, return_when=FIRST_EXCEPTION).done
+                failed = next(
+                    (f for f in done if not f.cancelled() and f.exception() is not None), None
+                )
+                if failed is not None:
+                    failed.result()
+                return b"".join(f.result() for f in futures)
             except BaseException as e:
-                # The reads are cancelled with the read of the range, as below,
-                # and the frames of the wait, which keep their futures, are
-                # cleared; clear_frames() skips this frame, which is executing.
+                # A failed read, or an interrupt at any point, including after
+                # the wait: the reads that have not started are cancelled, and
+                # the futures of the others are dropped, so that this frame,
+                # which the traceback of the error keeps, does not keep their
+                # data; the frames of the wait, which keep the futures, are
+                # cleared, and clear_frames() skips this frame, which is
+                # executing.
                 traceback.clear_frames(e.__traceback__)
+                done.clear()
                 while futures:
                     futures.pop().cancel()
                 # After the cancellation, which a thread that it frees could
                 # otherwise precede by taking a queued read.
                 stop.set()
                 raise
-            failed = next(
-                (f for f in done if not f.cancelled() and f.exception() is not None), None
-            )
-            if failed is not None:
-                # The reads that have not started are cancelled, and the
-                # futures of the others are dropped, so that this frame, which
-                # the traceback of the error keeps, does not keep their data.
-                while futures:
-                    futures.pop().cancel()
-                stop.set()
-                done.clear()
-                failed.result()
-            return b"".join(f.result() for f in futures)
         return self.fs.core.get_object(path, ranges[0], **request_kwargs)
 
     @staticmethod

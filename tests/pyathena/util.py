@@ -277,6 +277,9 @@ class OpcodeInterrupter:
         self.n = n
         self.count = 0
         self.fired = False
+        # The injected interrupt, kept with its traceback as a caller that
+        # handles it would keep it.
+        self.error = None
         self._thread = threading.get_ident()
         self._points = self._interrupt_points(code)
 
@@ -297,9 +300,10 @@ class OpcodeInterrupter:
         with self._armed():
             try:
                 return fn(*args, **kwargs)
-            except KeyboardInterrupt:
+            except KeyboardInterrupt as e:
                 if not self.fired:
                     raise
+                self.error = e
                 return None
 
     @staticmethod
@@ -313,13 +317,26 @@ class OpcodeInterrupter:
             The set of offsets.
         """
         instructions = list(dis.get_instructions(code))
+        entries = dis.Bytecode(code).exception_entries
+
+        def handler(offset):
+            # The innermost exception handler that covers the offset.
+            covering = [e for e in entries if e.start <= offset < e.end]
+            return min(covering, key=lambda e: e.end - e.start).target if covering else None
+
         points = set()
         for i, instruction in enumerate(instructions):
             name = instruction.opname
             if name == "RESUME" or name.startswith("BEFORE_WITH"):
                 points.add(instruction.offset)
             elif name in ("CALL", "CALL_KW", "CALL_FUNCTION_EX") and i + 1 < len(instructions):
-                points.add(instructions[i + 1].offset)
+                after = instructions[i + 1].offset
+                # A signal checked after the call is raised at the call, so
+                # the interrupt goes to the next instruction only when the
+                # same handler covers it; otherwise, as at a `return` that
+                # ends a `try`, it is raised before the call.
+                same = handler(after) == handler(instruction.offset)
+                points.add(after if same else instruction.offset)
             elif name == "JUMP_BACKWARD" and instruction.jump_target is not None:
                 points.add(instruction.jump_target)
         return points
