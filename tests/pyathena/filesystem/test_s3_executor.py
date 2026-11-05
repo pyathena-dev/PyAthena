@@ -493,6 +493,34 @@ class TestS3PoolScope:
             assert n <= 2000
         assert n > 1
 
+    def test_shutdown_returns_once_calls_are_cancelled(self):
+        # GH-1332 (S5, I1): a shutdown that waits for a call returns once the
+        # call is cancelled, without waiting for the pool to reach it. A
+        # wait for its notification by the pool, which an interrupt can stop,
+        # used to keep the shutdown waiting.
+        pool = S3ThreadPool(1)
+        other = _S3PoolScope(pool, 1)
+        scope = _S3PoolScope(pool, 1)
+        release = threading.Event()
+        try:
+            # Longer than the waits below, so that the pool cannot reach the
+            # cancelled call before the test ends.
+            other.submit(release.wait, 3 * EVENT_TIMEOUT)
+            # Accepted by the pool, behind the call of the other scope.
+            future = scope.submit(sum, [1, 2])
+            shut_down = threading.Event()
+            thread = threading.Thread(
+                target=lambda: (scope.shutdown(wait=True), shut_down.set()), daemon=True
+            )
+            thread.start()
+            assert not shut_down.wait(0.1)
+            assert future.cancel()
+            assert shut_down.wait(EVENT_TIMEOUT)
+            assert not release.is_set()
+        finally:
+            release.set()
+            pool.shutdown()
+
     def test_waiting_calls_enter_in_order(self):
         # GH-1332 (S3): the calls that wait for a place enter the pool in the
         # order they were submitted.
@@ -599,9 +627,17 @@ class TestS3PoolScope:
             running = scope.submit(call)
             assert started.wait(EVENT_TIMEOUT)
             (pending,) = scope.pending()
-            # Sent once the shutdown waits for the call: concurrent.futures
-            # installs its waiter on the future, inside the block.
-            with sigint_when(lambda: pending._waiters), pytest.raises(KeyboardInterrupt):
+            # Sent once the shutdown waits for the call, which it does through
+            # a done callback of the future.
+            waiting = []
+            add_done_callback = pending.add_done_callback
+
+            def watch(fn):
+                add_done_callback(fn)
+                waiting.append(fn)
+
+            pending.add_done_callback = watch
+            with sigint_when(lambda: waiting), pytest.raises(KeyboardInterrupt):
                 scope.shutdown(wait=True)
             assert not running.done()
             release.set()

@@ -19,7 +19,6 @@ import weakref
 from abc import ABCMeta, abstractmethod
 from collections import deque
 from collections.abc import Callable
-from concurrent import futures
 from concurrent.futures import Future
 from concurrent.futures.thread import ThreadPoolExecutor
 from multiprocessing import cpu_count
@@ -611,8 +610,23 @@ class _S3PoolScope(S3Executor):
         with self._lock:
             self._shutdown = True
         pending = self.pending()
-        if wait:
-            futures.wait(pending)
+        if wait and pending:
+            # Waits through done callbacks, which a cancellation runs at once,
+            # not through futures.wait(), which waits for a cancelled future
+            # until the pool reaches its call and marks it as notified.
+            remaining = [len(pending)]
+            lock = threading.Lock()
+            ended = threading.Event()
+
+            def count(_: Future[Any]) -> None:
+                with lock:
+                    remaining[0] -= 1
+                    if remaining[0] == 0:
+                        ended.set()
+
+            for future in pending:
+                future.add_done_callback(count)
+            ended.wait()
 
     def pending(self) -> list[Future[Any]]:
         """Return the futures of the calls that were submitted and have not ended.
