@@ -45,14 +45,22 @@ class TestS3ThreadPool:
             state = {"active": 0, "peak": 0}
             events = []
 
+            overlap = threading.Condition(lock)
+
             def call(name, timeout):
-                with lock:
+                with overlap:
                     state["active"] += 1
                     state["peak"] = max(state["peak"], state["active"])
+                    overlap.notify_all()
+                    if name == "other":
+                        # Waits for a third overlapping call, which only a
+                        # pool that exceeds the bound starts.
+                        overlap.wait_for(lambda: state["peak"] > 2, timeout=timeout)
                 try:
-                    hold.wait(timeout)
+                    if name == "call":
+                        hold.wait(timeout)
                 finally:
-                    with lock:
+                    with overlap:
                         state["active"] -= 1
                 events.append(name)
 
@@ -60,8 +68,10 @@ class TestS3ThreadPool:
                 # Running until the others have had the time to overlap it.
                 future = interrupt(pool.submit, call, "call", EVENT_TIMEOUT)
                 pool.release()
-                others = [pool.submit(call, "other", 0.05) for _ in range(3)]
-                time.sleep(0.1)
+                others = [pool.submit(call, "other", 0.1) for _ in range(3)]
+                # The others run beside the interrupted call only if the
+                # release has left it untracked; otherwise they wait for it.
+                wait(others, timeout=0.5)
                 hold.set()
                 for other in others:
                     other.result(EVENT_TIMEOUT)
@@ -441,29 +451,21 @@ class TestS3PoolScope:
         # thread of its pool runs itself (T1).
         pool = S3ThreadPool(2)
         scope = _S3PoolScope(pool, 1)
-        started, release = threading.Event(), threading.Event()
+        started, release, ended = threading.Event(), threading.Event(), threading.Event()
 
         def call():
             started.set()
-            return release.wait(EVENT_TIMEOUT)
+            release.wait(EVENT_TIMEOUT)
+            ended.set()
 
         try:
             nested = pool.submit(lambda: scope.submit(call).result(EVENT_TIMEOUT))
             assert started.wait(EVENT_TIMEOUT)
-            shutting_down, shut_down = threading.Event(), threading.Event()
-
-            def shutdown():
-                shutting_down.set()
-                scope.shutdown(wait=True)
-                shut_down.set()
-
-            waiter = threading.Thread(target=shutdown, daemon=True)
-            waiter.start()
-            assert shutting_down.wait(EVENT_TIMEOUT)
-            assert not shut_down.wait(0.2)
-            release.set()
-            assert shut_down.wait(EVENT_TIMEOUT)
-            assert nested.result(EVENT_TIMEOUT)
+            # Released from another thread while this one shuts the scope down.
+            threading.Timer(0.1, release.set).start()
+            scope.shutdown(wait=True)
+            assert ended.is_set()
+            nested.result(EVENT_TIMEOUT)
         finally:
             release.set()
             pool.shutdown()

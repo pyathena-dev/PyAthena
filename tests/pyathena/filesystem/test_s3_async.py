@@ -2886,12 +2886,14 @@ class TestAioS3StreamedFile:
         # ended. The commit used to be tracked only once its queuing returned.
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
         submit_to = S3ThreadPool.submit_to
-        started = threading.Event()
+        started, interrupted = threading.Event(), threading.Event()
         events = []
 
         def complete_multipart_upload(*args, **kwargs):
             started.set()
-            time.sleep(0.2)
+            # Until the interrupt has been raised and the close waits.
+            assert interrupted.wait(EVENT_TIMEOUT)
+            time.sleep(0.1)
             events.append("committed")
 
         fs.core.complete_multipart_upload = mock.MagicMock(side_effect=complete_multipart_upload)
@@ -2900,7 +2902,10 @@ class TestAioS3StreamedFile:
             submit_to(pool, future, fn, *args, **kwargs)
             if getattr(fn, "__name__", None) == "_complete_upload":
                 assert started.wait(EVENT_TIMEOUT)
-                raise KeyboardInterrupt
+                try:
+                    raise KeyboardInterrupt
+                finally:
+                    interrupted.set()
 
         async def write_and_close():
             async with asyncio.timeout(EVENT_TIMEOUT):
