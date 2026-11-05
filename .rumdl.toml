@@ -17,14 +17,21 @@ include = [
     "cloudformation/**/*.md",
     "/*.md",
 ]
-disable = [
-    # Docs have long URLs and code lines that would be awkward to wrap
-    "MD013",
-    # `$ command` style is intentional in docs/testing.md and README shell snippets
-    "MD014",
-    # MyST `(label)=` ref targets must come before the first heading, so the
-    # first line of many docs/*.md files is not an H1
-    "MD041",
+# Run the rule set of markdownlint 0.38 (used by markdownlint-cli2 0.18.1,
+# the previous linter) instead of every rule rumdl enables by default.
+enable = [
+    "MD001", "MD003", "MD004", "MD005", "MD007", "MD009", "MD010", "MD011",
+    "MD012", "MD018", "MD019", "MD020", "MD021", "MD022", "MD023", "MD024",
+    "MD025", "MD026", "MD027", "MD028", "MD029", "MD030", "MD031", "MD032",
+    "MD033", "MD034", "MD035", "MD036", "MD037", "MD038", "MD039", "MD040",
+    "MD042", "MD043", "MD044", "MD045", "MD046", "MD047", "MD048", "MD049",
+    "MD050", "MD051", "MD052", "MD053", "MD054", "MD055", "MD056", "MD058",
+    "MD059",
+    # Not enabled:
+    # MD013: docs have long URLs and code lines that would be awkward to wrap
+    # MD014: `$ command` style is intentional in docs/testing.md and README shell snippets
+    # MD041: MyST `(label)=` ref targets must come before the first heading, so the
+    #        first line of many docs/*.md files is not an H1
 ]
 
 # Sphinx renders docs/ with MyST, so directive fences such as ```{toctree}
@@ -47,3 +54,26 @@ siblings-only = true
 # Allow inline HTML used by README (centered images) and MyST admonitions
 [MD033]
 allowed-elements = ["details", "summary", "br", "kbd", "sub", "sup", "div", "img", "p", "a"]
+
+# Options whose rumdl defaults differ from markdownlint's
+[MD010]
+code-blocks = true
+spaces-per-tab = 1
+
+[MD026]
+punctuation = ".,;:!。，；：！"
+
+[MD027]
+list-items = true
+
+[MD036]
+punctuation = ".,;:!?。，；：！？"
+
+[MD051]
+ignore-case = false
+
+[MD052]
+ignore = ["x"]
+
+[MD053]
+ignored-definitions = ["//"]
