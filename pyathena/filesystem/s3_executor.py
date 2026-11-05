@@ -619,8 +619,8 @@ class _S3PoolScope(S3Executor):
 
         A call that has neither entered the pool, nor waits for a place, nor
         started, is one whose submission interrupts stopped before its
-        cleanup ended. It is cancelled instead, so that nothing waits forever
-        for a call that never runs.
+        cleanup ended. It is cancelled instead, and a cancelled call is
+        left out, so that nothing waits forever for a call that never runs.
 
         Returns:
             The futures, which an asyncio caller can wait for without
@@ -632,6 +632,9 @@ class _S3PoolScope(S3Executor):
             calls = list(self._futures.items())
         pending = []
         for future, call in calls:
+            if future.cancelled():
+                # Never runs, also if an interrupt stopped its notification.
+                continue
             if future in tracked or not future.cancel():
                 pending.append(future)
             else:
@@ -684,8 +687,10 @@ class _S3PoolScope(S3Executor):
                     self._pool.submit(self._run, call)
                 except RuntimeError:
                     # The pool takes no more calls, as when the interpreter
-                    # exits: this thread runs the call.
+                    # exits: this thread runs the call, which a shutdown
+                    # waits for.
                     run_inline = True
+                    self._inline.add(call.future)
                 except Exception as e:
                     # Such as a failure to start a thread: the call fails.
                     run_inline, error = False, e

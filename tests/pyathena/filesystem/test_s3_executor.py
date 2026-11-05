@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import contextvars
 import gc
+import sys
 import threading
 import time
 import traceback
@@ -24,6 +25,7 @@ from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadP
 from pyathena.util import RetryConfig, override, retry_api_call, stop_retries_on
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
+    OpcodeInterrupter,
     ThrottledOperation,
     forking,
     interrupt_each_opcode,
@@ -441,6 +443,55 @@ class TestS3PoolScope:
             shutdown_bounded(scope)
 
         assert interrupt_each_opcode(_S3PoolScope.submit, case) > 0
+
+    @pytest.mark.skipif(sys.version_info < (3, 12), reason="Interleaving needs sys.monitoring.")
+    def test_shutdown_during_hand_on_keeps_waiting_call(self):
+        # GH-1332 (S7): a shutdown of the scope at any point of the hand-on
+        # of a place keeps the waiting call, which then runs, also when the
+        # pool takes no more calls and the ending call's thread runs it.
+        def case(n):
+            pool = S3ThreadPool(1)
+            scope = _S3PoolScope(pool, 1)
+            release = threading.Event()
+            shutdowns = []
+            errors = []
+
+            def shut_down():
+                # From another thread, as a close would; this thread may hold
+                # the lock of the scope, so it waits only briefly.
+                thread = threading.Thread(target=scope.shutdown, args=(False,), daemon=True)
+                try:
+                    thread.start()
+                except BaseException as e:
+                    errors.append(e)
+                    raise
+                shutdowns.append(thread)
+                thread.join(0.05)
+
+            interleave = OpcodeInterrupter(_S3PoolScope._next.__code__, n, action=shut_down)
+            try:
+                scope.submit(release.wait, EVENT_TIMEOUT)
+                waiting = scope.submit(sum, [1, 2])
+                pool.shutdown(wait=False)
+
+                def end_first_call():
+                    release.set()
+                    return waiting.result(EVENT_TIMEOUT)
+
+                assert interleave(end_first_call) == 3
+                for thread in shutdowns:
+                    thread.join(EVENT_TIMEOUT)
+                assert errors == []
+            finally:
+                release.set()
+                pool.shutdown()
+            return interleave.fired
+
+        n = 1
+        while case(n):
+            n += 1
+            assert n <= 2000
+        assert n > 1
 
     def test_waiting_calls_enter_in_order(self):
         # GH-1332 (S3): the calls that wait for a place enter the pool in the

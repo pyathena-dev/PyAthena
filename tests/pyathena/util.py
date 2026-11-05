@@ -289,11 +289,15 @@ class OpcodeInterrupter:
     Args:
         code: The code object of the target.
         n: The interrupt point to raise the interrupt at, counted from 1.
+        action: A callable to run at that point instead of raising the
+            interrupt, in whichever thread reaches it, to interleave another
+            thread's call there. Only Python 3.12 and later support it.
     """
 
-    def __init__(self, code, n):
+    def __init__(self, code, n, action=None):
         self.code = code
         self.n = n
+        self.action = action
         self.count = 0
         self.fired = False
         # The injected interrupt, kept with its traceback as a caller that
@@ -370,11 +374,16 @@ class OpcodeInterrupter:
         Raises:
             KeyboardInterrupt: At the n-th interrupt point.
         """
-        if self.fired or offset not in self._points or threading.get_ident() != self._thread:
+        if self.fired or offset not in self._points:
+            return
+        if self.action is None and threading.get_ident() != self._thread:
             return
         self.count += 1
         if self.count == self.n:
             self.fired = True
+            if self.action is not None:
+                self.action()
+                return
             raise KeyboardInterrupt
 
     @contextmanager
