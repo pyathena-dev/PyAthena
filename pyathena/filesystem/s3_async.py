@@ -1279,9 +1279,11 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         if max_workers is None:
             max_workers = fs._sync_fs.max_workers
         self._requests = fs._sync_fs._create_executor(max_workers=max_workers)
-        # The scheduled commit and abort, which close() waits for.
+        # The scheduled commit and abort, which close() waits for, and those of
+        # them whose queuing has returned.
         self._commit_future: Future[None] | None = None
         self._discard_future: Future[None] | None = None
+        self._queued: set[Future[None]] = set()
         self.max_workers = max_workers
         # The process that opened the file; a forked child rejects it.
         self._pid = os.getpid()
@@ -1508,11 +1510,16 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
 
         A cancellation of the waiting task, also a repeated one, does not stop
         the wait; it is re-raised once they have ended, so that nothing of
-        the file runs after its close returns (I1).
+        the file runs after its close returns (I1). A commit or abort whose
+        queuing did not return, as when interrupts stopped it and its
+        cleanup, is cancelled unless it has started, so that the wait does
+        not last forever for one that was never queued.
         """
         self._requests.shutdown(wait=False)
         pending = self._requests.pending()
-        pending.extend(f for f in (self._commit_future, self._discard_future) if f is not None)
+        for future in (self._commit_future, self._discard_future):
+            if future is not None and (future in self._queued or not future.cancel()):
+                pending.append(future)
         if not pending:
             return
         waiters = [asyncio.wrap_future(future) for future in pending]
@@ -1558,14 +1565,8 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 # for it also after a cancellation of this task.
                 discard: Future[None] = Future()
                 self._discard_future = discard
-                try:
-                    self.fs._thread_pool.submit_to(discard, self._discard)
-                except BaseException:
-                    # Not queued, or queued by a submission that an interrupt
-                    # stopped and that now finds it cancelled: the drain does
-                    # not wait for an abort that never runs.
-                    discard.cancel()
-                    raise
+                self.fs._thread_pool.submit_to(discard, self._discard)
+                self._queued.add(discard)
                 await self.fs._thread_pool.wait_shielded(discard)
         finally:
             # A commit that was scheduled before runs on, and is waited for.
@@ -1703,6 +1704,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             self.fs._thread_pool.submit_to(
                 commit, self._complete_upload, cast(BytesIO, self.buffer)
             )
+            self._queued.add(commit)
         except BaseException:
             if commit.cancel():
                 # Not started, and now never: a commit that was queued by a

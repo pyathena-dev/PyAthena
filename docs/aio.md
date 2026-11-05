@@ -394,6 +394,8 @@ async with await fs.open_async("s3://my-bucket/data/file.bin", "rb") as f:
   abort runs, waits for it. An interrupt while the commit is being queued, such as a
   repeated Ctrl+C under `asyncio.run()`, closes the file without committing it and
   aborts its multipart upload, if any.
+- Closing a file, or leaving its `async with` block, waits for its range reads, commit,
+  and abort, also if the task is cancelled, and raises the cancellation after they end.
 - A file opened for writing must be closed with `await f.close()` or an `async with`
   block. A file that is garbage collected before it is closed or its commit has begun
   is not committed: it emits a `ResourceWarning`, and its multipart upload is aborted.

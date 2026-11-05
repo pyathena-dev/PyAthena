@@ -116,6 +116,17 @@ In a forked child process, create a new filesystem. A file that the parent opene
 `RuntimeError` there from its reads, writes, and flushes, `commit()`, and `discard()`,
 and closing it only marks it closed, without uploading or aborting anything.
 
+An interrupt, such as Ctrl+C, while a file or operation submits or waits for its
+requests cancels the requests that have not started. The requests that are running
+finish, and their data is released once they end. Closing the file waits for them. An
+interrupt while a request is being submitted can let one more request than
+`max_workers` run at once until the request pool is idle. These guarantees hold for one
+interrupt at a time. If another interrupt arrives while the cleanup of an interrupt or
+an error runs, the call still does not wait forever, but the cleanup may stop early:
+the data of finished requests can stay referenced until the garbage collector frees it,
+and a multipart upload can be left incomplete. `clear_multipart_uploads` removes such
+uploads.
+
 A file returned by `open` whose write or commit has failed, or which has been
 discarded, cannot be committed: its `commit()` raises `S3MultipartStateError`. Inside a
 transaction, a write error that the caller catches therefore makes the transaction fail
