@@ -7,8 +7,8 @@
 
 import asyncio
 import dis
+import gc
 import io
-import itertools
 import os
 import signal
 import sys
@@ -214,6 +214,25 @@ async def cancel_when_started(task, started, release):
     with pytest.raises(asyncio.CancelledError):
         await task
     release.set()
+
+
+def poll_until(predicate, message, timeout=EVENT_TIMEOUT, collect=False):
+    """Wait, in the calling thread, until a condition holds.
+
+    Args:
+        predicate: The condition, a callable without arguments.
+        message: The message of the assertion that fails on the timeout.
+        timeout: The longest wait, in seconds.
+        collect: Whether to run the cyclic garbage collector before each check.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if collect:
+            gc.collect()
+        if predicate():
+            return
+        assert time.monotonic() < deadline, message
+        time.sleep(0.001)
 
 
 async def wait_until(predicate, timeout=EVENT_TIMEOUT):
@@ -461,13 +480,14 @@ def interrupt_each_opcode(target, case, limit=2000):
         The number of opcodes that were interrupted.
     """
     code = getattr(target, "__func__", target).__code__
-    for n in itertools.count(1):
+    n = 0
+    while True:
+        n += 1
         assert n <= limit, f"the target ran more than {limit} opcodes"
         interrupter = OpcodeInterrupter(code, n)
         case(interrupter)
         if not interrupter.fired:
             return n - 1
-    raise AssertionError("unreachable")
 
 
 def mock_connection(max_pool_connections=10):

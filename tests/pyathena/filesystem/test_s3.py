@@ -9,7 +9,6 @@ import io
 import lzma
 import os
 import re
-import signal
 import sys
 import tempfile
 import threading
@@ -59,6 +58,7 @@ from tests.pyathena.util import (
     interrupt_each_opcode,
     mock_connection,
     overlapping_calls,
+    poll_until,
     retried,
     run_in_forked_child,
     sigint_when,
@@ -3662,10 +3662,9 @@ class TestS3FileSystem:
                 assert interrupt.error.__traceback__ is not None
                 # The threads leave the frames of the reads right after the
                 # close has waited for them.
-                deadline = time.monotonic() + EVENT_TIMEOUT
-                while any(ref() is not None for ref in read):
-                    assert time.monotonic() < deadline, "the data of a read was kept"
-                    time.sleep(0.001)
+                poll_until(
+                    lambda: all(ref() is None for ref in read), "the data of a read was kept"
+                )
             finally:
                 f.close()
                 fs._request_pool.shutdown()
@@ -3709,11 +3708,11 @@ class TestS3FileSystem:
             release.set()
             f.close()
             assert info.value.__traceback__ is not None
-            deadline = time.monotonic() + EVENT_TIMEOUT
-            while any(ref() is not None for ref in read):
-                assert time.monotonic() < deadline, "the data of a read was kept"
-                gc.collect()
-                time.sleep(0.001)
+            poll_until(
+                lambda: all(ref() is None for ref in read),
+                "the data of a read was kept",
+                collect=True,
+            )
             # The two ranges that had not started were cancelled.
             assert len(read) == 2
         finally:
@@ -3815,12 +3814,11 @@ class TestS3FileSystem:
         fs = self._make_fs()
         started = threading.Event()
         waiting = threading.Event()
-        interrupted = threading.Event()
 
         def create_multipart_upload(*args, **kw):
             started.set()
             # Still running when the interrupt arrives, which releases it.
-            interrupted.wait(30)
+            poll_until(lambda: signals, "the interrupt was not raised", timeout=30)
             return S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"})
 
         fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
@@ -3836,52 +3834,20 @@ class TestS3FileSystem:
             waiting.set()
             return waiter
 
-        handled = []
-
-        def handle_interrupt(signum, frame):
-            # Only the first interrupt is raised; repeated signals are ignored.
-            # The list is checked instead of the event, whose set() takes a
-            # lock that a nested call of this handler would wait for forever.
-            if not handled:
-                handled.append(signum)
-                interrupted.set()
-                raise KeyboardInterrupt
-
-        def interrupt():
+        with (
+            mock.patch.object(_S3WriteSession, "ready", wait_for_ready),
             # Sent only while the creation is running and the copy waits for
             # it, which the creation cannot stop doing before the interrupt.
-            if started.wait(5) and waiting.wait(5):
-                # A signal that arrives just before the main thread blocks on
-                # the creation can miss waking it, so it is repeated until handled.
-                while True:
-                    signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
-                    if interrupted.wait(0.1):
-                        break
-
-        thread = threading.Thread(target=interrupt, daemon=True)
-        previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
-        try:
-            thread.start()
-            with (
-                mock.patch.object(_S3WriteSession, "ready", wait_for_ready),
-                pytest.raises(KeyboardInterrupt),
-            ):
-                fs._copy_object_with_multipart_upload(
-                    S3Path("bucket", "src"),
-                    S3Path("bucket", "dst"),
-                    MetadataDirective="REPLACE",
-                    TaggingDirective="REPLACE",
-                    AnnotationDirective="EXCLUDE",
-                )
-        finally:
-            # A late interrupt is ignored instead of reaching a later test.
-            signal.signal(signal.SIGINT, lambda signum, frame: None)
-            started.set()
-            waiting.set()
-            interrupted.set()
-            if thread.ident is not None:
-                thread.join()
-            signal.signal(signal.SIGINT, previous_handler)
+            sigint_when(lambda: started.is_set() and waiting.is_set()) as signals,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            fs._copy_object_with_multipart_upload(
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
 
         fs.core.abort_multipart_upload.assert_called_once()
         (upload,) = fs.core.abort_multipart_upload.call_args.args
