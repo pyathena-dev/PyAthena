@@ -12,7 +12,7 @@ on:
     paths:
       - 'docs/**'
       - '**.md'
-      - '.markdownlint-cli2.jsonc'
+      - '.rumdl.toml'
       - '.mise.toml'
       - 'justfile'
       - '.github/workflows/docs-lint.yaml'

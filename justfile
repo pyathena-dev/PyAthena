@@ -69,8 +69,8 @@ _docs-help:
     @echo ""
     @echo "Targets:"
     @echo "  build   Build the Sphinx documentation site (docs/_build/html)"
-    @echo "  lint    Lint Markdown with markdownlint-cli2"
-    @echo "  format  Auto-fix Markdown with markdownlint-cli2"
+    @echo "  lint    Lint Markdown with rumdl"
+    @echo "  format  Auto-fix Markdown with rumdl"
 
 _docs-build:
     uv run sphinx-multiversion docs docs/_build/html
@@ -80,10 +80,10 @@ _docs-build:
     touch docs/_build/html/.nojekyll
 
 _docs-lint:
-    mise exec -- markdownlint-cli2
+    mise exec -- rumdl check
 
 _docs-format:
-    mise exec -- markdownlint-cli2 --fix
+    mise exec -- rumdl check --fix
 
 # Benchmark workspace member with its own Python 3.12 environments: benchmarks/.venv
 # with Polars 1.x, benchmarks/.venv-polars2 with Polars 2.x, and benchmarks/.venv-s3fs

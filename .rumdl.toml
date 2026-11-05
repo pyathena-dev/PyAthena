@@ -1,0 +1,49 @@
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
+# https://rumdl.dev/
+
+[global]
+# A leading "/" anchors a pattern to the repository root; "*.md" alone would
+# also match Markdown files in every subdirectory.
+include = [
+    "docs/**/*.md",
+    "benchmarks/*.md",
+    "scripts/**/*.md",
+    "cloudformation/**/*.md",
+    "/*.md",
+]
+disable = [
+    # Docs have long URLs and code lines that would be awkward to wrap
+    "MD013",
+    # `$ command` style is intentional in docs/testing.md and README shell snippets
+    "MD014",
+    # MyST `(label)=` ref targets must come before the first heading, so the
+    # first line of many docs/*.md files is not an H1
+    "MD041",
+]
+
+# Sphinx renders docs/ with MyST, so directive fences such as ```{toctree}
+# are not code blocks without a language
+[per-file-flavor]
+"docs/**/*.md" = "myst"
+
+# Match existing style: dash bullets, 2-space nested indent
+[MD004]
+style = "dash"
+
+[MD007]
+indent = 2
+style = "fixed"
+
+# Cursor docs intentionally repeat subsection names ("Basic usage") under different cursors
+[MD024]
+siblings-only = true
+
+# Allow inline HTML used by README (centered images) and MyST admonitions
+[MD033]
+allowed-elements = ["details", "summary", "br", "kbd", "sub", "sup", "div", "img", "p", "a"]
