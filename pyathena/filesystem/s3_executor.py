@@ -541,7 +541,9 @@ class _S3PoolScope(S3Executor):
                 if self._shutdown:
                     raise RuntimeError("cannot schedule new futures after shutdown")
                 self._futures.add(future)
-                enter = len(self._entered) < self.max_workers
+                # Behind any waiting call, so that the calls enter in order,
+                # also when a place frees before a waiting call takes it.
+                enter = not self._waiting and len(self._entered) < self.max_workers
                 if enter:
                     # Counted only once the pool has accepted it.
                     self._pool.submit(self._run, call)
@@ -627,11 +629,24 @@ class _S3PoolScope(S3Executor):
     def _untrack(self, future: Future[Any]) -> None:
         """Stop tracking a call that has ended or was cancelled.
 
+        A call cancelled while it waits leaves the queue at once, so that its
+        arguments and context are not kept until a place frees.
+
         Args:
             future: The future of the call.
         """
+        dropped = None
         with self._lock:
             self._futures.discard(future)
+            if future.cancelled():
+                for call in self._waiting:
+                    if call.future is future:
+                        self._waiting.remove(call)
+                        dropped = call
+                        break
+        if dropped is not None:
+            # Marks the future as notified, without running the call.
+            dropped.item.run()
 
 
 class _S3ScopeCall:

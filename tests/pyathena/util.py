@@ -6,9 +6,12 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+import dis
 import io
+import itertools
 import os
 import signal
+import sys
 import threading
 import time
 import traceback
@@ -244,6 +247,160 @@ async def await_bounded(awaitable, timeout=EVENT_TIMEOUT):
     done, _ = await asyncio.wait({task}, timeout=timeout)
     assert done, f"not done within {timeout} s"
     return task.result()
+
+
+class OpcodeInterrupter:
+    """Calls a function with a ``KeyboardInterrupt`` raised at the n-th interrupt point of a target.
+
+    The interrupt is raised in the calling thread, at the n-th point where
+    the target's code executes an instruction at which a signal can raise
+    it:
+    - the entry of the function;
+    - the instruction after a call returns;
+    - the target of a backward jump;
+    - a ``with`` statement, which models an interrupt of its blocking
+      ``acquire()``.
+
+    CPython checks for signals only there, not between the instructions of a
+    ``with`` statement that has acquired its lock. Other code and other
+    threads are not interrupted. Python 3.12 and later use ``sys.monitoring``, since a trace
+    function gets no opcode events on the first call of a code object
+    there; Python 3.11 uses ``sys.settrace``.
+
+    Args:
+        code: The code object of the target.
+        n: The interrupt point to raise the interrupt at, counted from 1.
+    """
+
+    def __init__(self, code, n):
+        self.code = code
+        self.n = n
+        self.count = 0
+        self.fired = False
+        self._thread = threading.get_ident()
+        self._points = self._interrupt_points(code)
+
+    def __call__(self, fn, *args, **kwargs):
+        """Call a function with the interrupt armed.
+
+        Args:
+            fn: The function, which runs the target.
+            *args: Positional arguments of the function.
+            **kwargs: Keyword arguments of the function.
+
+        Returns:
+            The return value of the function, or None if the interrupt fired.
+
+        Raises:
+            KeyboardInterrupt: If the function raises one that was not injected.
+        """
+        with self._armed():
+            try:
+                return fn(*args, **kwargs)
+            except KeyboardInterrupt:
+                if not self.fired:
+                    raise
+                return None
+
+    @staticmethod
+    def _interrupt_points(code):
+        """Find the offsets of the instructions at which a signal can raise an interrupt.
+
+        Args:
+            code: The code object.
+
+        Returns:
+            The set of offsets.
+        """
+        instructions = list(dis.get_instructions(code))
+        points = set()
+        for i, instruction in enumerate(instructions):
+            name = instruction.opname
+            if name == "RESUME" or name.startswith("BEFORE_WITH"):
+                points.add(instruction.offset)
+            elif name in ("CALL", "CALL_KW", "CALL_FUNCTION_EX") and i + 1 < len(instructions):
+                points.add(instructions[i + 1].offset)
+            elif name == "JUMP_BACKWARD" and instruction.jump_target is not None:
+                points.add(instruction.jump_target)
+        return points
+
+    def _instruction(self, offset):
+        """Count an interrupt point of the target in the calling thread, interrupting at the n-th.
+
+        Args:
+            offset: The offset of the instruction about to run.
+
+        Raises:
+            KeyboardInterrupt: At the n-th interrupt point.
+        """
+        if self.fired or offset not in self._points or threading.get_ident() != self._thread:
+            return
+        self.count += 1
+        if self.count == self.n:
+            self.fired = True
+            raise KeyboardInterrupt
+
+    @contextmanager
+    def _armed(self):
+        monitoring = getattr(sys, "monitoring", None)
+        if monitoring is None:
+            previous = sys.gettrace()
+            sys.settrace(self._trace_call)
+            try:
+                yield
+            finally:
+                sys.settrace(previous)
+            return
+        tool = monitoring.DEBUGGER_ID
+        monitoring.use_tool_id(tool, "pyathena-tests")
+        try:
+            monitoring.register_callback(
+                tool, monitoring.events.INSTRUCTION, lambda code, offset: self._instruction(offset)
+            )
+            monitoring.set_local_events(tool, self.code, monitoring.events.INSTRUCTION)
+            yield
+        finally:
+            monitoring.set_local_events(tool, self.code, 0)
+            monitoring.register_callback(tool, monitoring.events.INSTRUCTION, None)
+            monitoring.free_tool_id(tool)
+
+    def _trace_call(self, frame, event, arg):
+        if frame.f_code is not self.code:
+            return None
+        frame.f_trace_opcodes = True
+        return self._trace_opcode
+
+    def _trace_opcode(self, frame, event, arg):
+        if event == "opcode":
+            self._instruction(frame.f_lasti)
+        return self._trace_opcode
+
+
+def interrupt_each_opcode(target, case, limit=2000):
+    """Run a case once for each opcode of a target, interrupting the target there.
+
+    For n = 1, 2, and so on, ``case`` is called with an
+    :class:`OpcodeInterrupter` for the n-th instruction, which it uses to call the
+    code under test, and then checks the invariants that must hold after the
+    interrupt. The loop ends with the first n that the target never reaches.
+
+    Args:
+        target: The function whose instructions are interrupted, or a method of it.
+        case: The callable that sets up, runs, and checks one attempt.
+        limit: The largest number of attempts, which a target that never
+            returns would exceed.
+
+    Returns:
+        The number of opcodes that were interrupted.
+    """
+    code = getattr(target, "__func__", target).__code__
+    for n in itertools.count(1):
+        assert n <= limit, f"the target ran more than {limit} opcodes"
+        interrupter = OpcodeInterrupter(code, n)
+        case(interrupter)
+        if not interrupter.fired:
+            return n - 1
+    raise AssertionError("unreachable")
 
 
 def mock_connection(max_pool_connections=10):

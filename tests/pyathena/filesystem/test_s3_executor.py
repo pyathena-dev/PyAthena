@@ -25,6 +25,7 @@ from tests.pyathena.util import (
     EVENT_TIMEOUT,
     ThrottledOperation,
     forking,
+    interrupt_each_opcode,
     overlapping_calls,
     run_in_forked_child,
     shutdown_bounded,
@@ -32,6 +33,26 @@ from tests.pyathena.util import (
 
 
 class TestS3ThreadPool:
+    def test_submit_interrupted_at_each_opcode(self):
+        # GH-1332 (P6, I2): an interrupt at any opcode of submit() leaves
+        # nothing to wait for forever: the next call runs, and the shutdown
+        # returns.
+        def case(interrupt):
+            pool = S3ThreadPool(1)
+            events = []
+            try:
+                future = interrupt(pool.submit, events.append, "call")
+                assert pool.submit(sum, [1, 2]).result(EVENT_TIMEOUT) == 3
+                pool.release()
+                shutdown_bounded(pool)
+                if future is not None:
+                    assert future.done()
+                assert events in ([], ["call"])
+            finally:
+                pool.shutdown()
+
+        assert interrupt_each_opcode(S3ThreadPool.submit, case) > 0
+
     def test_default_max_workers(self):
         # None takes the default of ThreadPoolExecutor, as documented.
         with ThreadPoolExecutor() as executor:
@@ -312,6 +333,130 @@ class TestS3ThreadPool:
 
 
 class TestS3PoolScope:
+    @pytest.mark.parametrize("busy", [False, True], ids=["entering", "waiting"])
+    def test_submit_interrupted_at_each_opcode(self, busy):
+        # GH-1332 (S1, S2, S5, S8, S9): an interrupt at any opcode of submit(),
+        # for a call that enters the pool at once or waits for a place, leaves
+        # no place taken and nothing to wait for forever: the next call runs,
+        # the shutdown returns, and the interrupted call runs at most once.
+        def case(interrupt):
+            pool = S3ThreadPool(2)
+            scope = _S3PoolScope(pool, 1)
+            release = threading.Event()
+            events = []
+            try:
+                if busy:
+                    scope.submit(release.wait, EVENT_TIMEOUT)
+                future = interrupt(scope.submit, events.append, "call")
+                release.set()
+                assert scope.submit(sum, [1, 2]).result(EVENT_TIMEOUT) == 3
+                shutdown_bounded(scope)
+                # A call frees its place right after its future is settled.
+                deadline = time.monotonic() + EVENT_TIMEOUT
+                while scope._entered:
+                    assert time.monotonic() < deadline, "a place was never freed"
+                    time.sleep(0.001)
+                assert not scope._waiting
+                if future is not None:
+                    assert future.done()
+                assert events in ([], ["call"])
+            finally:
+                release.set()
+                pool.shutdown()
+
+        assert interrupt_each_opcode(_S3PoolScope.submit, case) > 0
+
+    def test_submit_to_interrupted_at_each_opcode(self):
+        # GH-1332 (I3): an interrupt at any opcode of submit_to() through a
+        # scope leaves the caller's future cancellable by the caller, as the
+        # write session does, after which nothing waits forever and the call
+        # runs at most once.
+        def case(interrupt):
+            pool = S3ThreadPool(2)
+            scope = _S3PoolScope(pool, 1)
+            release = threading.Event()
+            events = []
+            future: Future[None] = Future()
+            try:
+                scope.submit(release.wait, EVENT_TIMEOUT)
+                interrupt(scope.submit_to, future, events.append, "call")
+                if interrupt.fired and future.cancel():
+                    future.set_running_or_notify_cancel()
+                release.set()
+                assert not wait([future], timeout=EVENT_TIMEOUT).not_done
+                shutdown_bounded(scope)
+                deadline = time.monotonic() + EVENT_TIMEOUT
+                while scope._entered:
+                    assert time.monotonic() < deadline, "a place was never freed"
+                    time.sleep(0.001)
+                assert events == ([] if future.cancelled() else ["call"])
+            finally:
+                release.set()
+                pool.shutdown()
+
+        assert interrupt_each_opcode(S3Executor.submit_to, case) > 0
+
+    def test_concurrent_submitter_does_not_pass_waiting_call(self):
+        # GH-1332 (S3): a call submitted from another thread at the moment a
+        # place frees does not enter ahead of a call that waits for it. The
+        # place used to be freed and handed on under two acquisitions of the
+        # lock, between which a new submitter took it.
+        pool = S3ThreadPool(2)
+        scope = _S3PoolScope(pool, 1)
+        release = threading.Event()
+        order = []
+        late: list[Future[None]] = []
+        submitter = threading.Thread(
+            target=lambda: late.append(scope.submit(order.append, "late")), daemon=True
+        )
+
+        class FreeingSet(set):
+            def discard(self, element):
+                super().discard(element)
+                if not submitter.is_alive() and not late:
+                    # The submitter takes the free place now unless the
+                    # scope holds it off until the place is handed on.
+                    submitter.start()
+                    submitter.join(0.2)
+
+        try:
+            scope.submit(release.wait, EVENT_TIMEOUT)
+            scope._entered = FreeingSet(scope._entered)
+            waiting = scope.submit(order.append, "waiting")
+            release.set()
+            assert waiting.result(EVENT_TIMEOUT) is None
+            submitter.join(EVENT_TIMEOUT)
+            late[0].result(EVENT_TIMEOUT)
+            shutdown_bounded(scope)
+        finally:
+            release.set()
+            pool.shutdown()
+        assert order == ["waiting", "late"]
+
+    def test_cancelled_waiting_call_frees_arguments(self):
+        # GH-1332 (S8): a call cancelled while it waits leaves the queue at
+        # once, so that its arguments are not kept until a place frees.
+        class Body:
+            pass
+
+        pool = S3ThreadPool(1)
+        scope = _S3PoolScope(pool, 1)
+        release = threading.Event()
+        body = Body()
+        body_ref = weakref.ref(body)
+        try:
+            scope.submit(release.wait, EVENT_TIMEOUT)
+            waiting = scope.submit(lambda b: None, body)
+            del body
+            assert waiting.cancel()
+            gc.collect()
+            assert body_ref() is None
+            assert not scope._waiting
+        finally:
+            release.set()
+            shutdown_bounded(scope)
+            pool.shutdown()
+
     def test_window(self):
         # GH-1332: at most max_workers calls of a scope are in the shared
         # pool at once, as a file with its own pool of that size used to run.
