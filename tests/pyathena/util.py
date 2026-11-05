@@ -393,6 +393,56 @@ class OpcodeInterrupter:
         return self._trace_opcode
 
 
+@contextmanager
+def sigint_when(ready, timeout=EVENT_TIMEOUT):
+    """Deliver a real SIGINT to the main thread once a condition holds.
+
+    The signal interrupts a blocking call of the main thread, such as the
+    acquisition of a lock or a wait for a future, as a user's Ctrl-C does.
+    Only the first one is raised as ``KeyboardInterrupt``; it is repeated
+    until handled, since a signal that arrives just before the main thread
+    blocks can miss waking it. A late signal is ignored after the block.
+
+    Args:
+        ready: The condition, a callable without arguments, checked in a
+            thread of the helper.
+        timeout: The longest wait for the condition, in seconds.
+
+    Yields:
+        A list that holds the handled signal once it was raised.
+    """
+    handled = []
+    stop = threading.Event()
+
+    def handle_interrupt(signum, frame):
+        # The list is checked instead of an event, whose set() takes a lock
+        # that a nested call of this handler would wait for forever.
+        if not handled:
+            handled.append(signum)
+            raise KeyboardInterrupt
+
+    def interrupt():
+        deadline = time.monotonic() + timeout
+        while not ready():
+            if stop.is_set() or time.monotonic() > deadline:
+                return
+            time.sleep(0.001)
+        while not handled and not stop.is_set():
+            signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+            time.sleep(0.05)
+
+    thread = threading.Thread(target=interrupt, daemon=True)
+    previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
+    try:
+        thread.start()
+        yield handled
+    finally:
+        signal.signal(signal.SIGINT, lambda signum, frame: None)
+        stop.set()
+        thread.join()
+        signal.signal(signal.SIGINT, previous_handler)
+
+
 def interrupt_each_opcode(target, case, limit=2000):
     """Run a case once for each opcode of a target, interrupting the target there.
 

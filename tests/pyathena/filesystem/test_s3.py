@@ -61,6 +61,7 @@ from tests.pyathena.util import (
     overlapping_calls,
     retried,
     run_in_forked_child,
+    sigint_when,
     stub_multipart_copy,
 )
 
@@ -3647,6 +3648,55 @@ class TestS3FileSystem:
                 fs._request_pool.shutdown()
 
         assert interrupt_each_opcode(S3File._fetch_range, case) > 0
+
+    @pytest.mark.skipif(
+        threading.current_thread() is not threading.main_thread(),
+        reason="SIGINT interrupts the main thread.",
+    )
+    def test_read_interrupted_by_signal_frees_ranges(self):
+        # GH-1332 (F5): a real interrupt of a parallel read while it waits for
+        # its ranges cancels those that have not started, and frees the data
+        # of the others once they end, while the caller holds the interrupt.
+        # concurrent.futures.wait() leaves its waiter on the futures when it
+        # is interrupted, which forms a reference cycle with them, so the
+        # data is freed by the cyclic garbage collector, not when they end.
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = 64
+        read = []
+        running = threading.Semaphore(0)
+        release = threading.Event()
+
+        def get_object(path, range_, **kwargs):
+            running.release()
+            release.wait(EVENT_TIMEOUT)
+            # Unlike bytes, an array can be weakly referenced.
+            data = array.array("B", bytes(range_[1] - range_[0]))
+            read.append(weakref.ref(data))
+            return data
+
+        fs.core.get_object = get_object
+        f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=2)
+        try:
+            with (
+                sigint_when(lambda: running._value >= 2),
+                pytest.raises(KeyboardInterrupt) as info,
+            ):
+                f.read()
+            release.set()
+            f.close()
+            assert info.value.__traceback__ is not None
+            deadline = time.monotonic() + EVENT_TIMEOUT
+            while any(ref() is not None for ref in read):
+                assert time.monotonic() < deadline, "the data of a read was kept"
+                gc.collect()
+                time.sleep(0.001)
+            # The two ranges that had not started were cancelled.
+            assert len(read) == 2
+        finally:
+            release.set()
+            f.close()
+            fs._request_pool.shutdown()
 
     def test_interrupted_read_frees_ranges(self):
         # GH-1186: an interrupted parallel read cancels the reads that have

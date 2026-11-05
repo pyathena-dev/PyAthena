@@ -29,6 +29,7 @@ from tests.pyathena.util import (
     overlapping_calls,
     run_in_forked_child,
     shutdown_bounded,
+    sigint_when,
 )
 
 
@@ -455,6 +456,38 @@ class TestS3PoolScope:
         finally:
             release.set()
             shutdown_bounded(scope)
+            pool.shutdown()
+
+    @pytest.mark.skipif(
+        threading.current_thread() is not threading.main_thread(),
+        reason="SIGINT interrupts the main thread.",
+    )
+    def test_shutdown_interrupted_while_waiting(self):
+        # GH-1332 (I1, S5): a real interrupt of a shutdown that waits for a
+        # running call leaves the scope consistent: the call runs to its end,
+        # and a later shutdown waits for it and returns.
+        pool = S3ThreadPool(2)
+        scope = _S3PoolScope(pool, 1)
+        started, release = threading.Event(), threading.Event()
+
+        def call():
+            started.set()
+            return release.wait(EVENT_TIMEOUT)
+
+        try:
+            running = scope.submit(call)
+            assert started.wait(EVENT_TIMEOUT)
+            (pending,) = scope.pending()
+            # Sent once the shutdown waits for the call: concurrent.futures
+            # installs its waiter on the future, inside the block.
+            with sigint_when(lambda: pending._waiters), pytest.raises(KeyboardInterrupt):
+                scope.shutdown(wait=True)
+            assert not running.done()
+            release.set()
+            shutdown_bounded(scope)
+            assert running.result(EVENT_TIMEOUT)
+        finally:
+            release.set()
             pool.shutdown()
 
     def test_window(self):
