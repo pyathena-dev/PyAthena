@@ -520,8 +520,10 @@ class _S3PoolScope(S3Executor):
         self.max_workers = max_workers
         self._pool = pool
         self._lock = threading.Lock()
-        # The futures of the calls that were submitted and have not ended.
-        self._futures: set[Future[Any]] = set()
+        # The calls that were submitted and have not ended, by future.
+        self._futures: dict[Future[Any], _S3ScopeCall] = {}
+        # The futures of the calls that threads of the pool run themselves.
+        self._inline: set[Future[Any]] = set()
         # The calls that wait for a place in the pool, and those that the
         # pool has accepted and that have not ended.
         self._waiting: deque[_S3ScopeCall] = deque()
@@ -563,7 +565,8 @@ class _S3PoolScope(S3Executor):
             with self._lock:
                 if self._shutdown:
                     raise RuntimeError("cannot schedule new futures after shutdown")
-                self._futures.add(future)
+                self._futures[future] = call
+                self._inline.add(future)
             future.add_done_callback(self._untrack)
             call.context.run(call.item.run)
             return future
@@ -571,7 +574,7 @@ class _S3PoolScope(S3Executor):
             with self._lock:
                 if self._shutdown:
                     raise RuntimeError("cannot schedule new futures after shutdown")
-                self._futures.add(future)
+                self._futures[future] = call
                 # Behind any waiting call, so that the calls enter in order,
                 # also when a place frees before a waiting call takes it.
                 enter = not self._waiting_calls and len(self._entered) < self.max_workers
@@ -591,7 +594,7 @@ class _S3PoolScope(S3Executor):
             if future.cancel():
                 call.item.run()
                 with self._lock:
-                    self._futures.discard(future)
+                    self._futures.pop(future, None)
             raise
         return future
 
@@ -607,19 +610,35 @@ class _S3PoolScope(S3Executor):
         """
         with self._lock:
             self._shutdown = True
-            pending = list(self._futures)
+        pending = self.pending()
         if wait:
             futures.wait(pending)
 
     def pending(self) -> list[Future[Any]]:
         """Return the futures of the calls that were submitted and have not ended.
 
+        A call that has neither entered the pool, nor waits for a place, nor
+        started, is one whose submission interrupts stopped before its
+        cleanup ended. It is cancelled instead, so that nothing waits forever
+        for a call that never runs.
+
         Returns:
             The futures, which an asyncio caller can wait for without
             blocking the event loop, such as with :meth:`wait_shielded`.
         """
         with self._lock:
-            return list(self._futures)
+            tracked = {call.future for call in self._entered}
+            tracked.update(self._waiting_calls, self._inline)
+            calls = list(self._futures.items())
+        pending = []
+        for future, call in calls:
+            if future in tracked or not future.cancel():
+                pending.append(future)
+            else:
+                # Marks the cancelled future as notified, so that wait()
+                # counts it as done; the call does not run.
+                call.item.run()
+        return pending
 
     def _run(self, call: _S3ScopeCall) -> None:
         """Run a call in the pool, then let the next waiting calls enter it.
@@ -691,7 +710,8 @@ class _S3PoolScope(S3Executor):
             future: The future of the call.
         """
         with self._lock:
-            self._futures.discard(future)
+            self._futures.pop(future, None)
+            self._inline.discard(future)
             dropped = self._waiting_calls.pop(future, None) if future.cancelled() else None
             if dropped is not None and len(self._waiting) > 2 * len(self._waiting_calls) + 16:
                 # Drops the entries of cancelled calls, so that calls submitted

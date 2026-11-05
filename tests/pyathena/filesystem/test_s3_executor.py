@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+import contextlib
 import contextvars
 import gc
 import threading
@@ -426,6 +427,20 @@ class TestS3PoolScope:
                 pool.shutdown()
 
         assert interrupt_each_opcode(S3Executor.submit_to, case) > 0
+
+    def test_rejected_submit_interrupted_at_each_opcode(self):
+        # GH-1332 (I1, S5): an interrupt at any point of a submission that the
+        # pool rejects, including its cleanup, leaves nothing for the
+        # shutdown of the scope to wait for forever.
+        def case(interrupt):
+            pool = S3ThreadPool(1)
+            pool.shutdown()
+            scope = _S3PoolScope(pool, 1)
+            with contextlib.suppress(RuntimeError):
+                interrupt(scope.submit, sum, [1, 2])
+            shutdown_bounded(scope)
+
+        assert interrupt_each_opcode(_S3PoolScope.submit, case) > 0
 
     def test_waiting_calls_enter_in_order(self):
         # GH-1332 (S3): the calls that wait for a place enter the pool in the
