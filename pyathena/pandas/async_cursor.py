@@ -85,7 +85,7 @@ class AsyncPandasCursor(AsyncCursor):
         block_size: int | None = None,
         cache_type: str | None = None,
         auto_optimize_chunksize: bool = False,
-        s3_max_workers: int = (cpu_count() or 1) * 5,
+        s3_max_workers: int | None = None,
         **kwargs,
     ) -> None:
         """Initialize an AsyncPandasCursor.
@@ -119,7 +119,10 @@ class AsyncPandasCursor(AsyncCursor):
                 UNLOAD result that is larger than 32 MiB without a cache.
             auto_optimize_chunksize: Whether to choose a chunk size from the size of the
                 CSV result file when ``chunksize`` is None.
-            s3_max_workers: Maximum worker threads per S3 file reader.
+            s3_max_workers: The size of the request pool of the S3 filesystem
+                that reads the result files. If None, the
+                ``max_pool_connections`` of the connection's S3 client (10
+                unless set with ``s3_config``).
             **kwargs: Other cursor arguments, such as ``connection`` and ``converter``,
                 passed to ``AsyncCursor.__init__``.
         """

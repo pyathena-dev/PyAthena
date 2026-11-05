@@ -59,11 +59,10 @@ The reader rejects an unknown name when it reads the query results, which PyAthe
 
 ## Worker settings in PyAthena 4.0
 
-The pandas and Polars cursors take the number of threads that read each result file from S3 as `s3_max_workers`.
+The pandas and Polars cursors take, as `s3_max_workers`, the size of the request pool of the S3 filesystem that reads the result files; a file reads at most that many ranges at once.
 It can be set in the cursor constructor and overridden for one query in `execute()`.
-The default is `(cpu_count() or 1) * 5`.
-Polars uses it only for CSV results read without `chunksize`.
-Chunked CSV reads and UNLOAD results use Polars' native readers, which do not use this setting.
+The default is None, which takes the `max_pool_connections` of the connection's S3 client: 10, unless set with `s3_config`.
+Polars uses it for CSV results read without `chunksize`, and for UNLOAD results read in chunks through PyArrow without read options; its other readers do not use this setting.
 
 The thread-pool cursors, such as `AsyncCursor`, `AsyncPandasCursor`, and `AsyncPolarsCursor`, keep `max_workers` for the size of the thread pool that waits for queries and collects their results.
 

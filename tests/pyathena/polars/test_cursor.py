@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: MIT
 
 import contextlib
+import inspect
 import logging
 import random
 import string
@@ -18,8 +19,10 @@ from unittest.mock import MagicMock, patch
 import polars as pl
 import pytest
 
+from pyathena.aio.polars.cursor import AioPolarsCursor
 from pyathena.error import DatabaseError, DataError, OperationalError, ProgrammingError
 from pyathena.model import AthenaQueryExecution
+from pyathena.polars.async_cursor import AsyncPolarsCursor
 from pyathena.polars.converter import DefaultPolarsTypeConverter
 from pyathena.polars.cursor import PolarsCursor
 from pyathena.polars.result_set import AthenaPolarsResultSet
@@ -1109,3 +1112,12 @@ class TestPolarsCursor:
         expected = {**cursor_kwargs, **execute_kwargs}
         expected["max_workers"] = expected.pop("s3_max_workers")
         assert {key: kwargs[key] for key in expected} == expected
+
+
+@pytest.mark.parametrize("cursor_class", [PolarsCursor, AsyncPolarsCursor, AioPolarsCursor])
+def test_s3_max_workers_default(cursor_class):
+    # GH-1332: the Polars cursors default s3_max_workers to None, so that the
+    # filesystem that reads the result files takes the connection pool of the
+    # S3 client; they used to default to cpu_count() * 5.
+    default = inspect.signature(cursor_class.__init__).parameters["s3_max_workers"].default
+    assert default is None

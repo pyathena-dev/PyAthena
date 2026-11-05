@@ -80,7 +80,7 @@ class AsyncPolarsCursor(AsyncCursor):
         block_size: int | None = None,
         cache_type: str | None = None,
         chunksize: int | None = None,
-        s3_max_workers: int = (cpu_count() or 1) * 5,
+        s3_max_workers: int | None = None,
         **kwargs,
     ) -> None:
         """Initialize an AsyncPolarsCursor.
@@ -108,7 +108,10 @@ class AsyncPolarsCursor(AsyncCursor):
             chunksize: Number of rows per chunk for memory-efficient processing.
                       If specified, data is loaded lazily in chunks for all data
                       access methods including fetchone(), fetchmany(), and iter_chunks().
-            s3_max_workers: Maximum worker threads per S3 file reader.
+            s3_max_workers: The size of the request pool of the S3 filesystem
+                that reads the result files. If None, the
+                ``max_pool_connections`` of the connection's S3 client (10
+                unless set with ``s3_config``).
             **kwargs: Additional connection parameters.
 
         Example:
