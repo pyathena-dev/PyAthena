@@ -118,7 +118,8 @@ and closing it only marks it closed, without uploading or aborting anything.
 
 An interrupt, such as Ctrl+C, while a file reads ranges in parallel cancels the range
 reads that have not started. Those that are running finish, and their data is released
-once they end. Closing the file waits for its running requests. An interrupt while a
+once they end. Closing the file waits for its running requests; an interrupt of that
+wait stops it, and the requests still finish. An interrupt while a
 request is being submitted can let one more request than `max_workers` run at once
 until the request pool is idle. These guarantees hold for one interrupt at a time. If another interrupt arrives while the cleanup of an interrupt or
 an error runs, the call still does not wait forever, but the cleanup may stop early:
