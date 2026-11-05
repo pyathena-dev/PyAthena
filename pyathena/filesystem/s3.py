@@ -3463,13 +3463,18 @@ class S3File(AbstractBufferedFile):
                     # keeps a future.
                     while futures:
                         futures.pop().cancel()
-                    # After the cancellation, which a thread that it frees
-                    # could otherwise precede by taking a queued read.
-                    stop.set()
-                    traceback.clear_frames(e.__traceback__)
                 finally:
-                    done.clear()
-                    futures.clear()
+                    # Also if an interrupt stops the cancellation, whose error
+                    # keeps this one as its context; the frames first, as
+                    # they keep the futures of the wait.
+                    try:
+                        traceback.clear_frames(e.__traceback__)
+                    finally:
+                        done.clear()
+                        futures.clear()
+                        # After the cancellation, which a thread that it frees
+                        # could otherwise precede by taking a queued read.
+                        stop.set()
                 raise
         return self.fs.core.get_object(path, ranges[0], **request_kwargs)
 

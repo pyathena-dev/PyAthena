@@ -1558,7 +1558,14 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 # for it also after a cancellation of this task.
                 discard: Future[None] = Future()
                 self._discard_future = discard
-                self.fs._thread_pool.submit_to(discard, self._discard)
+                try:
+                    self.fs._thread_pool.submit_to(discard, self._discard)
+                except BaseException:
+                    # Not queued, or queued by a submission that an interrupt
+                    # stopped and that now finds it cancelled: the drain does
+                    # not wait for an abort that never runs.
+                    discard.cancel()
+                    raise
                 await self.fs._thread_pool.wait_shielded(discard)
         finally:
             # A commit that was scheduled before runs on, and is waited for.

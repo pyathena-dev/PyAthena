@@ -3671,6 +3671,51 @@ class TestS3FileSystem:
 
         assert interrupt_each_opcode(S3File._fetch_range, case) > 0
 
+    def test_read_interrupted_twice_frees_ranges(self):
+        # GH-1332 (F5): a second interrupt at any point of the cleanup after
+        # an interrupt of the wait, whose error then keeps the first as its
+        # context, also frees the data of the ranges that were read. The
+        # frame of the wait keeps the futures, as concurrent.futures.wait()
+        # does.
+        def interrupted_wait(futures, **kwargs):
+            # A set of its own, as concurrent.futures.wait() makes.
+            held = set(futures)
+            wait(held)
+            raise KeyboardInterrupt
+
+        def case(interrupt):
+            fs = self._make_fs()
+            fs.info = mock.MagicMock(return_value=self._file_object("key"))
+            fs.info.return_value.size = 64
+            read = []
+
+            def get_object(path, range_, **kwargs):
+                # Unlike bytes, an array can be weakly referenced.
+                data = array.array("B", bytes(range_[1] - range_[0]))
+                read.append(weakref.ref(data))
+                return data
+
+            fs.core.get_object = get_object
+            f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4)
+            try:
+                with mock.patch("pyathena.filesystem.s3.wait", interrupted_wait):
+                    try:
+                        interrupt(f._fetch_range, 0, 64)
+                        error = interrupt.error
+                    except KeyboardInterrupt as e:
+                        error = e
+                f.close()
+                # Held, as a caller that handles the interrupt does.
+                assert error.__traceback__ is not None
+                poll_until(
+                    lambda: all(ref() is None for ref in read), "the data of a read was kept"
+                )
+            finally:
+                f.close()
+                fs._request_pool.shutdown()
+
+        assert interrupt_each_opcode(S3File._fetch_range, case) > 0
+
     @pytest.mark.skipif(
         threading.current_thread() is not threading.main_thread(),
         reason="SIGINT interrupts the main thread.",

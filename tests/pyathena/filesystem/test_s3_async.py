@@ -2880,6 +2880,83 @@ class TestAioS3StreamedFile:
         fs.core.complete_multipart_upload.assert_not_called()
         fs.core.abort_multipart_upload.assert_called_once()
 
+    def test_close_interrupted_after_queuing_commit(self, fs):
+        # GH-1332 (F2, I3): an interrupt of the queuing of the commit after the
+        # commit has started lets the close return only after the commit has
+        # ended. The commit used to be tracked only once its queuing returned.
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        submit_to = S3ThreadPool.submit_to
+        started = threading.Event()
+        events = []
+
+        def complete_multipart_upload(*args, **kwargs):
+            started.set()
+            time.sleep(0.2)
+            events.append("committed")
+
+        fs.core.complete_multipart_upload = mock.MagicMock(side_effect=complete_multipart_upload)
+
+        def interrupt_commit(pool, future, fn, *args, **kwargs):
+            submit_to(pool, future, fn, *args, **kwargs)
+            if getattr(fn, "__name__", None) == "_complete_upload":
+                assert started.wait(EVENT_TIMEOUT)
+                raise KeyboardInterrupt
+
+        async def write_and_close():
+            async with asyncio.timeout(EVENT_TIMEOUT):
+                f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
+                await f.write(b"a" * block_size)
+                try:
+                    with mock.patch.object(
+                        S3ThreadPool, "submit_to", autospec=True, side_effect=interrupt_commit
+                    ):
+                        await f.close()
+                finally:
+                    events.append("closed")
+
+        with pytest.raises(KeyboardInterrupt):
+            asyncio.run(write_and_close())
+
+        assert events == ["committed", "closed"]
+        fs.core.abort_multipart_upload.assert_not_called()
+
+    def test_exit_interrupted_while_queuing_abort(self, fs):
+        # GH-1332 (F2, I1): an interrupt that stops the queuing of the abort
+        # of an exit with an exception is raised; the close used to wait
+        # forever for the abort, which nothing runs.
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        submit_to = S3ThreadPool.submit_to
+
+        def interrupt_abort(pool, future, fn, *args, **kwargs):
+            if getattr(fn, "__name__", None) == "_discard":
+                raise KeyboardInterrupt
+            return submit_to(pool, future, fn, *args, **kwargs)
+
+        async def write_and_fail():
+            f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
+            await f.write(b"a" * block_size * 2)
+            with mock.patch.object(
+                S3ThreadPool, "submit_to", autospec=True, side_effect=interrupt_abort
+            ):
+                async with f:
+                    raise ValueError("failed")
+
+        errors = []
+
+        def run():
+            try:
+                asyncio.run(write_and_fail())
+            except BaseException as e:
+                errors.append(e)
+
+        # In a thread, which a regression leaves waiting instead of hanging
+        # the test.
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(EVENT_TIMEOUT)
+        assert not thread.is_alive()
+        assert [type(e) for e in errors] == [KeyboardInterrupt]
+
     @pytest.mark.asyncio
     async def test_flush_cancelled_then_exit_joins_abort(self, fs):
         # GH-1211: leaving the block with an exception after a cancelled final

@@ -40,21 +40,40 @@ class TestS3ThreadPool:
         # returns.
         def case(interrupt):
             pool = S3ThreadPool(1)
+            hold = threading.Event()
+            lock = threading.Lock()
+            state = {"active": 0, "peak": 0}
             events = []
+
+            def call(name, timeout):
+                with lock:
+                    state["active"] += 1
+                    state["peak"] = max(state["peak"], state["active"])
+                try:
+                    hold.wait(timeout)
+                finally:
+                    with lock:
+                        state["active"] -= 1
+                events.append(name)
+
             try:
-                future = interrupt(pool.submit, events.append, "call")
-                assert pool.submit(sum, [1, 2]).result(EVENT_TIMEOUT) == 3
+                # Running until the others have had the time to overlap it.
+                future = interrupt(pool.submit, call, "call", EVENT_TIMEOUT)
                 pool.release()
+                others = [pool.submit(call, "other", 0.05) for _ in range(3)]
+                time.sleep(0.1)
+                hold.set()
+                for other in others:
+                    other.result(EVENT_TIMEOUT)
                 # At most one call more than max_workers runs at once (I2).
-                call, state = overlapping_calls(2, timeout=0.5, grace=0.1)
-                for running in [pool.submit(call) for _ in range(3)]:
-                    running.result(EVENT_TIMEOUT)
                 assert state["peak"] <= 2
                 shutdown_bounded(pool)
                 if future is not None:
                     assert future.done()
-                assert events in ([], ["call"])
+                assert events.count("other") == 3
+                assert events.count("call") <= 1
             finally:
+                hold.set()
                 pool.shutdown()
 
         assert interrupt_each_opcode(S3ThreadPool.submit, case) > 0
@@ -400,9 +419,7 @@ class TestS3PoolScope:
 
     def test_waiting_calls_enter_in_order(self):
         # GH-1332 (S3): the calls that wait for a place enter the pool in the
-        # order they were submitted. A place that frees passes to the oldest
-        # waiting call under the lock that new submitters take, so a call
-        # submitted meanwhile, from any thread, queues behind it.
+        # order they were submitted.
         pool = S3ThreadPool(2)
         scope = _S3PoolScope(pool, 1)
         release = threading.Event()
@@ -433,11 +450,16 @@ class TestS3PoolScope:
         try:
             nested = pool.submit(lambda: scope.submit(call).result(EVENT_TIMEOUT))
             assert started.wait(EVENT_TIMEOUT)
-            shut_down = threading.Event()
-            waiter = threading.Thread(
-                target=lambda: (scope.shutdown(wait=True), shut_down.set()), daemon=True
-            )
+            shutting_down, shut_down = threading.Event(), threading.Event()
+
+            def shutdown():
+                shutting_down.set()
+                scope.shutdown(wait=True)
+                shut_down.set()
+
+            waiter = threading.Thread(target=shutdown, daemon=True)
             waiter.start()
+            assert shutting_down.wait(EVENT_TIMEOUT)
             assert not shut_down.wait(0.2)
             release.set()
             assert shut_down.wait(EVENT_TIMEOUT)
