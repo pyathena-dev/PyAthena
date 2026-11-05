@@ -579,6 +579,16 @@ class _S3PoolScope(S3Executor):
         if wait:
             futures.wait(pending)
 
+    def pending(self) -> list[Future[Any]]:
+        """Return the futures of the calls that were submitted and have not ended.
+
+        Returns:
+            The futures, which an asyncio caller can wait for without
+            blocking the event loop, such as with :meth:`wait_shielded`.
+        """
+        with self._lock:
+            return list(self._futures)
+
     def _run(self, call: _S3ScopeCall) -> None:
         """Run a call in the pool, then let the next waiting calls enter it.
 

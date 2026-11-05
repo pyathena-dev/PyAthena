@@ -32,7 +32,7 @@ from fsspec.utils import check_contained
 from pyathena.aio.util import create_in_thread
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem, S3FileTarget
 from pyathena.filesystem.s3_core import S3Core
-from pyathena.filesystem.s3_executor import S3ThreadPool
+from pyathena.filesystem.s3_executor import S3ThreadPool, _S3PoolScope
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3Metadata,
@@ -1276,7 +1276,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         # The requests of the file, at most max_workers at once in the
         # request pool of the filesystem. Created first, so that an invalid
         # max_workers raises before the lookups.
-        self._requests = fs._sync_fs._create_executor(max_workers=max_workers)
+        self._requests = cast(_S3PoolScope, fs._sync_fs._create_executor(max_workers=max_workers))
+        # The scheduled commit, which close() waits for.
+        self._commit_future: Future[None] | None = None
         self.max_workers = max_workers
         # The process that opened the file; a forked child rejects it.
         self._pid = os.getpid()
@@ -1480,8 +1482,11 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
     async def close(self) -> None:
         """Close the file, committing the written data.
 
-        In a forked child process, a file that the parent opened is only
-        marked closed, without committing or aborting anything.
+        Returns once the requests of the file and its scheduled commit have
+        ended, also when the close or an earlier read or flush was
+        cancelled; the event loop runs meanwhile. In a forked child process,
+        a file that the parent opened is only marked closed, without
+        committing or aborting anything.
         """
         if self.closed:
             return
@@ -1493,8 +1498,28 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 await self.flush(force=True)
         finally:
             self.closed = True
-            # A commit that is still running waits for the requests on.
-            self._requests.shutdown(wait=False)
+            await self._drain()
+
+    async def _drain(self) -> None:
+        """Wait, without blocking the event loop, for the requests and the commit of the file.
+
+        A cancellation of the waiting task leaves them running, as the
+        cancellation of a commit does, and is re-raised.
+        """
+        self._requests.shutdown(wait=False)
+        pending = self._requests.pending()
+        if self._commit_future is not None:
+            pending.append(self._commit_future)
+        if not pending:
+            return
+        waiters = [asyncio.wrap_future(future) for future in pending]
+        for waiter in waiters:
+            # The outcomes belong to the reads and the commit that awaited
+            # them; retrieved here, so that asyncio does not log them.
+            waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
+        # Unlike gather(), wait() neither raises their outcomes nor cancels
+        # them when this task is cancelled.
+        await asyncio.wait(waiters)
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if self.closed:
@@ -1520,7 +1545,8 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             if self._begin_close_without_commit():
                 await self.fs._thread_pool.run_shielded(self._discard)
         finally:
-            self._requests.shutdown(wait=False)
+            # A commit that was scheduled before runs on, and is waited for.
+            await self._drain()
 
     def _close_without_commit_blocking(self) -> None:
         """Close the file without committing it; blocks.
@@ -1649,6 +1675,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             session.begin_complete()
             # Passed, as closing the file without committing it drops the buffer.
             commit = self.fs._thread_pool.submit(self._complete_upload, cast(BytesIO, self.buffer))
+            self._commit_future = commit
         except BaseException:
             if commit is None:
                 # Not queued, or queued by a submit() that an interrupt

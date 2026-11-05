@@ -2676,7 +2676,9 @@ class TestAioS3StreamedFile:
     async def test_commit_cancelled(self, fs, cancelled):
         # A commit that has started completes, and the upload is not aborted,
         # when the task that closes the file is cancelled, or when the block
-        # is left with the exception of a cancelled final flush.
+        # is left with the exception of a cancelled final flush. GH-1332 (F2):
+        # the close waits for the commit before it raises the cancellation;
+        # it used to return while the commit ran.
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
         started = threading.Event()
         release = threading.Event()
@@ -2707,19 +2709,67 @@ class TestAioS3StreamedFile:
                 flush.cancel()
                 await flush
 
+        scenario = asyncio.ensure_future(close() if cancelled == "close" else flush_and_exit())
         try:
+            assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+            # The cancelled close waits for the running commit.
+            await asyncio.sleep(0.1)
+            assert not scenario.done()
+            release.set()
             with pytest.raises(asyncio.CancelledError):
-                await await_bounded(close() if cancelled == "close" else flush_and_exit())
+                await await_bounded(scenario)
         finally:
             release.set()
-        # Waits for the commit, and for an abort queued after it, in the
-        # threads of the filesystem.
-        await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
+            scenario.cancel()
 
         assert f.closed
         assert released == [True]
         fs.core.complete_multipart_upload.assert_called_once()
         fs.core.abort_multipart_upload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_close_waits_for_cancelled_read(self, fs):
+        # GH-1332 (F2): closing a file whose read was cancelled while its
+        # request ran waits for the request, which used to run on after the
+        # close returned.
+        block_size = 2**10
+        started = threading.Event()
+        release = threading.Event()
+        finished = []
+
+        def get_object(path, range_, **kwargs):
+            started.set()
+            release.wait(EVENT_TIMEOUT)
+            finished.append(range_)
+            return bytes(range_[1] - range_[0])
+
+        fs.core.get_object = mock.MagicMock(side_effect=get_object)
+        info = S3Object(
+            init={"Key": "key", "ETag": '"etag"'},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="key",
+        )
+        info.size = block_size
+        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        f = await fs.open_async("s3://bucket/key", "rb", block_size=block_size)
+        read = asyncio.ensure_future(f.read())
+        close = None
+        try:
+            assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+            read.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await read
+            close = asyncio.ensure_future(f.close())
+            await asyncio.sleep(0.1)
+            assert not close.done()
+            release.set()
+            await await_bounded(close)
+        finally:
+            release.set()
+            if close is not None:
+                close.cancel()
+        assert finished == [(0, block_size)]
 
     @pytest.mark.asyncio
     async def test_flush_cancelled_while_queued_then_exit_with_exception(self, fs):
@@ -2758,18 +2808,19 @@ class TestAioS3StreamedFile:
                 flush.cancel()
                 await flush
 
-        try:
-            with (
-                mock.patch.object(S3ThreadPool, "submit", autospec=True, side_effect=record_commit),
-                pytest.raises(asyncio.CancelledError),
-            ):
-                # Bounded, so that a regression whose exit waits for the
-                # held thread fails here and releases it.
-                await await_bounded(flush_and_exit())
-        finally:
-            release.set()
-        # Waits for the commit, and for an abort queued after it.
-        await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
+        with mock.patch.object(S3ThreadPool, "submit", autospec=True, side_effect=record_commit):
+            scenario = asyncio.ensure_future(flush_and_exit())
+            try:
+                await await_bounded(asyncio.to_thread(queued.wait, EVENT_TIMEOUT))
+                # GH-1332 (F2): leaving the block waits for the queued commit.
+                await asyncio.sleep(0.1)
+                assert not scenario.done()
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await await_bounded(scenario)
+            finally:
+                release.set()
+                scenario.cancel()
 
         assert f.closed
         assert released == [True]
