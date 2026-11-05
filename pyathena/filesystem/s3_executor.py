@@ -558,11 +558,14 @@ class _S3PoolScope(S3Executor):
         if self._pool.owns_current_thread():
             # A thread of the pool, such as one in which garbage collection
             # closes a file, runs the call itself instead of waiting for a
-            # place in the pool that it holds (T1).
+            # place in the pool that it holds (T1). It does not count toward
+            # max_workers, and a shutdown waits for it.
             with self._lock:
                 if self._shutdown:
                     raise RuntimeError("cannot schedule new futures after shutdown")
-            call.item.run()
+                self._futures.add(future)
+            future.add_done_callback(self._untrack)
+            call.context.run(call.item.run)
             return future
         try:
             with self._lock:
@@ -643,10 +646,14 @@ class _S3PoolScope(S3Executor):
         Args:
             ended: The call that has ended.
         """
-        with self._lock:
-            self._entered.discard(ended)
+        freed = False
         while True:
             with self._lock:
+                if not freed:
+                    # Freed under the lock that hands the place to the oldest
+                    # waiting call, so that a new submitter cannot take it.
+                    self._entered.discard(ended)
+                    freed = True
                 if not self._waiting or len(self._entered) >= self.max_workers:
                     return
                 call = self._waiting.popleft()
@@ -686,6 +693,10 @@ class _S3PoolScope(S3Executor):
         with self._lock:
             self._futures.discard(future)
             dropped = self._waiting_calls.pop(future, None) if future.cancelled() else None
+            if dropped is not None and len(self._waiting) > 2 * len(self._waiting_calls) + 16:
+                # Drops the entries of cancelled calls, so that calls submitted
+                # and cancelled behind a long call do not accumulate.
+                self._waiting = deque(c for c in self._waiting if c.future in self._waiting_calls)
         if dropped is not None:
             # Marks the future as notified and drops the arguments, without
             # running the call; the entry left in the queue is skipped.

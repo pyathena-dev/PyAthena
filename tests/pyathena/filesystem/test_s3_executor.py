@@ -45,6 +45,11 @@ class TestS3ThreadPool:
                 future = interrupt(pool.submit, events.append, "call")
                 assert pool.submit(sum, [1, 2]).result(EVENT_TIMEOUT) == 3
                 pool.release()
+                # At most one call more than max_workers runs at once (I2).
+                call, state = overlapping_calls(2, timeout=0.5, grace=0.1)
+                for running in [pool.submit(call) for _ in range(3)]:
+                    running.result(EVENT_TIMEOUT)
+                assert state["peak"] <= 2
                 shutdown_bounded(pool)
                 if future is not None:
                     assert future.done()
@@ -355,7 +360,11 @@ class TestS3PoolScope:
                 shutdown_bounded(scope)
                 if future is not None:
                     assert future.done()
-                assert events in ([], ["call"])
+                if interrupt.fired and busy:
+                    # A waiting call cannot have started, so it was cancelled.
+                    assert events == []
+                else:
+                    assert events in ([], ["call"])
             finally:
                 release.set()
                 pool.shutdown()
@@ -376,10 +385,10 @@ class TestS3PoolScope:
             try:
                 scope.submit(release.wait, EVENT_TIMEOUT)
                 interrupt(scope.submit_to, future, events.append, "call")
-                if interrupt.fired and future.cancel():
-                    future.set_running_or_notify_cancel()
+                if interrupt.fired:
+                    # As the write session does with its tracked request.
+                    future.cancel()
                 release.set()
-                assert not wait([future], timeout=EVENT_TIMEOUT).not_done
                 assert scope.submit(sum, [1, 2]).result(EVENT_TIMEOUT) == 3
                 shutdown_bounded(scope)
                 assert events == ([] if future.cancelled() else ["call"])
@@ -389,42 +398,73 @@ class TestS3PoolScope:
 
         assert interrupt_each_opcode(S3Executor.submit_to, case) > 0
 
-    def test_concurrent_submitter_does_not_pass_waiting_call(self):
-        # GH-1332 (S3): a call submitted from another thread at the moment a
-        # place frees does not enter ahead of a call that waits for it. A
-        # barrier case (spec section 6.2): the submitter is started from the
-        # internal point where the place is freed, before it is handed on.
+    def test_waiting_calls_enter_in_order(self):
+        # GH-1332 (S3): the calls that wait for a place enter the pool in the
+        # order they were submitted. A place that frees passes to the oldest
+        # waiting call under the lock that new submitters take, so a call
+        # submitted meanwhile, from any thread, queues behind it.
         pool = S3ThreadPool(2)
         scope = _S3PoolScope(pool, 1)
         release = threading.Event()
         order = []
-        late: list[Future[None]] = []
-        submitter = threading.Thread(
-            target=lambda: late.append(scope.submit(order.append, "late")), daemon=True
-        )
-
-        class FreeingSet(set):
-            def discard(self, element):
-                super().discard(element)
-                if not submitter.is_alive() and not late:
-                    # The submitter takes the free place now unless the
-                    # scope holds it off until the place is handed on.
-                    submitter.start()
-                    submitter.join(0.2)
-
         try:
             scope.submit(release.wait, EVENT_TIMEOUT)
-            scope._entered = FreeingSet(scope._entered)
-            waiting = scope.submit(order.append, "waiting")
+            waiting = [scope.submit(order.append, name) for name in ("first", "second")]
             release.set()
-            assert waiting.result(EVENT_TIMEOUT) is None
-            submitter.join(EVENT_TIMEOUT)
-            late[0].result(EVENT_TIMEOUT)
+            for future in waiting:
+                future.result(EVENT_TIMEOUT)
             shutdown_bounded(scope)
         finally:
             release.set()
             pool.shutdown()
-        assert order == ["waiting", "late"]
+        assert order == ["first", "second"]
+
+    def test_shutdown_waits_for_call_from_pool_thread(self):
+        # GH-1332 (S5): the shutdown of a scope also waits for a call that a
+        # thread of its pool runs itself (T1).
+        pool = S3ThreadPool(2)
+        scope = _S3PoolScope(pool, 1)
+        started, release = threading.Event(), threading.Event()
+
+        def call():
+            started.set()
+            return release.wait(EVENT_TIMEOUT)
+
+        try:
+            nested = pool.submit(lambda: scope.submit(call).result(EVENT_TIMEOUT))
+            assert started.wait(EVENT_TIMEOUT)
+            shut_down = threading.Event()
+            waiter = threading.Thread(
+                target=lambda: (scope.shutdown(wait=True), shut_down.set()), daemon=True
+            )
+            waiter.start()
+            assert not shut_down.wait(0.2)
+            release.set()
+            assert shut_down.wait(EVENT_TIMEOUT)
+            assert nested.result(EVENT_TIMEOUT)
+        finally:
+            release.set()
+            pool.shutdown()
+
+    def test_cancelled_waiting_calls_do_not_accumulate(self):
+        # GH-1332 (S8): calls submitted and cancelled while one long call
+        # holds the only place are freed before that call ends.
+        pool = S3ThreadPool(1)
+        scope = _S3PoolScope(pool, 1)
+        release = threading.Event()
+        refs = []
+        try:
+            scope.submit(release.wait, EVENT_TIMEOUT)
+            for _ in range(100):
+                future = scope.submit(sum, [1, 2])
+                assert future.cancel()
+                refs.append(weakref.ref(future))
+                del future
+            gc.collect()
+            assert sum(ref() is not None for ref in refs) < 50
+        finally:
+            release.set()
+            pool.shutdown()
 
     def test_cancelled_waiting_call_frees_arguments(self):
         # GH-1332 (S8): a call cancelled while it waits leaves the queue at

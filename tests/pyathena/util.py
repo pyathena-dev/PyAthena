@@ -356,8 +356,9 @@ class OpcodeInterrupter:
                 # ends a `try`, it is raised before the call.
                 same = handler(after) == handler(instruction.offset)
                 points.add(after if same else instruction.offset)
-            elif name == "JUMP_BACKWARD" and instruction.jump_target is not None:
-                points.add(instruction.jump_target)
+            elif name == "JUMP_BACKWARD":
+                # The target offset; Instruction.jump_target is new in 3.13.
+                points.add(instruction.argval)
         return points
 
     def _instruction(self, offset):

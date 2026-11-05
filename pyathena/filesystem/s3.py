@@ -16,7 +16,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from io import BytesIO
-from typing import Any, BinaryIO, ClassVar, cast
+from typing import Any, BinaryIO, cast
 from urllib.parse import unquote_plus
 
 import botocore.exceptions
@@ -2882,9 +2882,6 @@ class S3File(AbstractBufferedFile):
 
     fs: S3FileSystem
     buffer: BytesIO | None
-    # The forks of this process so far, which a file compares with those at
-    # its opening to tell that it was inherited across a fork.
-    _forks: ClassVar[int] = 0
 
     def __init__(
         self,
@@ -2959,8 +2956,8 @@ class S3File(AbstractBufferedFile):
             max_workers = fs.max_workers
         if max_workers <= 0:
             raise ValueError("max_workers must be greater than 0")
-        # The forks at the opening; a forked child rejects the file.
-        self._forks_at_open = S3File._forks
+        # The process that opened the file; a forked child rejects it.
+        self._pid = os.getpid()
         self.max_workers = max_workers
         # The arguments are validated, and the objects looked up, before the
         # base class initializer: a file that fails here is never opened, so
@@ -3075,11 +3072,6 @@ class S3File(AbstractBufferedFile):
         self._check_process()
         super().flush(force=force)
 
-    @classmethod
-    def _count_fork(cls) -> None:
-        """Count a fork, in the child process."""
-        cls._forks += 1
-
     def _inherited(self) -> bool:
         """Whether this process is a forked child of the process that opened the file.
 
@@ -3087,7 +3079,9 @@ class S3File(AbstractBufferedFile):
             True in a forked child process of the process that opened the
             file.
         """
-        return getattr(self, "_forks_at_open", S3File._forks) != S3File._forks
+        # Compared with the process ID, not a count that an at-fork hook
+        # updates, since hooks registered before it may close the file.
+        return getattr(self, "_pid", os.getpid()) != os.getpid()
 
     def _check_process(self) -> None:
         """Reject the use of a file that the parent of a forked process opened.
@@ -3461,16 +3455,21 @@ class S3File(AbstractBufferedFile):
                 # the wait: the reads that have not started are cancelled, and
                 # the futures of the others are dropped, so that this frame,
                 # which the traceback of the error keeps, does not keep their
-                # data; the frames of the wait, which keep the futures, are
-                # cleared, and clear_frames() skips this frame, which is
-                # executing.
-                traceback.clear_frames(e.__traceback__)
-                done.clear()
-                while futures:
-                    futures.pop().cancel()
-                # After the cancellation, which a thread that it frees could
-                # otherwise precede by taking a queued read.
-                stop.set()
+                # data, also if another interrupt stops this cleanup. The
+                # frames of the wait, which keep the futures, are cleared, and
+                # clear_frames() skips this frame, which is executing.
+                try:
+                    # Popped, not iterated, so that no variable of this frame
+                    # keeps a future.
+                    while futures:
+                        futures.pop().cancel()
+                    # After the cancellation, which a thread that it frees
+                    # could otherwise precede by taking a queued read.
+                    stop.set()
+                    traceback.clear_frames(e.__traceback__)
+                finally:
+                    done.clear()
+                    futures.clear()
                 raise
         return self.fs.core.get_object(path, ranges[0], **request_kwargs)
 
@@ -3494,7 +3493,3 @@ class S3File(AbstractBufferedFile):
         else:
             ranges.append((start, end))
         return ranges
-
-
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=S3File._count_fork)

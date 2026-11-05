@@ -1279,11 +1279,12 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         if max_workers is None:
             max_workers = fs._sync_fs.max_workers
         self._requests = fs._sync_fs._create_executor(max_workers=max_workers)
-        # The scheduled commit, which close() waits for.
+        # The scheduled commit and abort, which close() waits for.
         self._commit_future: Future[None] | None = None
+        self._discard_future: Future[None] | None = None
         self.max_workers = max_workers
-        # The forks at the opening; a forked child rejects the file.
-        self._forks_at_open = S3File._forks
+        # The process that opened the file; a forked child rejects it.
+        self._pid = os.getpid()
         target = S3FileTarget.resolve(
             fs._sync_fs,
             path,
@@ -1360,7 +1361,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             True in a forked child process of the process that opened the
             file.
         """
-        return getattr(self, "_forks_at_open", S3File._forks) != S3File._forks
+        return getattr(self, "_pid", os.getpid()) != os.getpid()
 
     def _check_process(self) -> None:
         """Reject the use of a file that the parent of a forked process opened.
@@ -1503,25 +1504,33 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             await self._drain()
 
     async def _drain(self) -> None:
-        """Wait, without blocking the event loop, for the requests and the commit of the file.
+        """Wait, without blocking the event loop, for the requests, commit, and abort of the file.
 
-        A cancellation of the waiting task leaves them running, as the
-        cancellation of a commit does, and is re-raised.
+        A cancellation of the waiting task, also a repeated one, does not stop
+        the wait; it is re-raised once they have ended, so that nothing of
+        the file runs after its close returns (I1).
         """
         self._requests.shutdown(wait=False)
         pending = self._requests.pending()
-        if self._commit_future is not None:
-            pending.append(self._commit_future)
+        pending.extend(f for f in (self._commit_future, self._discard_future) if f is not None)
         if not pending:
             return
         waiters = [asyncio.wrap_future(future) for future in pending]
         for waiter in waiters:
-            # The outcomes belong to the reads and the commit that awaited
-            # them; retrieved here, so that asyncio does not log them.
+            # The outcomes belong to the reads, the commit, and the abort that
+            # awaited them; retrieved here, so that asyncio does not log them.
             waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
-        # Unlike gather(), wait() neither raises their outcomes nor cancels
-        # them when this task is cancelled.
-        await asyncio.wait(waiters)
+        cancelled = False
+        while True:
+            try:
+                # Unlike gather(), wait() neither raises their outcomes nor
+                # cancels them when this task is cancelled.
+                await asyncio.wait(waiters)
+                break
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if self.closed:
@@ -1545,7 +1554,12 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             return
         try:
             if self._begin_close_without_commit():
-                await self.fs._thread_pool.run_shielded(self._discard)
+                # Tracked before it is queued, so that the drain below waits
+                # for it also after a cancellation of this task.
+                discard: Future[None] = Future()
+                self._discard_future = discard
+                self.fs._thread_pool.submit_to(discard, self._discard)
+                await self.fs._thread_pool.wait_shielded(discard)
         finally:
             # A commit that was scheduled before runs on, and is waited for.
             await self._drain()
@@ -1672,17 +1686,20 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 committing it.
         """
         session = cast(_S3WriteSession, self._session)
-        commit: Future[None] | None = None
+        # Tracked before it is queued, so that close() also waits for a
+        # commit that an interrupt of the queuing has let start.
+        commit: Future[None] = Future()
+        self._commit_future = commit
         try:
             session.begin_complete()
             # Passed, as closing the file without committing it drops the buffer.
-            commit = self.fs._thread_pool.submit(self._complete_upload, cast(BytesIO, self.buffer))
-            self._commit_future = commit
+            self.fs._thread_pool.submit_to(
+                commit, self._complete_upload, cast(BytesIO, self.buffer)
+            )
         except BaseException:
-            if commit is None:
-                # Not queued, or queued by a submit() that an interrupt
-                # stopped: such a commit either has taken the reservation
-                # and runs on, or finds the write failed.
+            if commit.cancel():
+                # Not started, and now never: a commit that was queued by a
+                # submission that an interrupt stopped finds itself cancelled.
                 session.withdraw_complete()
             await self._close_without_commit()
             raise

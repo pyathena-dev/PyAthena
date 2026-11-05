@@ -2560,12 +2560,12 @@ class TestAioS3StreamedFile:
         }
 
         queued = threading.Event()
-        submit = S3ThreadPool.submit
+        submit_to = S3ThreadPool.submit_to
 
-        def record_commit(pool, fn, *args, **kwargs):
+        def record_commit(pool, future, fn, *args, **kwargs):
             if getattr(fn, "__name__", None) == "_complete_upload":
                 queued.set()
-            return submit(pool, fn, *args, **kwargs)
+            return submit_to(pool, future, fn, *args, **kwargs)
 
         def upload_part(part_number, **kwargs):
             try:
@@ -2588,7 +2588,7 @@ class TestAioS3StreamedFile:
         await f.write(b"a" * block_size * 3)
         started = time.monotonic()
         with (
-            mock.patch.object(S3ThreadPool, "submit", autospec=True, side_effect=record_commit),
+            mock.patch.object(S3ThreadPool, "submit_to", autospec=True, side_effect=record_commit),
             pytest.raises(PermissionError, match="Access Denied"),
         ):
             await f.close()
@@ -2773,13 +2773,18 @@ class TestAioS3StreamedFile:
             close = asyncio.ensure_future(f.close())
             await asyncio.sleep(0.1)
             assert not close.done()
+            # A cancellation of the close does not stop it waiting either.
+            close.cancel()
+            await asyncio.sleep(0.1)
+            assert not close.done()
             release.set()
-            await await_bounded(close)
+            with pytest.raises(asyncio.CancelledError):
+                await await_bounded(close)
+            assert finished == [(0, block_size)]
         finally:
             release.set()
             if close is not None:
                 close.cancel()
-        assert finished == [(0, block_size)]
 
     @pytest.mark.asyncio
     async def test_flush_cancelled_while_queued_then_exit_with_exception(self, fs):
@@ -2797,12 +2802,12 @@ class TestAioS3StreamedFile:
             released.append(release.wait(EVENT_TIMEOUT))
 
         queued = threading.Event()
-        submit = S3ThreadPool.submit
+        submit_to = S3ThreadPool.submit_to
 
-        def record_commit(pool, fn, *args, **kwargs):
+        def record_commit(pool, future, fn, *args, **kwargs):
             if getattr(fn, "__name__", None) == "_complete_upload":
                 queued.set()
-            return submit(pool, fn, *args, **kwargs)
+            return submit_to(pool, future, fn, *args, **kwargs)
 
         fs._thread_pool = S3ThreadPool(1)
         f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
@@ -2818,7 +2823,7 @@ class TestAioS3StreamedFile:
                 flush.cancel()
                 await flush
 
-        with mock.patch.object(S3ThreadPool, "submit", autospec=True, side_effect=record_commit):
+        with mock.patch.object(S3ThreadPool, "submit_to", autospec=True, side_effect=record_commit):
             scenario = asyncio.ensure_future(flush_and_exit())
             try:
                 await await_bounded(asyncio.to_thread(queued.wait, EVENT_TIMEOUT))
@@ -2843,12 +2848,12 @@ class TestAioS3StreamedFile:
         # committing it and aborts the upload. The upload used to be left
         # incomplete with a commit that nothing sends.
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
-        submit = S3ThreadPool.submit
+        submit_to = S3ThreadPool.submit_to
 
-        def interrupt_commit(pool, fn, *args, **kwargs):
+        def interrupt_commit(pool, future, fn, *args, **kwargs):
             if getattr(fn, "__name__", None) == "_complete_upload":
                 raise KeyboardInterrupt
-            return submit(pool, fn, *args, **kwargs)
+            return submit_to(pool, future, fn, *args, **kwargs)
 
         async def write_and_close():
             async with asyncio.timeout(EVENT_TIMEOUT):
@@ -2859,7 +2864,7 @@ class TestAioS3StreamedFile:
             await f.write(b"a" * block_size)
             try:
                 with mock.patch.object(
-                    S3ThreadPool, "submit", autospec=True, side_effect=interrupt_commit
+                    S3ThreadPool, "submit_to", autospec=True, side_effect=interrupt_commit
                 ):
                     await f.close()
             finally:
@@ -2916,6 +2921,41 @@ class TestAioS3StreamedFile:
         assert events == ["aborted", "exited"]
         fs.core.complete_multipart_upload.assert_called_once()
         fs.core.abort_multipart_upload.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_exit_cancelled_while_aborting(self, fs):
+        # GH-1332 (F2): a cancellation of the exit that aborts the upload is
+        # raised only after the abort has ended; the abort used to run on
+        # after the cancelled exit returned.
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        aborting, release = threading.Event(), threading.Event()
+        aborted = []
+
+        def abort_multipart_upload(*args, **kwargs):
+            aborting.set()
+            release.wait(EVENT_TIMEOUT)
+            aborted.append(True)
+
+        fs.core.abort_multipart_upload = mock.MagicMock(side_effect=abort_multipart_upload)
+        f = await fs.open_async("s3://bucket/key", "wb", block_size=block_size)
+        await f.write(b"a" * block_size * 2)
+
+        async def write_and_fail():
+            async with f:
+                raise ValueError("failed")
+
+        exit_ = asyncio.ensure_future(write_and_fail())
+        try:
+            assert await asyncio.to_thread(aborting.wait, EVENT_TIMEOUT)
+            exit_.cancel()
+            await asyncio.sleep(0.1)
+            assert not exit_.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await await_bounded(exit_)
+            assert aborted == [True]
+        finally:
+            release.set()
 
     @pytest.mark.parametrize("data", [b"", b"abc"])
     @pytest.mark.asyncio
