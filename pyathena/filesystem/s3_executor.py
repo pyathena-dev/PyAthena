@@ -613,20 +613,15 @@ class _S3PoolScope(S3Executor):
         if wait and pending:
             # Waits through done callbacks, which a cancellation runs at once,
             # not through futures.wait(), which waits for a cancelled future
-            # until the pool reaches its call and marks it as notified.
-            remaining = [len(pending)]
-            lock = threading.Lock()
+            # until the pool reaches its call and marks it as notified. The
+            # states are also checked every second, since an interrupt of a
+            # cancellation can skip its callbacks.
             ended = threading.Event()
-
-            def count(_: Future[Any]) -> None:
-                with lock:
-                    remaining[0] -= 1
-                    if remaining[0] == 0:
-                        ended.set()
-
             for future in pending:
-                future.add_done_callback(count)
-            ended.wait()
+                future.add_done_callback(lambda _: ended.set())
+            while not all(future.done() for future in pending):
+                ended.wait(1.0)
+                ended.clear()
 
     def pending(self) -> list[Future[Any]]:
         """Return the futures of the calls that were submitted and have not ended.

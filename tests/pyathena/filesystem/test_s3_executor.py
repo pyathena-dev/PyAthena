@@ -521,6 +521,45 @@ class TestS3PoolScope:
             release.set()
             pool.shutdown()
 
+    def test_shutdown_after_interrupted_cancel(self):
+        # GH-1332 (S5, I1): an interrupt at any point of the cancellation of a
+        # call that a shutdown waits for, including one that skips the
+        # callbacks of the future, does not keep the shutdown waiting.
+        def case(interrupt):
+            pool = S3ThreadPool(1)
+            other = _S3PoolScope(pool, 1)
+            scope = _S3PoolScope(pool, 1)
+            release = threading.Event()
+            try:
+                # Longer than the waits below, so that the pool cannot reach
+                # the cancelled call before the test ends.
+                other.submit(release.wait, 3 * EVENT_TIMEOUT)
+                future = scope.submit(sum, [1, 2])
+                waiting = threading.Event()
+                add_done_callback = future.add_done_callback
+
+                def watch(fn):
+                    add_done_callback(fn)
+                    waiting.set()
+
+                future.add_done_callback = watch
+                shut_down = threading.Event()
+                thread = threading.Thread(
+                    target=lambda: (scope.shutdown(wait=True), shut_down.set()), daemon=True
+                )
+                thread.start()
+                assert waiting.wait(EVENT_TIMEOUT)
+                interrupt(future.cancel)
+                if not future.cancelled():
+                    # Interrupted before it changed the state.
+                    assert future.cancel()
+                assert shut_down.wait(EVENT_TIMEOUT)
+            finally:
+                release.set()
+                pool.shutdown()
+
+        assert interrupt_each_opcode(Future.cancel, case) > 0
+
     def test_waiting_calls_enter_in_order(self):
         # GH-1332 (S3): the calls that wait for a place enter the pool in the
         # order they were submitted.

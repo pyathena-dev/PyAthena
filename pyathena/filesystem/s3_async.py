@@ -1528,12 +1528,13 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             # awaited them; retrieved here, so that asyncio does not log them.
             waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
         cancelled = False
-        while True:
+        # The states are also checked every second, since an interrupt of a
+        # cancellation can skip the callbacks that the waiters rely on.
+        while not all(future.done() for future in pending):
             try:
                 # Unlike gather(), wait() neither raises their outcomes nor
                 # cancels them when this task is cancelled.
-                await asyncio.wait(waiters)
-                break
+                await asyncio.wait(waiters, timeout=1.0)
             except asyncio.CancelledError:
                 cancelled = True
         if cancelled:
