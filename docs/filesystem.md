@@ -223,8 +223,9 @@ The lookups of the sources of `cp_file`, `copy`, and `mv`, and of the object of
 `setxattr`, send the source's parameters of the copy: `RequestPayer`,
 `ExpectedSourceBucketOwner` as `ExpectedBucketOwner`, and the `CopySourceSSECustomer*`
 parameters as `SSECustomer*`. `mv` deletes the copied sources with `RequestPayer` and
-that expected bucket owner. The listings that expand the paths of a recursive or glob
-`copy` or `mv` do not send these parameters.
+that expected bucket owner. The requests that expand the paths of a recursive or glob
+`copy` or `mv`, or of a path with a version ID in a recursive one, and the checks of
+their destinations do not send these parameters.
 
 ```python
 fs.cp_file(

@@ -230,9 +230,14 @@ class TestAioS3FileSystem:
         assert [c.args[0] for c in copy_annotation.call_args_list] == ["a1"]
 
     def test_mv_source_lookup_and_delete_params(self):
-        # GH-1333: see stub_move_with_source_params.
+        # GH-1333: see stub_move_with_source_params. max_workers=1 runs the
+        # copies, which _mv() gathers, in the order of the stubbed requests.
         fs = AioS3FileSystem(
-            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=1,
+            skip_instance_cache=True,
         )
         with Stubber(fs._sync_fs._client) as stubber:
             stub_move_with_source_params(stubber)
