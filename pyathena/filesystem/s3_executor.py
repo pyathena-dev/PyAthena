@@ -239,13 +239,13 @@ class _S3Batch(Generic[ItemT, T]):
         The states are also checked every second, since an interrupt of a
         cancellation can skip the callbacks that end the wait.
         """
-        while not self._ended.done() and not all(f.done() for f in self.futures):
+        while not self._ended_or_settled():
             wait([self._ended], timeout=1.0)
 
     async def wait_async(self) -> None:
         """Await until every call has ended or a failure has stopped the batch."""
         ended = S3Executor.waiter(self._ended)
-        while not self._ended.done() and not all(f.done() for f in self.futures):
+        while not self._ended_or_settled():
             await asyncio.wait([ended], timeout=1.0)
 
     def result(self) -> S3MapResult[T]:
@@ -364,6 +364,22 @@ class _S3Batch(Generic[ItemT, T]):
                 started.append(future)
         return started
 
+    def _ended_or_settled(self) -> bool:
+        """Return whether the wait of the waiting thread can end.
+
+        Also checks the states that end it, in case an interrupt in a
+        callback stopped the signal.
+
+        Returns:
+            Whether the wait has been ended, a failure has stopped the batch,
+            or every call has settled.
+        """
+        return (
+            self._ended.done()
+            or self._stopped_by_failure()
+            or all(future.done() for future in self.futures)
+        )
+
     def _stopped_by_failure(self) -> bool:
         """Return whether a failure has stopped the batch.
 
@@ -436,12 +452,12 @@ class _S3Batch(Generic[ItemT, T]):
             error: The failure.
         """
         with self._lock:
-            if self._failure is not None:
-                return
-            self._failure = error
-            if self._stop_on_failure:
-                self.stop.set()
+            if self._failure is None:
+                self._failure = error
         if self._stop_on_failure:
+            # Also for a later failure, which resumes a signal that an
+            # interrupt stopped.
+            self.stop.set()
             self._end()
 
     def _end(self) -> None:

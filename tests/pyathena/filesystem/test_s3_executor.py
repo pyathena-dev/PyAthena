@@ -1252,10 +1252,56 @@ class TestS3Executor:
                 pass
 
         executor = Holding()
-        threading.Timer(0.1, lambda: executor.held[0].cancel()).start()
-        with pytest.raises(CancelledError):
+        waiting = threading.Event()
+
+        def entered_wait(futures, **kwargs):
+            waiting.set()
+            return wait(futures, **kwargs)
+
+        def cancel():
+            # Once the map waits.
+            assert waiting.wait(EVENT_TIMEOUT)
+            executor.held[0].cancel()
+
+        threading.Thread(target=cancel, daemon=True).start()
+        with (
+            mock.patch("pyathena.filesystem.s3_executor.wait", entered_wait),
+            pytest.raises(CancelledError),
+        ):
             call_bounded(executor.map, str, range(2))
         assert executor.held[1].cancelled()
+
+    def test_map_interrupted_while_ending_wait(self):
+        # GH-1332 (I1): an interrupt at any opcode of the signal that ends the
+        # wait, in a callback that records a failure, does not keep the map
+        # waiting forever, also while another call is held until it is
+        # cancelled.
+        class Holding(S3Executor):
+            # Rejects the first call in the submitting thread, and holds the
+            # others until they are cancelled.
+            def __init__(self):
+                self.held: list[Future[Any]] = []
+
+            @override
+            def submit(self, fn, *args, **kwargs):
+                future: Future[Any] = Future()
+                if not self.held:
+                    future.set_running_or_notify_cancel()
+                    future.set_exception(RuntimeError("cannot start a thread"))
+                self.held.append(future)
+                return future
+
+            @override
+            def shutdown(self, wait=True):
+                pass
+
+        def case(interrupt):
+            # The map raises the rejection, or the interrupt, which the
+            # callback records as the failure or which propagates from it.
+            with contextlib.suppress(RuntimeError):
+                interrupt(Holding().map, str, range(2))
+
+        assert call_bounded(interrupt_each_opcode, _S3Batch._end, case, timeout=120) > 0
 
     def test_map_records_failure_before_callbacks_run(self):
         # GH-1332: a future wakes its waiters before it runs its callbacks, so
@@ -1336,9 +1382,25 @@ class TestS3Executor:
                 pass
 
         executor = Holding()
-        threading.Timer(0.1, lambda: executor.held[0].cancel()).start()
+        waiting = threading.Event()
+        waiter = S3Executor.waiter
+
+        def watched_waiter(future):
+            result = waiter(future)
+            waiting.set()
+            return result
+
+        def cancel():
+            # Once the map has wrapped the futures that it waits for.
+            assert waiting.wait(EVENT_TIMEOUT)
+            executor.held[0].cancel()
+
+        threading.Thread(target=cancel, daemon=True).start()
         # The failure of the call, not a cancellation of the waiting task.
-        with pytest.raises(CancelledError):
+        with (
+            mock.patch.object(S3Executor, "waiter", staticmethod(watched_waiter)),
+            pytest.raises(CancelledError),
+        ):
             await await_bounded(executor.map_async(str, range(2)))
         assert executor.held[1].cancelled()
 
@@ -1672,6 +1734,7 @@ class TestS3Executor:
         # thread, which would skip the callbacks after it.
         # Rejects once the map has wrapped the future of the call for asyncio.
         wrapped = threading.Event()
+        rejected = threading.Event()
         escaped = []
         waiter = S3Executor.waiter
 
@@ -1692,6 +1755,8 @@ class TestS3Executor:
                         future.set_exception(RuntimeError("rejected"))
                     except BaseException as e:
                         escaped.append(e)
+                    finally:
+                        rejected.set()
 
                 threading.Thread(target=reject, daemon=True).start()
                 return future
@@ -1713,7 +1778,9 @@ class TestS3Executor:
             pytest.raises(Abort, match="predicate"),
         ):
             await await_bounded(Deferring().map_async(str, range(1), counts=counts))
-        # Not raised in the thread that set the future either.
+        # Not raised in the thread that set the future either, once its
+        # callbacks have returned.
+        assert await asyncio.to_thread(rejected.wait, EVENT_TIMEOUT)
         assert escaped == []
 
     @pytest.mark.asyncio
