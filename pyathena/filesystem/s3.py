@@ -9,7 +9,7 @@ import logging
 import mimetypes
 import os.path
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -33,7 +33,14 @@ import pyathena
 from pyathena.connection import Connection
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3DeleteResult
 from pyathena.filesystem.s3_errors import S3ClientError
-from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool, _S3PoolScope
+from pyathena.filesystem.s3_executor import (
+    ItemT,
+    S3Executor,
+    S3MapResult,
+    S3ThreadPool,
+    T,
+    _S3PoolScope,
+)
 from pyathena.filesystem.s3_object import (
     S3Metadata,
     S3MultipartUpload,
@@ -1152,6 +1159,63 @@ class S3FileSystem(AbstractFileSystem):
         """
         return _S3PoolScope(self._request_pool, max_workers)
 
+    def _map(
+        self,
+        fn: Callable[[ItemT], T],
+        items: Iterable[ItemT],
+        max_workers: int | None = None,
+        **kwargs: Any,
+    ) -> S3MapResult[T]:
+        """Run the parallel requests of an operation in a scope of their own.
+
+        See :meth:`S3Executor.map() <pyathena.filesystem.s3_executor.S3Executor.map>`.
+        The scope is shut down without another wait, since the map has waited
+        for the calls that it started, unless a second interrupt stopped it.
+
+        Args:
+            fn: The request to run for each item.
+            items: The items.
+            max_workers: Maximum number of parallel requests. Defaults to
+                ``self.max_workers``.
+            **kwargs: The options of ``S3Executor.map()``.
+
+        Returns:
+            The outcomes of the requests.
+        """
+        executor = self._create_executor(max_workers=max_workers or self.max_workers)
+        try:
+            return executor.map(fn, items, **kwargs)
+        finally:
+            executor.shutdown(wait=False)
+
+    async def _map_async(
+        self,
+        fn: Callable[[ItemT], T],
+        items: Iterable[ItemT],
+        max_workers: int | None = None,
+        **kwargs: Any,
+    ) -> S3MapResult[T]:
+        """Run the parallel requests of an asyncio operation in a scope of their own.
+
+        See :meth:`_map` and
+        :meth:`S3Executor.map_async() <pyathena.filesystem.s3_executor.S3Executor.map_async>`.
+
+        Args:
+            fn: The request to run for each item.
+            items: The items.
+            max_workers: Maximum number of parallel requests. Defaults to
+                ``self.max_workers``.
+            **kwargs: The options of ``S3Executor.map_async()``.
+
+        Returns:
+            The outcomes of the requests.
+        """
+        executor = self._create_executor(max_workers=max_workers or self.max_workers)
+        try:
+            return await executor.map_async(fn, items, **kwargs)
+        finally:
+            executor.shutdown(wait=False)
+
     def _delete_objects(self, paths: list[str], max_workers: int | None = None, **kwargs) -> None:
         """Delete objects with DeleteObjects requests grouped by bucket.
 
@@ -1170,16 +1234,14 @@ class S3FileSystem(AbstractFileSystem):
         if not batches:
             return
 
-        max_workers = max_workers if max_workers else self.max_workers
-        executor = self._create_executor(max_workers=max_workers)
-        try:
-            # Every request runs also after another failed, and an interrupt
-            # cancels those that have not started.
-            results = executor.map(
-                functools.partial(self._delete_batch, **params), batches, stop_on_failure=False
-            )
-        finally:
-            executor.shutdown(wait=False)
+        # Every request runs also after another failed, and an interrupt
+        # cancels those that have not started.
+        results = self._map(
+            functools.partial(self._delete_batch, **params),
+            batches,
+            max_workers=max_workers,
+            stop_on_failure=False,
+        )
         self._raise_delete_errors(results.outcomes)
 
     @staticmethod
@@ -1927,11 +1989,7 @@ class S3FileSystem(AbstractFileSystem):
         try:
             return self.core.get_object(s3_path.with_version_id(version_id), ranges, **kwargs)
         except OSError as e:
-            if (
-                ranges
-                and isinstance(e.__cause__, botocore.exceptions.ClientError)
-                and S3ClientError(e.__cause__).code == "InvalidRange"
-            ):
+            if ranges and S3ClientError.code_of(e) == "InvalidRange":
                 # The range starts at or past the end of the object.
                 return b""
             raise
@@ -2261,16 +2319,7 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError(f"ACL not in {self.core.OBJECT_ACLS}.")
         if recursive:
             paths = self.find(path, withdirs=False)
-            executor = self._create_executor(max_workers=self.max_workers)
-            try:
-                executor.map(
-                    lambda p: self.chmod(p, acl, recursive=False, **kwargs),
-                    paths,
-                )
-            finally:
-                # The map has waited for the updates it started, unless a
-                # second interrupt stopped it.
-                executor.shutdown(wait=False)
+            self._map(lambda p: self.chmod(p, acl, recursive=False, **kwargs), paths)
             if s3_path.key:
                 # A key prefix is not an object itself; only the objects
                 # below it have ACLs.
@@ -2381,18 +2430,14 @@ class S3FileSystem(AbstractFileSystem):
         uploads = self.list_multipart_uploads(path)
         if not uploads:
             return
-        executor = self._create_executor(max_workers=self.max_workers)
-        try:
-            # Every abort runs also after another failed, and an interrupt
-            # cancels those that have not started.
-            results = executor.map(
-                self.core.abort_multipart_upload,
-                uploads,
-                stop_on_failure=False,
-                counts=self._is_not_no_such_upload,
-            )
-        finally:
-            executor.shutdown(wait=False)
+        # Every abort runs also after another failed, and an interrupt cancels
+        # those that have not started.
+        results = self._map(
+            self.core.abort_multipart_upload,
+            uploads,
+            stop_on_failure=False,
+            counts=self._is_not_no_such_upload,
+        )
         if results.failure is not None:
             raise results.failure
 
@@ -2406,11 +2451,8 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             False for the ``FileNotFoundError`` of a ``NoSuchUpload`` error.
         """
-        cause = error.__cause__
         return not (
-            isinstance(error, FileNotFoundError)
-            and isinstance(cause, botocore.exceptions.ClientError)
-            and S3ClientError(cause).code == "NoSuchUpload"
+            isinstance(error, FileNotFoundError) and S3ClientError.code_of(error) == "NoSuchUpload"
         )
 
     def created(self, path: str) -> datetime:

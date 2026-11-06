@@ -19,7 +19,7 @@ import weakref
 from abc import ABCMeta, abstractmethod
 from collections import deque
 from collections.abc import Callable, Iterable
-from concurrent.futures import FIRST_EXCEPTION, CancelledError, Future, wait
+from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, CancelledError, Future, wait
 from concurrent.futures.thread import ThreadPoolExecutor
 from dataclasses import dataclass
 from multiprocessing import cpu_count
@@ -65,6 +65,36 @@ class _S3WorkItem(Generic[T]):
         self._args = args
         self._kwargs = kwargs
         self._claim = threading.Lock()
+        self._submitted: Future[Any] | None = None
+
+    def link(self, future: Future[T], submitted: Future[Any]) -> None:
+        """Link the future of the caller with the submission of :meth:`run`.
+
+        The submission settles the future if the executor drops the callable
+        (:meth:`settle`), and a cancellation of the future cancels the
+        submission, so that a scope drops a waiting call at once instead of
+        letting it pass through the pool without running.
+
+        Args:
+            future: The future of the caller.
+            submitted: The future of the submitted :meth:`run`.
+        """
+        submitted.add_done_callback(self.settle)
+        self._submitted = submitted
+        future.add_done_callback(self._cancel_submission)
+
+    def _cancel_submission(self, future: Future[T]) -> None:
+        """Cancel the submission if the future of the caller was cancelled.
+
+        The future keeps its callbacks after it has ended, so the reference
+        to the submission is dropped here.
+
+        Args:
+            future: The future of the caller, which has ended.
+        """
+        submitted, self._submitted = self._submitted, None
+        if submitted is not None and future.cancelled():
+            submitted.cancel()
 
     def run(self) -> None:
         """Run the callable and resolve the future unless it was cancelled."""
@@ -172,6 +202,8 @@ class _S3Batch(Generic[ItemT, T]):
         # that an interrupt while it is being scheduled still lets it be
         # cancelled.
         self.futures: list[Future[T]] = []
+        # The asyncio wrappers of the futures, by future.
+        self._waiters: dict[Future[T], asyncio.Future[T]] = {}
 
     def submit(self, executor: S3Executor, items: Iterable[ItemT]) -> None:
         """Submit a call for each item.
@@ -187,15 +219,19 @@ class _S3Batch(Generic[ItemT, T]):
 
     def wait(self) -> None:
         """Wait until every call has ended or a failure has stopped the batch."""
+        return_when = FIRST_EXCEPTION if self._stop_on_failure else ALL_COMPLETED
         pending = set(self.futures)
         while pending and not self._stopped_by_failure():
-            pending = wait(pending, return_when=FIRST_EXCEPTION).not_done
+            pending = wait(pending, return_when=return_when).not_done
 
     async def wait_async(self) -> None:
         """Await until every call has ended or a failure has stopped the batch."""
-        pending = {self._wrap(future) for future in self.futures}
+        return_when = asyncio.FIRST_EXCEPTION if self._stop_on_failure else asyncio.ALL_COMPLETED
+        for future in self.futures:
+            self._waiters[future] = S3Executor.waiter(future)
+        pending = set(self._waiters.values())
         while pending and not self._stopped_by_failure():
-            pending = (await asyncio.wait(pending, return_when=asyncio.FIRST_EXCEPTION))[1]
+            pending = (await asyncio.wait(pending, return_when=return_when))[1]
 
     def result(self) -> S3MapResult[T]:
         """Return the outcomes of the calls, which have all ended.
@@ -209,10 +245,7 @@ class _S3Batch(Generic[ItemT, T]):
         if self._stopped_by_failure():
             raise cast(BaseException, self._failure)
         return S3MapResult(
-            [
-                f.result() if f.exception() is None else cast(Any, f.exception())
-                for f in self.futures
-            ],
+            [e if (e := f.exception()) is not None else f.result() for f in self.futures],
             self._failure,
         )
 
@@ -233,11 +266,28 @@ class _S3Batch(Generic[ItemT, T]):
         """Stop the batch, cancel the calls that have not started, and await the others."""
         started = self._stop()
         try:
-            waiters = [self._wrap(future) for future in started]
+            waiters = [self._waiters.get(f) or S3Executor.waiter(f) for f in started]
+            self._waiters.clear()
             while not all(future.done() for future in started):
                 await asyncio.wait(waiters, timeout=1.0)
         finally:
             started.clear()
+
+    def release(self, error: BaseException) -> None:
+        """Drop the futures of a batch that raises, and their outcomes, such as the bodies of reads.
+
+        The frames below the map, which the traceback of the error keeps, are
+        cleared; :func:`traceback.clear_frames` skips the frames that are
+        executing.
+
+        Args:
+            error: The error that the map raises.
+        """
+        try:
+            traceback.clear_frames(error.__traceback__)
+        finally:
+            self.futures.clear()
+            self._waiters.clear()
 
     def _stop(self) -> list[Future[T]]:
         """Stop the batch and cancel the calls that have not started.
@@ -290,20 +340,6 @@ class _S3Batch(Generic[ItemT, T]):
                         if self._stop_on_failure:
                             self.stop.set()
             raise
-
-    @staticmethod
-    def _wrap(future: Future[T]) -> asyncio.Future[T]:
-        """Wrap a future for asyncio, retrieving its outcome so that asyncio does not log it.
-
-        Args:
-            future: The future.
-
-        Returns:
-            The asyncio future.
-        """
-        waiter = asyncio.wrap_future(future)
-        waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
-        return waiter
 
 
 class S3Executor(metaclass=ABCMeta):
@@ -412,13 +448,40 @@ class S3Executor(metaclass=ABCMeta):
         Returns:
             The return value of the call.
         """
-        waiter = asyncio.wrap_future(future)
-        waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
+        waiter = self.waiter(future)
         # Unlike shield(), which on Python 3.14 and later also logs the failure
         # of a future that ends after a cancellation, wait() leaves the future
         # alone when the waiting task is cancelled.
         await asyncio.wait([waiter])
         return waiter.result()
+
+    @staticmethod
+    def waiter(future: Future[T]) -> asyncio.Future[T]:
+        """Wrap a future of an executor for asyncio, retrieving its outcome.
+
+        The outcome belongs to the caller that awaits the wrapper; it is
+        retrieved, so that asyncio does not log a failure as never retrieved
+        when no one awaits it, such as after a cancellation.
+
+        Args:
+            future: The future.
+
+        Returns:
+            The asyncio future.
+        """
+        waiter = asyncio.wrap_future(future)
+        waiter.add_done_callback(S3Executor._retrieve)
+        return waiter
+
+    @staticmethod
+    def _retrieve(waiter: asyncio.Future[Any]) -> None:
+        """Retrieve the outcome of a waiter, so that asyncio does not log it.
+
+        Args:
+            waiter: The asyncio future, which has ended.
+        """
+        if not waiter.cancelled():
+            waiter.exception()
 
     def submit_to(self, future: Future[T], fn: Callable[..., T], *args: Any, **kwargs: Any) -> None:
         """Submit a callable whose outcome resolves a future of the caller.
@@ -446,12 +509,7 @@ class S3Executor(metaclass=ABCMeta):
             **kwargs: Keyword arguments passed to the callable.
         """
         item = _S3WorkItem(future, fn, args, kwargs)
-        submitted = self.submit(item.run)
-        submitted.add_done_callback(item.settle)
-        # A cancellation of the future also cancels the submission, so that a
-        # scope drops a waiting call at once instead of letting it pass
-        # through the pool without running.
-        future.add_done_callback(lambda f: f.cancelled() and submitted.cancel())
+        item.link(future, self.submit(item.run))
 
     def map(
         self,
@@ -500,14 +558,7 @@ class S3Executor(metaclass=ABCMeta):
             try:
                 batch.drain()
             finally:
-                # The frames below this one keep the futures, whose outcomes,
-                # such as the bodies of reads, the traceback of the error would
-                # otherwise keep; clear_frames() skips this frame, which is
-                # executing.
-                try:
-                    traceback.clear_frames(e.__traceback__)
-                finally:
-                    batch.futures.clear()
+                batch.release(e)
             raise
 
     async def map_async(
@@ -548,10 +599,7 @@ class S3Executor(metaclass=ABCMeta):
             try:
                 await batch.drain_async()
             finally:
-                try:
-                    traceback.clear_frames(e.__traceback__)
-                finally:
-                    batch.futures.clear()
+                batch.release(e)
             raise
 
     def __enter__(self) -> S3Executor:

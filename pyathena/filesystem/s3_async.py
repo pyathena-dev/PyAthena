@@ -29,7 +29,7 @@ from fsspec.utils import check_contained
 from pyathena.aio.util import create_in_thread
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem, S3FileTarget
 from pyathena.filesystem.s3_core import S3Core
-from pyathena.filesystem.s3_executor import S3ThreadPool
+from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3Metadata,
@@ -386,15 +386,11 @@ class AioS3FileSystem(AsyncFileSystem):
         # At most max_workers requests at once, as S3FileSystem.rm() sends,
         # so that a large deletion does not queue ahead of the requests of
         # the files that share the request pool.
-        requests = self._sync_fs._create_executor(max_workers=self._sync_fs.max_workers)
-        try:
-            results = await requests.map_async(
-                functools.partial(self._sync_fs._delete_batch, **params),
-                batches,
-                stop_on_failure=False,
-            )
-        finally:
-            requests.shutdown(wait=False)
+        results = await self._sync_fs._map_async(
+            functools.partial(self._sync_fs._delete_batch, **params),
+            batches,
+            stop_on_failure=False,
+        )
         self._sync_fs._raise_delete_errors(results.outcomes)
 
     async def _mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
@@ -724,21 +720,18 @@ class AioS3FileSystem(AsyncFileSystem):
             raise
 
         # At most max_workers copies at once in the request pool.
-        requests = self._sync_fs._create_executor(max_workers=max_workers)
-        try:
-            await requests.map_async(
-                lambda name: self.core.copy_object_annotation(
-                    name,
-                    plan.source,
-                    plan.destination,
-                    completed.version_id,
-                    completed.etag,
-                    **kwargs,
-                ),
-                plan.annotations,
-            )
-        finally:
-            requests.shutdown(wait=False)
+        await self._sync_fs._map_async(
+            lambda name: self.core.copy_object_annotation(
+                name,
+                plan.source,
+                plan.destination,
+                completed.version_id,
+                completed.etag,
+                **kwargs,
+            ),
+            plan.annotations,
+            max_workers=max_workers,
+        )
 
     async def _find(
         self,
@@ -1483,11 +1476,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 pending.append(future)
         if not pending:
             return
-        waiters = [asyncio.wrap_future(future) for future in pending]
-        for waiter in waiters:
-            # The outcomes belong to the reads, the commit, and the abort that
-            # awaited them; retrieved here, so that asyncio does not log them.
-            waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
+        # The outcomes belong to the reads, the commit, and the abort that
+        # awaited them; retrieved, so that asyncio does not log them.
+        waiters = [S3Executor.waiter(future) for future in pending]
         cancelled = False
         # The states are also checked every second, since an interrupt of a
         # cancellation can skip the callbacks that the waiters rely on.
