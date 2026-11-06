@@ -418,8 +418,14 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         if path1 == path2:
             return
+        source_params = self.core.copy_source_params(kwargs)
         pairs = await self._thread_pool.run(
-            self._sync_fs._move_pairs, path1, path2, recursive=recursive, maxdepth=maxdepth
+            self._sync_fs._move_pairs,
+            path1,
+            path2,
+            recursive=recursive,
+            maxdepth=maxdepth,
+            source_params=source_params,
         )
         # Every copy finishes before a failure is raised, as in fsspec's
         # _copy(), and nothing is deleted after a failure.
@@ -430,7 +436,8 @@ class AioS3FileSystem(AsyncFileSystem):
             if isinstance(result, BaseException):
                 raise result
         await self._delete_objects(
-            [p1 for (p1, _), copied in zip(pairs, results, strict=True) if copied]
+            [p1 for (p1, _), copied in zip(pairs, results, strict=True) if copied],
+            **self.core.operation_params("delete_objects", source_params),
         )
 
     def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
@@ -575,7 +582,9 @@ class AioS3FileSystem(AsyncFileSystem):
         if not source.key or not destination.key:
             raise ValueError("Cannot copy buckets.")
 
-        info1 = await self._info(path1)
+        # Looked up with the parameters that authorize the access to the
+        # source; see S3FileSystem._copy_file.
+        info1 = await self._info(path1, **self.core.copy_source_params(kwargs))
         if info1.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
             # Recursive copy() passes the directories too; see
             # S3FileSystem.cp_file.

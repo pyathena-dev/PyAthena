@@ -1433,6 +1433,10 @@ class S3FileSystem(AbstractFileSystem):
             recursive: Whether to move the directories with their contents.
             maxdepth: Maximum depth of a recursive move.
             **kwargs: Additional S3 copy parameters passed to ``cp_file()``.
+                The lookups and the deletion of the sources receive
+                ``RequestPayer`` and the source's expected bucket owner (see
+                :meth:`S3Core.copy_source_params`); the lookups also receive
+                the source's SSE-C parameters.
 
         Raises:
             ValueError: If two sources have the same destination, or a
@@ -1443,12 +1447,19 @@ class S3FileSystem(AbstractFileSystem):
         """
         if path1 == path2:
             return
+        source_params = self.core.copy_source_params(kwargs)
         copied = [
             p1
-            for p1, p2 in self._move_pairs(path1, path2, recursive=recursive, maxdepth=maxdepth)
+            for p1, p2 in self._move_pairs(
+                path1,
+                path2,
+                recursive=recursive,
+                maxdepth=maxdepth,
+                source_params=source_params,
+            )
             if self._copy_file(p1, p2, **kwargs)
         ]
-        self._delete_objects(copied)
+        self._delete_objects(copied, **self.core.operation_params("delete_objects", source_params))
 
     def _move_pairs(
         self,
@@ -1456,6 +1467,7 @@ class S3FileSystem(AbstractFileSystem):
         path2: str | list[str],
         recursive: bool = False,
         maxdepth: int | None = None,
+        source_params: Mapping[str, Any] | None = None,
     ) -> list[tuple[str, str]]:
         """Pair and check the paths of a move (see :meth:`S3PathPairing.move_pairs`).
 
@@ -1465,6 +1477,9 @@ class S3FileSystem(AbstractFileSystem):
                 list.
             recursive: Whether to include the contents of the directories.
             maxdepth: Maximum depth of the expansion.
+            source_params: The parameters of the requests that read the
+                sources (see :meth:`S3Core.copy_source_params`), sent with
+                the lookups of the sources.
 
         Returns:
             The sources and destinations that are moved.
@@ -1485,12 +1500,13 @@ class S3FileSystem(AbstractFileSystem):
         versioned_buckets = {
             bucket for bucket in buckets if self.core.get_bucket_versioning(bucket) == "Enabled"
         }
+        lookup_kwargs = self._get_lookup_kwargs(source_params or {})
         missing = {
             source
             for source in pairing.conflict_candidates(
                 pairs, versioning_enabled_buckets=versioned_buckets
             )
-            if self._head_object(source) is None
+            if self._head_object(source, lookup_kwargs=lookup_kwargs) is None
         }
         return pairing.move_pairs(
             pairs, missing=missing, versioning_enabled_buckets=versioned_buckets
@@ -1612,7 +1628,11 @@ class S3FileSystem(AbstractFileSystem):
             on_error: Unused parameter for fsspec compatibility.
             **kwargs: Additional S3 copy parameters (e.g., metadata, storage
                 class). The ``block_size`` and ``max_workers`` parameters
-                control a multipart copy and are not sent to S3.
+                control a multipart copy and are not sent to S3. The lookup
+                of the source receives ``RequestPayer``, and the source's
+                expected bucket owner and SSE-C parameters under the names of
+                the requests that read it (see
+                :meth:`S3Core.copy_source_params`).
 
         Raises:
             ValueError: If trying to copy to a versioned file or copy buckets,
@@ -1654,7 +1674,9 @@ class S3FileSystem(AbstractFileSystem):
         if not source.key or not destination.key:
             raise ValueError("Cannot copy buckets.")
 
-        info1 = self.info(path1)
+        # Looked up with the parameters that authorize the access to the
+        # source, such as its customer-provided key.
+        info1 = self.info(path1, **self.core.copy_source_params(kwargs))
         if info1.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
             # Recursive copy() passes the directories too; S3 has no object
             # to copy for them.
@@ -2161,7 +2183,11 @@ class S3FileSystem(AbstractFileSystem):
             copy_kwargs: Additional parameters to use for the underlying
                 CopyObject API call. They take precedence over the kept
                 system-defined metadata and storage class. Any encryption
-                parameter replaces all kept encryption settings.
+                parameter replaces all kept encryption settings. The lookup
+                of the object receives ``RequestPayer``, and the source's
+                expected bucket owner and SSE-C parameters (e.g.,
+                ``CopySourceSSECustomerKey``) under the names of HeadObject
+                (see :meth:`S3Core.copy_source_params`).
             **kw_args: Key-value pairs to set, where the values must be
                 strings. The keys are used as-is; names that are not valid
                 Python identifiers (e.g., containing hyphens) can be passed
@@ -2182,14 +2208,17 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError("Cannot set metadata of a bucket.")
         if s3_path.version_id:
             raise ValueError("Cannot set metadata of a version.")
-        head = self.metadata(path)
+        copy_kwargs = copy_kwargs or {}
+        # Looked up with the parameters that authorize the access to the
+        # object as the source of the copy, such as its customer-provided key.
+        head = self.metadata(path, **self.core.copy_source_params(copy_kwargs))
         metadata = dict(head)
         for k, v in kw_args.items():
             if v is None:
                 metadata.pop(k, None)
             else:
                 metadata[k] = v
-        self.core.replace_object_metadata(s3_path, head, metadata, **(copy_kwargs or {}))
+        self.core.replace_object_metadata(s3_path, head, metadata, **copy_kwargs)
         self.invalidate_cache(path)
 
     def get_tags(self, path: str) -> dict[str, str]:

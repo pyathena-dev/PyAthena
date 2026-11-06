@@ -50,6 +50,7 @@ from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
+    MOVE_SOURCE_PARAMS,
     MULTIPART_COPY_BLOCK_SIZE,
     MULTIPART_COPY_KWARGS,
     MULTIPART_COPY_SIZE,
@@ -62,6 +63,7 @@ from tests.pyathena.util import (
     retried,
     run_in_forked_child,
     sigint_when,
+    stub_move_with_source_params,
     stub_multipart_copy,
 )
 
@@ -5975,6 +5977,86 @@ class TestS3FileSystem:
             pytest.raises(ValueError, match="Cannot set metadata of a version"),
         ):
             fs.setxattr(path, a="1")
+
+    COPY_SOURCE_SSE_C = {
+        "CopySourceSSECustomerAlgorithm": "AES256",
+        "CopySourceSSECustomerKey": "k" * 32,
+    }
+    SOURCE_SSE_C = {"SSECustomerAlgorithm": "AES256", "SSECustomerKey": "k" * 32}
+
+    @pytest.mark.parametrize(
+        ("copy_params", "lookup_params"),
+        [
+            (COPY_SOURCE_SSE_C, SOURCE_SSE_C),
+            (
+                {"RequestPayer": "requester", "ExpectedSourceBucketOwner": "111111111111"},
+                {"RequestPayer": "requester", "ExpectedBucketOwner": "111111111111"},
+            ),
+        ],
+    )
+    def test_cp_file_source_lookup_params(self, copy_params, lookup_params):
+        # GH-1333: the source is looked up with the parameters that
+        # authorize the access to it; S3 answers 400 to a HeadObject of an
+        # SSE-C object without its key, and 403 to one of a requester-pays
+        # object without RequestPayer.
+        fs = self._stubbed_fs()
+        with Stubber(fs._client) as stubber:
+            stubber.add_response(
+                "head_object",
+                {"ContentLength": 1},
+                {"Bucket": "bucket", "Key": "src", **lookup_params},
+            )
+            stubber.add_response(
+                "copy_object",
+                {},
+                {
+                    "CopySource": {"Bucket": "bucket", "Key": "src"},
+                    "Bucket": "bucket",
+                    "Key": "dst",
+                    **copy_params,
+                },
+            )
+            fs.cp_file("s3://bucket/src", "s3://bucket/dst", **copy_params)
+            stubber.assert_no_pending_responses()
+
+    def test_mv_source_lookup_and_delete_params(self):
+        # GH-1333: see stub_move_with_source_params.
+        fs = self._stubbed_fs()
+        with Stubber(fs._client) as stubber:
+            stub_move_with_source_params(stubber)
+            fs.mv(
+                ["s3://bucket/a", "s3://bucket/a/x"],
+                ["s3://bucket/c", "s3://bucket/c"],
+                **MOVE_SOURCE_PARAMS,
+            )
+            stubber.assert_no_pending_responses()
+
+    def test_setxattr_source_lookup_params(self):
+        # GH-1333: the object is looked up with the source's SSE-C parameters
+        # of the copy, which S3 requires to read an SSE-C object.
+        fs = self._stubbed_fs()
+        copy_kwargs = {**self.COPY_SOURCE_SSE_C, **self.SOURCE_SSE_C}
+        with Stubber(fs._client) as stubber:
+            stubber.add_response(
+                "head_object",
+                {"ContentLength": 1},
+                {"Bucket": "bucket", "Key": "key", **self.SOURCE_SSE_C},
+            )
+            stubber.add_response(
+                "copy_object",
+                {},
+                {
+                    "CopySource": {"Bucket": "bucket", "Key": "key"},
+                    "Bucket": "bucket",
+                    "Key": "key",
+                    "Metadata": {"a": "1"},
+                    "MetadataDirective": "REPLACE",
+                    "StorageClass": "STANDARD",
+                    **copy_kwargs,
+                },
+            )
+            fs.setxattr("s3://bucket/key", copy_kwargs=copy_kwargs, a="1")
+            stubber.assert_no_pending_responses()
 
     def test_get_and_put_tags(self, fs):
         path = (

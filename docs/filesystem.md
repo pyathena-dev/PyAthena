@@ -219,6 +219,22 @@ with fs.open("s3://YOUR_S3_BUCKET/path/to/encrypted.csv", "rb", **sse_c) as f:
     data = f.read()
 ```
 
+The lookups of the sources of `cp_file`, `copy`, and `mv`, and of the object of
+`setxattr`, send the source's parameters of the copy: `RequestPayer`,
+`ExpectedSourceBucketOwner` as `ExpectedBucketOwner`, and the `CopySourceSSECustomer*`
+parameters as `SSECustomer*`. `mv` deletes the copied sources with `RequestPayer` and
+that expected bucket owner.
+
+```python
+fs.cp_file(
+    "s3://YOUR_S3_BUCKET/path/to/encrypted.csv",
+    "s3://YOUR_S3_BUCKET/path/to/copy.csv",
+    CopySourceSSECustomerAlgorithm="AES256",
+    CopySourceSSECustomerKey=YOUR_32_BYTE_KEY,
+    **sse_c,
+)
+```
+
 (filesystem-read-caching)=
 
 ## Read caching
