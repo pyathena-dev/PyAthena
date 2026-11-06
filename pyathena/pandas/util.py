@@ -224,9 +224,8 @@ def to_sql(
     upload workers resolve the credentials themselves, except for a connection
     given a ``session`` and no explicit keys, or created with ``role_arn`` or
     ``serial_number``, whose session's credentials they receive once, when the
-    uploads start. They are not refreshed during the uploads; the STS
-    credentials of ``role_arn`` or ``serial_number`` then have at least the
-    shorter of 10 minutes and a sixth of ``duration_seconds`` left.
+    uploads start. They are not refreshed during the uploads, so an upload
+    that runs past their expiry fails.
 
     Args:
         df: The DataFrame to write to Athena.
