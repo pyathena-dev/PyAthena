@@ -696,6 +696,99 @@ class TestS3FileSystem:
 
         assert fs.ls(path) == []
 
+    @pytest.mark.parametrize(
+        ("method", "path", "cache_key"),
+        [
+            ("ls", "s3://bucket", ("bucket", "/")),
+            ("ls", "s3://bucket/dir", ("bucket/dir", "/")),
+            ("find", "s3://bucket/dir", ("bucket/dir", "")),
+        ],
+    )
+    def test_listing_of_missing_bucket_evicts_cached_listing(self, method, path, cache_key):
+        # GH-1351: a refreshed listing that finds the bucket deleted evicts
+        # the listing cached before.
+        fs = self._make_fs()
+        fs.dircache[cache_key] = [self._file_object("dir/deleted")]
+        fs._call.side_effect = FileNotFoundError("NoSuchBucket")
+
+        with pytest.raises(FileNotFoundError):
+            getattr(fs, method)(path, refresh=True)
+        fs._call.reset_mock()
+        with pytest.raises(FileNotFoundError):
+            getattr(fs, method)(path)
+        assert fs._call.call_args_list[0].args[0] is fs._client.list_objects_v2
+
+    @pytest.mark.parametrize(
+        ("method", "kwargs"),
+        [
+            ("ls", {}),
+            ("find", {}),
+            ("find", {"maxdepth": 1, "withdirs": True}),
+        ],
+    )
+    def test_listing_of_version_path_looks_up_the_version(self, method, kwargs):
+        # GH-1351, GH-1335: a key path with a version ID names that version,
+        # so the keys under the key prefix are not listed.
+        fs = self._make_fs()
+        self._serve_keys(fs, ("key", "key/child"))
+        serve = fs._call.side_effect
+
+        def call(api, **params):
+            if api is fs._client.head_object and params["VersionId"] != "v2":
+                raise FileNotFoundError(params["Key"])
+            return serve(api, **params)
+
+        fs._call.side_effect = call
+        list_path = getattr(fs, method)
+
+        assert list_path("s3://bucket/key?versionId=v2", **kwargs) == ["bucket/key?versionId=v2"]
+        if method == "ls":
+            with pytest.raises(FileNotFoundError):
+                list_path("s3://bucket/key?versionId=v1", **kwargs)
+        else:
+            assert list_path("s3://bucket/key?versionId=v1", **kwargs) == []
+        assert {c.args[0] for c in fs._call.call_args_list} == {fs._client.head_object}
+        # Nothing is cached as a listing of the version-qualified paths.
+        assert not [k for k in fs.dircache if isinstance(k, tuple)]
+
+    @pytest.mark.parametrize(
+        ("keys", "path", "listed", "directories"),
+        [
+            (("dir//x", "dir/y"), "dir", ["bucket/dir/", "bucket/dir/y"], ["bucket/dir/"]),
+            (("a//b//c",), "a", ["bucket/a/"], ["bucket/a/", "bucket/a//b", "bucket/a//b/"]),
+            # The bucket itself is not found.
+            (("//x",), "", ["bucket/"], ["bucket/", "bucket//"]),
+        ],
+    )
+    def test_listing_of_keys_with_empty_segments(self, keys, path, listed, directories):
+        # GH-1335: the common prefix "dir//" is the directory "bucket/dir/",
+        # not the listed directory itself, and maxdepth descends into it.
+        fs = self._make_fs()
+        self._serve_keys(fs, keys)
+        url = f"s3://bucket/{path}"
+        files = [f"bucket/{k}" for k in keys]
+        if path:
+            directories = [f"bucket/{path}", *directories]
+
+        assert fs.ls(url) == listed
+        for maxdepth in (None, 10):
+            assert sorted(fs.find(url, maxdepth=maxdepth)) == files
+            assert sorted(fs.find(url, maxdepth=maxdepth, withdirs=True)) == sorted(
+                files + directories
+            )
+
+    def test_invalidate_cache_empty_segment_drops_parent_listings(self):
+        # GH-1335: the parent of "bucket/dir//x" is the directory
+        # "bucket/dir/", whose parent is "bucket/dir".
+        fs = self._make_fs()
+        invalidated = [("bucket/dir/", "/"), ("bucket/dir", "/"), ("bucket", "/")]
+        kept = [("bucket/dir/y", "/")]
+        for cache_key in invalidated + kept:
+            fs.dircache[cache_key] = []
+
+        fs.invalidate_cache("s3://bucket/dir//x")
+        assert list(fs.dircache) == kept
+
     def test_find_withdirs_does_not_modify_cached_listing(self):
         fs = self._make_fs()
         fs.dircache[("bucket/dir", "")] = [self._file_object("dir/sub/file")]

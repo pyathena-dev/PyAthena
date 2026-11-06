@@ -190,6 +190,11 @@ entry. `cat_file` uses the key as written. Without a `?versionId=` suffix, it re
 such an object without a range, with a non-empty range of non-negative offsets, or with
 a negative `start` and no `end`, and raises `FileNotFoundError` for other ranges.
 
+A directory is named after its key prefix without the last slash. A key with an empty
+segment, such as `dir//x`, therefore lies in the directory `dir/`, which `ls` of `dir`
+lists and `find` descends into. Since `ls` drops a trailing slash, `ls` of `dir/` lists
+`dir`.
+
 S3 request parameters, such as `ContentType`, `ServerSideEncryption`, or `RequestPayer`,
 can be given to `open`, `pipe`, and `put` as keyword arguments or in
 `s3_additional_kwargs`, and to all of them through the `s3_additional_kwargs` argument
@@ -336,7 +341,10 @@ always be read with the `?versionId=` suffix or the `version_id` argument. Only 
 `?versionId=` (or `?versionID=`, `?versionid=`, `?version_id=`) query at the end of a
 path is a version; any other `?` is part of the key. A path with a version is not a
 glob pattern: `copy()`, `mv()` and `get()` copy that version to a destination named
-after its key.
+after its key. `ls()` and `find()` of a key path with a version return only that
+version, named as `ls(versions=True)` names it, without listing the keys under the
+path. If the version does not exist, `ls()` raises `FileNotFoundError` and `find()`
+returns nothing.
 
 ```python
 fs = S3FileSystem(
