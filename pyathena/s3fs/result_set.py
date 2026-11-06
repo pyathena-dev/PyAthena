@@ -255,3 +255,6 @@ class AthenaS3FSResultSet(AthenaResultSet):
         if self._csv_reader:
             self._csv_reader.close()
             self._csv_reader = None
+        if isinstance(fs := getattr(self, "_fs", None), (S3FileSystem, AioS3FileSystem)):
+            # Ends the idle threads of the request pool of the filesystem.
+            fs.close()

@@ -6,9 +6,12 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+import dis
+import gc
 import io
 import os
 import signal
+import sys
 import threading
 import time
 import traceback
@@ -213,6 +216,25 @@ async def cancel_when_started(task, started, release):
     release.set()
 
 
+def poll_until(predicate, message, timeout=EVENT_TIMEOUT, collect=False):
+    """Wait, in the calling thread, until a condition holds.
+
+    Args:
+        predicate: The condition, a callable without arguments.
+        message: The message of the assertion that fails on the timeout.
+        timeout: The longest wait, in seconds.
+        collect: Whether to run the cyclic garbage collector before each check.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if collect:
+            gc.collect()
+        if predicate():
+            return
+        assert time.monotonic() < deadline, message
+        time.sleep(0.001)
+
+
 async def wait_until(predicate, timeout=EVENT_TIMEOUT):
     """Wait, without blocking the event loop, until a condition holds.
 
@@ -244,6 +266,255 @@ async def await_bounded(awaitable, timeout=EVENT_TIMEOUT):
     done, _ = await asyncio.wait({task}, timeout=timeout)
     assert done, f"not done within {timeout} s"
     return task.result()
+
+
+class OpcodeInterrupter:
+    """Calls a function with a ``KeyboardInterrupt`` raised at the n-th interrupt point of a target.
+
+    The interrupt is raised in the calling thread, at the n-th point where
+    the target's code executes an instruction at which a signal can raise
+    it:
+    - the entry of the function;
+    - the instruction after a call returns;
+    - the target of a backward jump;
+    - a ``with`` statement, which models an interrupt of its blocking
+      ``acquire()``.
+
+    CPython checks for signals only there, not between the instructions of a
+    ``with`` statement that has acquired its lock. Other code and other
+    threads are not interrupted. Python 3.12 and later use ``sys.monitoring``, since a trace
+    function gets no opcode events on the first call of a code object
+    there; Python 3.11 uses ``sys.settrace``.
+
+    Args:
+        code: The code object of the target.
+        n: The interrupt point to raise the interrupt at, counted from 1.
+        action: A callable to run at that point instead of raising the
+            interrupt, in whichever thread reaches it, to interleave another
+            thread's call there. Only Python 3.12 and later support it.
+    """
+
+    def __init__(self, code, n, action=None):
+        self.code = code
+        self.n = n
+        self.action = action
+        self.count = 0
+        self.fired = False
+        # The injected interrupt, kept with its traceback as a caller that
+        # handles it would keep it.
+        self.error = None
+        self._thread = threading.get_ident()
+        self._points = self._interrupt_points(code)
+
+    def __call__(self, fn, *args, **kwargs):
+        """Call a function with the interrupt armed.
+
+        Args:
+            fn: The function, which runs the target.
+            *args: Positional arguments of the function.
+            **kwargs: Keyword arguments of the function.
+
+        Returns:
+            The return value of the function, or None if the interrupt fired.
+
+        Raises:
+            KeyboardInterrupt: If the function raises one that was not injected.
+        """
+        with self._armed():
+            try:
+                return fn(*args, **kwargs)
+            except KeyboardInterrupt as e:
+                if not self.fired:
+                    raise
+                self.error = e
+                return None
+
+    @staticmethod
+    def _interrupt_points(code):
+        """Find the offsets of the instructions at which a signal can raise an interrupt.
+
+        Args:
+            code: The code object.
+
+        Returns:
+            The set of offsets.
+        """
+        instructions = list(dis.get_instructions(code))
+        entries = dis.Bytecode(code).exception_entries
+
+        def handler(offset):
+            # The innermost exception handler that covers the offset.
+            covering = [e for e in entries if e.start <= offset < e.end]
+            return min(covering, key=lambda e: e.end - e.start).target if covering else None
+
+        points = set()
+        for i, instruction in enumerate(instructions):
+            name = instruction.opname
+            if name == "RESUME" or name.startswith("BEFORE_WITH"):
+                points.add(instruction.offset)
+            elif name in ("CALL", "CALL_KW", "CALL_FUNCTION_EX") and i + 1 < len(instructions):
+                after = instructions[i + 1].offset
+                # A signal checked after the call is raised at the call, so
+                # the interrupt goes to the next instruction only when the
+                # same handler covers it; otherwise, as at a `return` that
+                # ends a `try`, it is raised before the call.
+                same = handler(after) == handler(instruction.offset)
+                points.add(after if same else instruction.offset)
+            elif name == "JUMP_BACKWARD":
+                # The target offset; Instruction.jump_target is new in 3.13.
+                points.add(instruction.argval)
+        return points
+
+    def _instruction(self, offset):
+        """Count an interrupt point of the target in the calling thread, interrupting at the n-th.
+
+        Args:
+            offset: The offset of the instruction about to run.
+
+        Raises:
+            KeyboardInterrupt: At the n-th interrupt point.
+        """
+        if self.fired or offset not in self._points:
+            return
+        if self.action is None and threading.get_ident() != self._thread:
+            return
+        self.count += 1
+        if self.count == self.n:
+            self.fired = True
+            if self.action is not None:
+                self.action()
+                return
+            raise KeyboardInterrupt
+
+    @contextmanager
+    def _armed(self):
+        monitoring = getattr(sys, "monitoring", None)
+        if monitoring is None:
+            previous = sys.gettrace()
+            sys.settrace(self._trace_call)
+            try:
+                yield
+            finally:
+                sys.settrace(previous)
+            return
+        tool = monitoring.DEBUGGER_ID
+        monitoring.use_tool_id(tool, "pyathena-tests")
+        try:
+            monitoring.register_callback(
+                tool, monitoring.events.INSTRUCTION, lambda code, offset: self._instruction(offset)
+            )
+            monitoring.set_local_events(tool, self.code, monitoring.events.INSTRUCTION)
+            yield
+        finally:
+            monitoring.set_local_events(tool, self.code, 0)
+            monitoring.register_callback(tool, monitoring.events.INSTRUCTION, None)
+            monitoring.free_tool_id(tool)
+
+    def _trace_call(self, frame, event, arg):
+        if frame.f_code is not self.code:
+            return None
+        frame.f_trace_opcodes = True
+        return self._trace_opcode
+
+    def _trace_opcode(self, frame, event, arg):
+        if event == "opcode":
+            self._instruction(frame.f_lasti)
+        return self._trace_opcode
+
+
+@contextmanager
+def sigint_when(ready, timeout=EVENT_TIMEOUT):
+    """Deliver a real SIGINT to the main thread once a condition holds.
+
+    The signal interrupts a blocking call of the main thread, such as the
+    acquisition of a lock or a wait for a future, as a user's Ctrl-C does.
+    Only the first one is raised as ``KeyboardInterrupt``; it is repeated
+    until handled, since a signal that arrives just before the main thread
+    blocks can miss waking it. A late signal is ignored after the block.
+
+    Args:
+        ready: The condition, a callable without arguments, checked in a
+            thread of the helper.
+        timeout: The longest wait for the condition, in seconds.
+
+    Yields:
+        A list that holds the handled signal once it was raised.
+    """
+    handled = []
+    stop = threading.Event()
+
+    def handle_interrupt(signum, frame):
+        # The list is checked instead of an event, whose set() takes a lock
+        # that a nested call of this handler would wait for forever.
+        if not handled:
+            handled.append(signum)
+            raise KeyboardInterrupt
+
+    def interrupt():
+        deadline = time.monotonic() + timeout
+        while not ready():
+            if stop.is_set() or time.monotonic() > deadline:
+                return
+            time.sleep(0.001)
+        while not handled and not stop.is_set():
+            signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+            time.sleep(0.05)
+
+    thread = threading.Thread(target=interrupt, daemon=True)
+    previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
+    try:
+        thread.start()
+        yield handled
+    finally:
+        signal.signal(signal.SIGINT, lambda signum, frame: None)
+        stop.set()
+        thread.join()
+        signal.signal(signal.SIGINT, previous_handler)
+
+
+def interrupt_each_opcode(target, case, limit=2000):
+    """Run a case once for each opcode of a target, interrupting the target there.
+
+    For n = 1, 2, and so on, ``case`` is called with an
+    :class:`OpcodeInterrupter` for the n-th instruction, which it uses to call the
+    code under test, and then checks the invariants that must hold after the
+    interrupt. The loop ends with the first n that the target never reaches.
+
+    Args:
+        target: The function whose instructions are interrupted, or a method of it.
+        case: The callable that sets up, runs, and checks one attempt.
+        limit: The largest number of attempts, which a target that never
+            returns would exceed.
+
+    Returns:
+        The number of opcodes that were interrupted.
+    """
+    code = getattr(target, "__func__", target).__code__
+    n = 0
+    while True:
+        n += 1
+        assert n <= limit, f"the target ran more than {limit} opcodes"
+        interrupter = OpcodeInterrupter(code, n)
+        case(interrupter)
+        if not interrupter.fired:
+            return n - 1
+
+
+def mock_connection(max_pool_connections=10):
+    """Return a mock connection whose S3 client has a connection pool of the given size.
+
+    The filesystems size their request pool from the ``max_pool_connections``
+    of the S3 client when ``max_workers`` is not given.
+
+    Args:
+        max_pool_connections: The connection pool size of the S3 client.
+
+    Returns:
+        The mock connection.
+    """
+    connection = MagicMock()
+    connection.s3_client.meta.config.max_pool_connections = max_pool_connections
+    return connection
 
 
 def run_bounded(main, timeout=EVENT_TIMEOUT):
@@ -1363,3 +1634,6 @@ class LocalBucketFileSystem(DirFileSystem):
         file = super().open(path, *args, **kwargs)
         self.opened.append((kwargs, file))
         return file
+
+    def close(self):
+        """Do nothing, as PyAthena's filesystems release their idle threads here."""

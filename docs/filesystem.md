@@ -100,6 +100,33 @@ transaction commits, and the multipart upload is aborted.
 `max_workers` is an argument of `S3FileSystem`, `AioS3FileSystem`, `open`, `put`, and
 `pipe`.
 
+The requests that the files and operations of a filesystem run in parallel (range
+reads, parts, part copies, the ACLs of a recursive `chmod`, the DeleteObjects batches of
+`rm`, and the aborts of `clear_multipart_uploads`) share one request pool of the
+filesystem, with `max_workers` threads. Each file or operation runs at most its own
+`max_workers` requests at once in that pool. The `max_workers` of the filesystem
+defaults to the `max_pool_connections` of its S3 client: 10 unless configured, or that
+of the client of the connection given with `connection`. A client that the filesystem
+builds takes its `max_pool_connections` from `max_workers` unless `config_kwargs` sets
+it. For more parallel requests, raise `max_workers`, and with `connection`, also the
+`max_pool_connections` of its S3 client, such as with its `s3_config`. `close()`, or the end of a `with` block, releases the threads of the pool once they
+are idle, and the filesystem stays usable.
+
+In a forked child process, create a new filesystem. A file that the parent opened raises
+`RuntimeError` there from its reads, writes, and flushes, `commit()`, and `discard()`,
+and closing it only marks it closed, without uploading or aborting anything.
+
+An interrupt, such as Ctrl+C, while a file reads ranges in parallel cancels the range
+reads that have not started. Those that are running finish, and their data is released
+once they end. Closing the file waits for its running requests; an interrupt of that
+wait stops it, and the requests still finish. An interrupt while a
+request is being submitted can let one more request than `max_workers` run at once
+until the request pool is idle. These guarantees hold for one interrupt at a time. If another interrupt arrives while the cleanup of an interrupt or
+an error runs, the call still does not wait forever, but the cleanup may stop early:
+the data of finished requests can stay referenced until the garbage collector frees it,
+and a multipart upload can be left incomplete. `clear_multipart_uploads` removes such
+uploads.
+
 A file returned by `open` whose write or commit has failed, or which has been
 discarded, cannot be committed: its `commit()` raises `S3MultipartStateError`. Inside a
 transaction, a write error that the caller catches therefore makes the transaction fail
@@ -642,6 +669,7 @@ for source, destination in pairing.copy_pairs(sources):
 ## Async filesystem
 
 `AioS3FileSystem` provides the same functionality on top of fsspec's
-`AsyncFileSystem`, running its blocking calls in thread pools sized by `max_workers`.
+`AsyncFileSystem`, running its blocking calls in a thread pool sized by `max_workers`,
+and its parallel requests in the request pool of its internal `S3FileSystem`.
 Its `open_async()` returns a file whose reads and writes are coroutines.
 See {ref}`aio-s3-filesystem` for details.

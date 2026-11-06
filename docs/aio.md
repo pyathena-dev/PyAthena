@@ -294,23 +294,29 @@ default executor of the event loop, so `loop.set_default_executor()` neither lim
 blocks them:
 
 - The filesystem has a pool of `max_workers` threads for the blocking calls of its
-  coroutines, such as `_info()`, `_cat_file()`, the requests of `_rm()`, and the part
-  copies of multipart copies. A multipart copy runs at most the `max_workers` of the
-  call of its part copies at once, and the copies together run at most the
-  `max_workers` of the filesystem.
-- Each file opened with `open()` or `open_async()` has a pool of its own, sized by the
-  `max_workers` of the call.
+  coroutines, such as `_info()`, `_cat_file()`, `_put_file()`, and the completion and
+  cleanup of a multipart copy, and for the commit and abort of the files of
+  `open_async()`.
+- Its internal `S3FileSystem` has a request pool of `max_workers` threads for the
+  requests that these calls and the files run in parallel: the part copies of multipart
+  copies and their annotation copies, the DeleteObjects batches of `_rm()`, and the
+  range reads and parts of the files of `open()` and `open_async()`. A file or a copy
+  runs at most its own `max_workers` requests at once, and all of them together run at
+  most the `max_workers` of the filesystem.
+
+`max_workers` defaults to the `max_pool_connections` of the S3 client, 10 unless
+configured, as for `S3FileSystem`.
 
 The pools create threads as the calls need them, and each call runs with the caller's
 context variables, as with `asyncio.to_thread()`.
 In a forked child process, a pool creates new threads.
 
-`close()` releases the threads of the filesystem once no call runs or waits in them, and
+`close()` releases the threads of both pools once no call runs or waits in them, and
 so does the end of a `with` or `async with` block. Until then, calls, including those made
 after `close()`, run in those threads within `max_workers`, and the calls in progress,
 including the cleanup of a multipart copy, run to their end. The filesystem stays usable,
 also when other callers share it through fsspec's instance cache: a call after the release
-creates new threads. Files opened before keep their own threads. Without `close()`, the
+creates new threads. The requests of open files run to their end. Without `close()`, the
 threads are released when the filesystem is garbage collected, which a filesystem in
 fsspec's instance cache is not until `clear_instance_cache()`.
 
@@ -339,7 +345,8 @@ creates new threads. `S3ThreadPoolExecutor` and `S3AioThreadPool` are aliases of
 `loop` argument, with a `DeprecationWarning` if one is given.
 
 The file handles of `AioS3FileSystem.open()` run their multipart uploads and parallel
-range reads in a pool of `max_workers` threads of each file, as `S3File` does.
+range reads in the request pool of the filesystem, at most the `max_workers` of the
+file at once, as `S3File` does.
 
 In a forked child process, create a new filesystem. A filesystem created in the parent
 keeps the parent's boto3 client, which is not meant to be shared across processes, and
@@ -386,7 +393,10 @@ async with await fs.open_async("s3://my-bucket/data/file.bin", "rb") as f:
   upload; leaving the block with an exception after a cancelled final flush, while that
   abort runs, waits for it. An interrupt while the commit is being queued, such as a
   repeated Ctrl+C under `asyncio.run()`, closes the file without committing it and
-  aborts its multipart upload, if any.
+  aborts its multipart upload, if any. A further interrupt during that cleanup can leave
+  the multipart upload incomplete; the close still does not wait forever.
+- Closing a file, or leaving its `async with` block, waits for its range reads, commit,
+  and abort, also if the task is cancelled, and raises the cancellation after they end.
 - A file opened for writing must be closed with `await f.close()` or an `async with`
   block. A file that is garbage collected before it is closed or its commit has begun
   is not committed: it emits a `ResourceWarning`, and its multipart upload is aborted.

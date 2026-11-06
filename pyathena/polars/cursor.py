@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterator
-from multiprocessing import cpu_count
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -81,7 +80,7 @@ class PolarsCursor(WithFetch):
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         block_size: int | None = None,
         cache_type: str | None = None,
-        s3_max_workers: int = (cpu_count() or 1) * 5,
+        s3_max_workers: int | None = None,
         chunksize: int | None = None,
         **kwargs,
     ) -> None:
@@ -105,7 +104,10 @@ class PolarsCursor(WithFetch):
                 ``"background"``; see ``S3FileSystem``. Without ``cache_type``, PyAthena's
                 filesystem reads a Parquet file of a chunked UNLOAD result that is larger than
                 32 MiB without a cache.
-            s3_max_workers: Maximum worker threads for parallel S3 operations.
+            s3_max_workers: The size of the request pool of the S3 filesystem
+                that reads the result files. If None, the
+                ``max_pool_connections`` of the connection's S3 client (10
+                unless set with ``s3_config``).
             chunksize: Number of rows per chunk for memory-efficient processing.
                       If specified, data is loaded lazily in chunks for all data
                       access methods including fetchone(), fetchmany(), and iter_chunks().

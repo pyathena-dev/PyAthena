@@ -43,6 +43,7 @@ from tests.pyathena.util import (
     LocalBucketFileSystem,
     ThrottledOperation,
     assert_fetches_fail,
+    mock_connection,
     query_results_response,
 )
 
@@ -1546,6 +1547,20 @@ def _write_unload_tables(fs, tables, **write_options):
             pq.write_table(table, file, **write_options)
     fs.opened.clear()
     return manifest
+
+
+class TestAthenaPandasResultSetMetadataReader:
+    @pytest.mark.parametrize(("max_workers", "pool_size"), [(None, 7), (3, 3)])
+    def test_filesystem_request_pool_size(self, max_workers, pool_size):
+        # GH-1332: without s3_max_workers, the filesystem that reads the result
+        # files sizes its request pool from the connection's S3 client, whose
+        # connections it shares; it used to take cpu_count() * 5 threads. An
+        # explicit value is used as given.
+        kwargs = {} if max_workers is None else {"max_workers": max_workers}
+        reader = AthenaPandasResultSetMetadataReader(
+            mock_connection(7), MagicMock(), RetryConfig(), **kwargs
+        )
+        assert reader.filesystem.max_workers == pool_size
 
 
 class _InMemoryS3Object:

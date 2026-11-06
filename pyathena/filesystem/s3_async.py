@@ -20,7 +20,6 @@ import traceback
 import warnings
 from concurrent.futures import Future, wait
 from io import BytesIO
-from multiprocessing import cpu_count
 from typing import TYPE_CHECKING, Any, cast
 
 from fsspec.asyn import AbstractAsyncStreamedFile, AsyncFileSystem, sync
@@ -61,18 +60,21 @@ class AioS3FileSystem(AsyncFileSystem):
     coroutines run the blocking boto3 calls in an ``S3ThreadPool`` with
     ``max_workers`` threads that the filesystem owns, instead of the default
     executor of the event loop, and run parallel requests with
-    ``asyncio.gather``.
+    ``asyncio.gather``. The single requests that these calls run in
+    parallel, such as the parts of a file or a copy and the DeleteObjects
+    batches of ``_rm()``, run in the request pool of the wrapped
+    ``S3FileSystem``, which its files share.
 
     The implementation uses composition: an internal ``S3FileSystem`` instance handles
     all boto3 calls, while this class delegates to it in the threads of its pool.
     This avoids diamond inheritance issues and keeps all boto3 logic in one place.
 
     File handles created by ``_open`` run their parallel operations (range
-    reads, multipart uploads) in an ``S3ThreadPool`` of ``max_workers``
-    threads of each file, as ``S3File`` does. :meth:`open_async` returns an
-    ``AioS3StreamedFile``, whose reads and writes are coroutines.
-    :meth:`close`, or the end of a ``with`` or ``async with`` block, releases
-    the threads of the filesystem, which stays usable.
+    reads, multipart uploads) in that request pool, as ``S3File`` does.
+    :meth:`open_async` returns an ``AioS3StreamedFile``, whose reads and
+    writes are coroutines. :meth:`close`, or the end of a ``with`` or
+    ``async with`` block, releases the threads of the filesystem, which
+    stays usable.
 
     Attributes:
         _sync_fs: The internal synchronous S3FileSystem instance.
@@ -99,7 +101,7 @@ class AioS3FileSystem(AsyncFileSystem):
         connection: Connection[Any] | None = None,
         default_block_size: int | None = None,
         default_cache_type: str | None = None,
-        max_workers: int = (cpu_count() or 1) * 5,
+        max_workers: int | None = None,
         s3_additional_kwargs: dict[str, Any] | None = None,
         allow_bucket_creation: bool = False,
         allow_bucket_deletion: bool = False,
@@ -116,10 +118,11 @@ class AioS3FileSystem(AsyncFileSystem):
             default_block_size: Passed to the internal ``S3FileSystem``.
             default_cache_type: Passed to the internal ``S3FileSystem``.
             max_workers: The number of threads that run the blocking calls of
-                the filesystem, and the default number of parallel requests
-                of its files and copies. If None, the default of
-                ``ThreadPoolExecutor``: ``min(32, CPUs + 4)``. Passed to the internal
-                ``S3FileSystem``.
+                the filesystem, and, passed to the internal ``S3FileSystem``,
+                the size of its request pool and the default number of
+                parallel requests of its files and copies. If None, the
+                ``max_pool_connections`` of the S3 client (10 unless
+                configured), as for ``S3FileSystem``.
             s3_additional_kwargs: Passed to the internal ``S3FileSystem``.
             allow_bucket_creation: Passed to the internal ``S3FileSystem``.
             allow_bucket_deletion: Passed to the internal ``S3FileSystem``.
@@ -136,11 +139,6 @@ class AioS3FileSystem(AsyncFileSystem):
             batch_size=batch_size,
             **kwargs,
         )
-        # The blocking calls of the coroutines run in threads of this pool,
-        # not in the default executor of the event loop. Created first, so
-        # that None takes its default for the files and copies too.
-        self._thread_pool = S3ThreadPool(max_workers)
-        max_workers = self._thread_pool.max_workers
         self._sync_fs = S3FileSystem(
             connection=connection,
             default_block_size=default_block_size,
@@ -154,6 +152,11 @@ class AioS3FileSystem(AsyncFileSystem):
             skip_instance_cache=True,
             **kwargs,
         )
+        # The blocking calls of the coroutines run in threads of this pool,
+        # not in the default executor of the event loop, and wait for the
+        # requests that they run in parallel in the request pool of the
+        # internal S3FileSystem, which runs no call that waits.
+        self._thread_pool = S3ThreadPool(self._sync_fs.max_workers)
         # Share dircache for cache coherence between async and sync instances
         self.dircache = self._sync_fs.dircache
 
@@ -165,11 +168,15 @@ class AioS3FileSystem(AsyncFileSystem):
     def close(self) -> None:
         """Release the threads of the filesystem, which stays usable, once they are idle.
 
-        See :meth:`S3ThreadPool.release()
-        <pyathena.filesystem.s3_executor.S3ThreadPool.release>`. Files opened
-        before have threads of their own and are not affected.
+        Releases the threads of the blocking calls and those of the request
+        pool of the internal ``S3FileSystem`` (see
+        :meth:`S3FileSystem.close() <pyathena.filesystem.s3.S3FileSystem.close>`
+        and :meth:`S3ThreadPool.release()
+        <pyathena.filesystem.s3_executor.S3ThreadPool.release>`). The calls in
+        progress, including the requests of open files, run to their end.
         """
         self._thread_pool.release()
+        self._sync_fs.close()
 
     def __enter__(self) -> AioS3FileSystem:
         """Return the filesystem, whose threads the end of the block releases."""
@@ -342,8 +349,9 @@ class AioS3FileSystem(AsyncFileSystem):
     ) -> None:
         """Delete objects with DeleteObjects requests.
 
-        See :meth:`S3FileSystem.rm`. The requests run in parallel with
-        ``asyncio.gather`` in the threads of the filesystem.
+        See :meth:`S3FileSystem.rm`. The DeleteObjects requests run in
+        parallel with ``asyncio.gather``, at most ``max_workers`` at once, in
+        the request pool of the internal ``S3FileSystem``.
 
         Args:
             path: S3 path (s3://bucket/key) or list of paths to delete.
@@ -377,11 +385,12 @@ class AioS3FileSystem(AsyncFileSystem):
             OSError: If S3 could not delete some of the objects.
         """
         batches, params = self._sync_fs._delete_batches(paths, **kwargs)
+        # At most max_workers requests at once, as S3FileSystem.rm() sends,
+        # so that a large deletion does not queue ahead of the requests of
+        # the files that share the request pool.
+        requests = self._sync_fs._create_executor(max_workers=self._sync_fs.max_workers)
         results = await asyncio.gather(
-            *[
-                self._thread_pool.run(self._sync_fs._delete_batch, batch, **params)
-                for batch in batches
-            ],
+            *[requests.run(self._sync_fs._delete_batch, batch, **params) for batch in batches],
             return_exceptions=True,
         )
         self._sync_fs._raise_delete_errors(results)
@@ -599,19 +608,20 @@ class AioS3FileSystem(AsyncFileSystem):
         """Copy an object with a multipart upload of its byte ranges.
 
         See :meth:`S3FileSystem._copy_object_with_multipart_upload`. The part
-        copies run in the threads of the filesystem, which bound the requests
-        of all its copies together, with at most ``max_workers`` of them in
-        flight; each one is sent once an earlier one has finished, and the
-        upload is completed once all of them have. The annotation copies then
-        run in parallel as asyncio tasks, at most ``max_workers`` at once, in
-        the same threads. On a cancellation, the requests that have not
-        started, including the completion, are cancelled, the running ones
-        are waited for in a thread of the filesystem, the upload is aborted
-        if it was created and has not completed, and the cancellation is
-        re-raised. On a failure or cancellation, the running part copies make
-        no further attempt. This also holds when the shutdown of the event loop, such as
-        at the end of ``asyncio.run()``, cancels the copy, also after its
-        cleanup has started. A repeated cancellation returns without stopping
+        copies run in the request pool of the internal ``S3FileSystem``, which
+        bounds the requests of all its copies and files together, with at most
+        ``max_workers`` of them in flight; each one is sent once an earlier
+        one has finished, and the upload is completed once all of them have.
+        The annotation copies then run in parallel as asyncio tasks, at most
+        ``max_workers`` at once, in the same pool. On a cancellation, the
+        requests that have not started, including the completion, are
+        cancelled, the running ones are waited for in a thread of the
+        filesystem, the upload is aborted if it was created and has not
+        completed, and the cancellation is re-raised. On a failure or
+        cancellation, the running part copies make no further attempt. This
+        also holds when the shutdown of the event loop, such as at the end of
+        ``asyncio.run()``, cancels the copy, also after its cleanup has
+        started. A repeated cancellation returns without stopping
         this cleanup. A failed abort is logged with the upload ID.
 
         Args:
@@ -638,13 +648,14 @@ class AioS3FileSystem(AsyncFileSystem):
             )
             return
 
-        # The requests run in the threads of the filesystem, not as tasks,
-        # which the shutdown of the event loop would cancel while the
-        # requests keep running.
+        # The requests run in the request pool, not as tasks, which the
+        # shutdown of the event loop would cancel while the requests keep
+        # running. The completion and the abort, which wait for them, run in
+        # the threads of the filesystem.
         session = _S3WriteSession(
             self.core,
             plan.destination,
-            self._thread_pool,
+            self._sync_fs._create_executor(max_workers=max_workers),
             block_size=block_size if block_size else self.core.MULTIPART_UPLOAD_MAX_PART_SIZE,
             max_workers=max_workers,
             prepared_params={
@@ -685,9 +696,8 @@ class AioS3FileSystem(AsyncFileSystem):
                 # A cancellation of this task cancels only its wait.
                 await asyncio.wrap_future(session.ready())
                 session.submit_copy(part_number, plan.source, range_)
-            # Here, not in the thread of the completion, which may wait for
-            # a thread behind the part copies, so that a failed part stops
-            # the others at once.
+            # Here, not in the thread of the completion, so that a failed
+            # part stops the others at once.
             await asyncio.wrap_future(session.settled())
             # Reserved before it is queued, so that a cancellation of this
             # task can still cancel a completion that has not started.
@@ -710,10 +720,10 @@ class AioS3FileSystem(AsyncFileSystem):
             await self._thread_pool.run_shielded(_abort)
             raise
 
-        semaphore = asyncio.Semaphore(max_workers)
-        failed = False
+        # At most max_workers copies at once in the request pool.
+        requests = self._sync_fs._create_executor(max_workers=max_workers)
         # Set when an annotation copy fails, so that the running ones make no
-        # further attempt.
+        # further attempt, and the waiting ones do not start.
         stop = threading.Event()
         # The index of the copy that failed first, whose error is raised
         # instead of those of the copies that its failure stopped. Recorded
@@ -730,7 +740,7 @@ class AioS3FileSystem(AsyncFileSystem):
             """
             nonlocal first_failure
             if stop.is_set():
-                # Waited for a thread of the filesystem until a copy failed.
+                # Waited for a thread of the request pool until a copy failed.
                 return
             try:
                 with stop_retries_on(stop):
@@ -751,19 +761,13 @@ class AioS3FileSystem(AsyncFileSystem):
                 raise
 
         async def _copy_annotation(i: int, name: str) -> None:
-            nonlocal failed
-            async with semaphore:
-                if failed:
-                    # Do not start more copies after one failed, as
-                    # S3FileSystem does.
-                    return
-                try:
-                    await self._thread_pool.run(_copy_annotation_in_thread, i, name)
-                except Exception:
-                    # The running copies make no further attempt.
-                    failed = True
-                    stop.set()
-                    raise
+            try:
+                await requests.run(_copy_annotation_in_thread, i, name)
+            except Exception:
+                # The running copies make no further attempt, and the waiting
+                # ones do not start, as in S3FileSystem.
+                stop.set()
+                raise
 
         results = await asyncio.gather(
             *[_copy_annotation(i, name) for i, name in enumerate(plan.annotations)],
@@ -891,9 +895,9 @@ class AioS3FileSystem(AsyncFileSystem):
             mode: The file mode: ``rb``, ``wb``, ``ab``, or ``xb``.
             block_size: The block size for reads and writes. Defaults to the
                 default block size of the filesystem.
-            max_workers: The number of threads of the file, which bounds its
-                parallel requests. Defaults to the ``max_workers`` of the
-                filesystem.
+            max_workers: The number of parallel requests of the file, in the
+                request pool of the filesystem. Defaults to the
+                ``max_workers`` of the filesystem.
             version_id: The version ID to read.
             s3_additional_kwargs: Additional parameters for the S3 requests of
                 the file, which take precedence over those of the filesystem.
@@ -1168,8 +1172,9 @@ class AioS3File(S3File):
     """The file handle that ``AioS3FileSystem.open()`` returns.
 
     Functionally identical to ``S3File``, whose parallel operations (range
-    reads, multipart uploads) it runs in a pool of ``max_workers`` threads of
-    the file; it exists as a distinct type for ``isinstance`` checks. For
+    reads, multipart uploads) it runs in the request pool of the filesystem,
+    at most ``max_workers`` of them at once; it exists as a distinct type for
+    ``isinstance`` checks. For
     reads and writes that are coroutines, see ``AioS3StreamedFile``.
     """
 
@@ -1178,8 +1183,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
     """An S3 file whose reads and writes are coroutines.
 
     Returned by :meth:`AioS3FileSystem.open_async`. The requests of the file
-    run in an ``S3ThreadPool`` of ``max_workers`` threads of its own, and
-    the coroutines wait for them without blocking the event loop:
+    run in the request pool of the filesystem, at most ``max_workers`` of
+    them at once, and the coroutines wait for them without blocking the
+    event loop:
 
     - A read splits the requested range into ranges of the block size, read
       in parallel. Nothing is cached. As with ``S3File``, the reads are
@@ -1201,10 +1207,13 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
       that have started are waited for and the multipart upload is aborted,
       so that the existing object is left unchanged.
 
-    The commit and the abort run to their end in the threads of the file,
-    also if the task that waits for them is cancelled, including a commit
-    that still waits for a thread; once the commit has been submitted,
-    nothing else aborts the upload. A file opened for
+    The commit and the abort, which wait for the requests, run to their end
+    in the threads of the filesystem, also if the task that waits for them is
+    cancelled, including a commit that still waits for a thread; once the
+    commit has been submitted, nothing else aborts the upload. In a forked
+    child process, a file that the parent opened raises ``RuntimeError``
+    from its reads, writes, and flushes, and closing it only marks it closed.
+    A file opened for
     writing must be closed with ``await close()`` or an ``async with`` block;
     garbage collection cannot await it, so the data of a file that is
     collected before it is closed or its commit has been submitted is never
@@ -1224,7 +1233,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         path: str,
         mode: str = "rb",
         version_id: str | None = None,
-        max_workers: int = (cpu_count() or 1) * 5,
+        max_workers: int | None = None,
         block_size: int = S3FileSystem.DEFAULT_BLOCK_SIZE,
         size: int | None = None,
         s3_additional_kwargs: dict[str, Any] | None = None,
@@ -1240,8 +1249,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             path: S3 path (s3://bucket/key) of the file.
             mode: The file mode: ``rb``, ``wb``, ``ab``, or ``xb``.
             version_id: The version ID to read.
-            max_workers: The number of threads of the file, which bounds its
-                parallel requests.
+            max_workers: The number of parallel requests of the file, in the
+                request pool of the filesystem. If None, the ``max_workers``
+                of the filesystem.
             block_size: The block size for reads and writes. Must be between
                 ``S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE`` and
                 ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE``, inclusive, unless
@@ -1263,9 +1273,20 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         """
         if mode not in {"rb", "wb", "ab", "xb"}:
             raise NotImplementedError("File mode not supported")
-        # Created first, so that an invalid max_workers raises before the lookups.
-        self._pool = S3ThreadPool(max_workers)
-        self.max_workers = self._pool.max_workers
+        # The requests of the file, at most max_workers at once in the
+        # request pool of the filesystem. Created first, so that an invalid
+        # max_workers raises before the lookups.
+        if max_workers is None:
+            max_workers = fs._sync_fs.max_workers
+        self._requests = fs._sync_fs._create_executor(max_workers=max_workers)
+        # The scheduled commit and abort, which close() waits for, and those of
+        # them whose queuing has returned.
+        self._commit_future: Future[None] | None = None
+        self._discard_future: Future[None] | None = None
+        self._queued: set[Future[None]] = set()
+        self.max_workers = max_workers
+        # The process that opened the file; a forked child rejects it.
+        self._pid = os.getpid()
         target = S3FileTarget.resolve(
             fs._sync_fs,
             path,
@@ -1298,7 +1319,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             self._session = _S3WriteSession(
                 fs.core,
                 S3Path(self.bucket, self.key),
-                self._pool,
+                self._requests,
                 block_size=block_size,
                 max_workers=self.max_workers,
                 request_kwargs=self.s3_additional_kwargs,
@@ -1314,9 +1335,10 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
     def __del__(self) -> None:
         # close() is a coroutine, which garbage collection cannot await, so
         # an unclosed file whose commit was not submitted is not committed: its
-        # multipart upload, if any, is aborted, and its threads are released.
-        pool = getattr(self, "_pool", None)
-        if pool is None:
+        # multipart upload, if any, is aborted.
+        requests = getattr(self, "_requests", None)
+        if requests is None or self._inherited():
+            # The upload of a file inherited across a fork is the parent's.
             return
         session = getattr(self, "_session", None)
         if (
@@ -1331,8 +1353,30 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 stacklevel=2,
             )
             with contextlib.suppress(RuntimeError):
-                pool.submit(self._discard)
-        pool.shutdown(wait=False)
+                self.fs._thread_pool.submit(self._discard)
+        requests.shutdown(wait=False)
+
+    def _inherited(self) -> bool:
+        """Whether this process is a forked child of the process that opened the file.
+
+        Returns:
+            True in a forked child process of the process that opened the
+            file.
+        """
+        return getattr(self, "_pid", os.getpid()) != os.getpid()
+
+    def _check_process(self) -> None:
+        """Reject the use of a file that the parent of a forked process opened.
+
+        Raises:
+            RuntimeError: In a forked child process of the process that
+                opened the file.
+        """
+        if self._inherited():
+            raise RuntimeError(
+                f"s3://{self.bucket}/{self.key} was opened by the parent of this forked "
+                "process and cannot be used here; open it again in this process."
+            )
 
     def __enter__(self) -> AioS3StreamedFile:
         """Reject a synchronous ``with`` block, whose exit cannot close the file.
@@ -1354,6 +1398,24 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         """
         return self.fs.core.operation_params(method, self.s3_additional_kwargs)
 
+    async def read(self, length: int = -1) -> bytes:
+        """Read bytes from the file.
+
+        Args:
+            length: The number of bytes to read; -1 reads to the end.
+
+        Returns:
+            The bytes read.
+
+        Raises:
+            RuntimeError: In a forked child process of the process that
+                opened the file.
+            ValueError: If the file is closed or not open for reading.
+        """
+        self._check_process()
+        data: bytes = await super().read(length)
+        return data
+
     async def write(self, data: bytes) -> int:
         """Write data to the buffer, uploading each full block as a part.
 
@@ -1364,12 +1426,15 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             The number of bytes written.
 
         Raises:
+            RuntimeError: In a forked child process of the process that
+                opened the file.
             ValueError: If the file is not open for writing, is closed, or
                 has been force-flushed.
             BaseException: The error of a request of the write that failed
                 since the last write, or before a part is submitted, after
                 which the file is closed without committing it.
         """
+        self._check_process()
         if self.mode not in {"wb", "ab", "xb"}:
             raise ValueError("File not in write mode")
         if self.closed:
@@ -1396,8 +1461,11 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 the written data is committed.
 
         Raises:
+            RuntimeError: In a forked child process of the process that
+                opened the file.
             ValueError: If the file is closed, or force-flushed twice.
         """
+        self._check_process()
         if self.closed:
             raise ValueError("Flush on closed file")
         if force and self.forced:
@@ -1417,16 +1485,60 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             self.buffer = BytesIO()
 
     async def close(self) -> None:
-        """Close the file, committing the written data."""
+        """Close the file, committing the written data.
+
+        Returns once the requests of the file and its scheduled commit have
+        ended, also when the close or an earlier read or flush was
+        cancelled; the event loop runs meanwhile. In a forked child process,
+        a file that the parent opened is only marked closed, without
+        committing or aborting anything.
+        """
         if self.closed:
+            return
+        if self._inherited():
+            self.closed = True
             return
         try:
             if self.mode != "rb" and not self.forced:
                 await self.flush(force=True)
         finally:
             self.closed = True
-            # A commit that is still running keeps its thread.
-            self._pool.shutdown(wait=False)
+            await self._drain()
+
+    async def _drain(self) -> None:
+        """Wait, without blocking the event loop, for the requests, commit, and abort of the file.
+
+        A cancellation of the waiting task, also a repeated one, does not stop
+        the wait; it is re-raised once they have ended, so that nothing of
+        the file runs after its close returns (I1). A commit or abort whose
+        queuing did not return, as when interrupts stopped it and its
+        cleanup, is cancelled unless it has started, so that the wait does
+        not last forever for one that was never queued.
+        """
+        self._requests.shutdown(wait=False)
+        pending = self._requests.pending()
+        for future in (self._commit_future, self._discard_future):
+            if future is not None and (future in self._queued or not future.cancel()):
+                pending.append(future)
+        if not pending:
+            return
+        waiters = [asyncio.wrap_future(future) for future in pending]
+        for waiter in waiters:
+            # The outcomes belong to the reads, the commit, and the abort that
+            # awaited them; retrieved here, so that asyncio does not log them.
+            waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
+        cancelled = False
+        # The states are also checked every second, since an interrupt of a
+        # cancellation can skip the callbacks that the waiters rely on.
+        while not all(future.done() for future in pending):
+            try:
+                # Unlike gather(), wait() neither raises their outcomes nor
+                # cancels them when this task is cancelled.
+                await asyncio.wait(waiters, timeout=1.0)
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
 
     async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         if self.closed:
@@ -1445,11 +1557,21 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         """
         if self.closed:
             return
+        if self._inherited():
+            self.closed = True
+            return
         try:
             if self._begin_close_without_commit():
-                await self._pool.run_shielded(self._discard)
+                # Tracked before it is queued, so that the drain below waits
+                # for it also after a cancellation of this task.
+                discard: Future[None] = Future()
+                self._discard_future = discard
+                self.fs._thread_pool.submit_to(discard, self._discard)
+                self._queued.add(discard)
+                await self.fs._thread_pool.wait_shielded(discard)
         finally:
-            self._pool.shutdown(wait=False)
+            # A commit that was scheduled before runs on, and is waited for.
+            await self._drain()
 
     def _close_without_commit_blocking(self) -> None:
         """Close the file without committing it; blocks.
@@ -1464,7 +1586,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             if self._begin_close_without_commit():
                 self._discard()
         finally:
-            self._pool.shutdown(wait=False)
+            self._requests.shutdown(wait=False)
 
     def _begin_close_without_commit(self) -> bool:
         """Mark the file closed, drop the buffered data, and begin the abort.
@@ -1472,7 +1594,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         The part of :meth:`_close_without_commit` and
         :meth:`_close_without_commit_blocking` that runs before the discard.
         The abort begins here, so that the creation and the running parts stop
-        even while they hold every thread of the file, ahead of
+        even while they hold every thread of the request pool, ahead of
         :meth:`_discard`.
 
         Returns:
@@ -1573,20 +1695,25 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 committing it.
         """
         session = cast(_S3WriteSession, self._session)
-        commit: Future[None] | None = None
+        # Tracked before it is queued, so that close() also waits for a
+        # commit that an interrupt of the queuing has let start.
+        commit: Future[None] = Future()
+        self._commit_future = commit
         try:
             session.begin_complete()
             # Passed, as closing the file without committing it drops the buffer.
-            commit = self._pool.submit(self._complete_upload, cast(BytesIO, self.buffer))
+            self.fs._thread_pool.submit_to(
+                commit, self._complete_upload, cast(BytesIO, self.buffer)
+            )
+            self._queued.add(commit)
         except BaseException:
-            if commit is None:
-                # Not queued, or queued by a submit() that an interrupt
-                # stopped: such a commit either has taken the reservation
-                # and runs on, or finds the write failed.
+            if commit.cancel():
+                # Not started, and now never: a commit that was queued by a
+                # submission that an interrupt stopped finds itself cancelled.
                 session.withdraw_complete()
             await self._close_without_commit()
             raise
-        await self._pool.wait_shielded(commit)
+        await self.fs._thread_pool.wait_shielded(commit)
 
     def _complete_upload(self, buffer: BytesIO) -> None:
         """Upload or complete the written data; blocks, and runs in a thread.
@@ -1641,10 +1768,10 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         """Read a byte range of the object with parallel range requests.
 
         The range is clamped to the size of the object, and split into ranges
-        of the block size, read in the threads of the file. When a read fails,
-        the reads that have not finished are cancelled, which stops the retries
-        of the running ones, and its error is raised, as
-        :meth:`S3File._fetch_range` does.
+        of the block size, read at most ``max_workers`` at once in the
+        request pool of the filesystem. When a read fails, the reads that have
+        not finished are cancelled, which stops the retries of the running
+        ones, and its error is raised, as :meth:`S3File._fetch_range` does.
 
         Args:
             start: The offset of the first byte to read.
@@ -1652,7 +1779,12 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
 
         Returns:
             The bytes read, empty if the clamped range is empty.
+
+        Raises:
+            RuntimeError: In a forked child process of the process that
+                opened the file.
         """
+        self._check_process()
         end = min(end, self.size)
         if start >= end:
             return b""
@@ -1663,7 +1795,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         request_kwargs = self._get_request_kwargs("get_object")
         reads = [
             asyncio.ensure_future(
-                self._pool.run(self.fs.core.get_object, path, r, **request_kwargs)
+                self._requests.run(self.fs.core.get_object, path, r, **request_kwargs)
             )
             for r in ranges
         ]

@@ -9,7 +9,6 @@ import io
 import lzma
 import os
 import re
-import signal
 import sys
 import tempfile
 import threading
@@ -42,7 +41,7 @@ from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3MultipartCopyPlan
 from pyathena.filesystem.s3_errors import S3ClientError
-from pyathena.filesystem.s3_executor import S3ThreadPool
+from pyathena.filesystem.s3_executor import S3ThreadPool, _S3PoolScope
 from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
@@ -55,7 +54,14 @@ from tests.pyathena.util import (
     MULTIPART_COPY_KWARGS,
     MULTIPART_COPY_SIZE,
     ThrottledOperation,
+    forking,
+    interrupt_each_opcode,
+    mock_connection,
+    overlapping_calls,
+    poll_until,
     retried,
+    run_in_forked_child,
+    sigint_when,
     stub_multipart_copy,
 )
 
@@ -86,6 +92,7 @@ class TestS3FileSystem:
         # The requests of the core and of the filesystem go to one mock.
         fs._call = fs._core.call = mock.MagicMock()
         fs.max_workers = 4
+        fs._request_pool = S3ThreadPool(fs.max_workers)
         fs.default_block_size = S3FileSystem.DEFAULT_BLOCK_SIZE
         fs.allow_bucket_creation = False
         fs.allow_bucket_deletion = False
@@ -2680,6 +2687,137 @@ class TestS3FileSystem:
         with fs.open("s3://bucket/key", "wb") as f:
             assert f.max_workers == fs.max_workers
 
+    @pytest.mark.parametrize(
+        ("max_workers", "config_kwargs", "pool_size", "pool_connections"),
+        [
+            (None, {}, 10, 10),
+            (None, {"max_pool_connections": 25}, 25, 25),
+            (4, {}, 4, 4),
+            (4, {"max_pool_connections": 25}, 4, 25),
+        ],
+    )
+    def test_request_pool_size(self, max_workers, config_kwargs, pool_size, pool_connections):
+        # GH-1332: the request pool defaults to the connection pool of the S3
+        # client, and a client that the filesystem builds takes its
+        # connection pool from max_workers unless config_kwargs sets it.
+        # max_workers used to default to cpu_count() * 5.
+        fs = S3FileSystem(
+            max_workers=max_workers,
+            config_kwargs=config_kwargs,
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            skip_instance_cache=True,
+        )
+        assert fs.max_workers == pool_size
+        assert fs._request_pool.max_workers == pool_size
+        assert fs._client.meta.config.max_pool_connections == pool_connections
+
+    def test_request_pool_size_of_connection(self):
+        # GH-1332: with a connection, the request pool takes the connection
+        # pool of its S3 client.
+        fs = S3FileSystem(connection=mock_connection(7), skip_instance_cache=True)
+        assert fs.max_workers == 7
+
+    def test_files_share_request_pool(self):
+        # GH-1332: the reads of the files of a filesystem run in its request
+        # pool, which bounds them together. Each file used to have a pool of
+        # max_workers threads of its own.
+        fs = self._make_fs()
+        fs._request_pool = S3ThreadPool(2)
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = 64
+        call, state = overlapping_calls(2)
+
+        def get_object(path, range_, **kwargs):
+            call()
+            return bytes(range_[1] - range_[0])
+
+        fs.core.get_object = get_object
+
+        def read(_):
+            with fs.open(
+                "s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=2
+            ) as f:
+                return f.read()
+
+        with ThreadPoolExecutor(max_workers=2) as readers:
+            assert list(readers.map(read, range(2))) == [bytes(64)] * 2
+        assert state["peak"] == 2
+        # Closing the files leaves the pool running.
+        assert fs._request_pool.submit(sum, [1, 2]).result(EVENT_TIMEOUT) == 3
+        fs._request_pool.shutdown()
+
+    def test_file_without_executor_shares_request_pool(self):
+        # GH-1332 (F1): a file constructed without an executor or max_workers
+        # takes the max_workers of the filesystem and runs its reads in the
+        # request pool of the filesystem; it used to start a pool of
+        # cpu_count() * 5 threads of its own.
+        fs = self._make_fs()
+        fs._request_pool = S3ThreadPool(2)
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = 64
+        call, state = overlapping_calls(2)
+
+        def get_object(path, range_, **kwargs):
+            call()
+            return bytes(range_[1] - range_[0])
+
+        fs.core.get_object = get_object
+        with S3File(fs, "s3://bucket/key", "rb", cache_type="none", block_size=16) as f:
+            assert f.max_workers == fs.max_workers
+            assert f.read() == bytes(64)
+        # The file's max_workers is 4, but the pool of the filesystem has 2.
+        assert state["peak"] == 2
+        fs._request_pool.shutdown()
+
+    @pytest.mark.parametrize("exit_with", ["close", "with"])
+    def test_close_releases_threads(self, exit_with):
+        # GH-1332: close(), also at the end of a with block, ends the threads
+        # of the request pool, and the filesystem stays usable with new ones.
+        fs = self._make_fs()
+        threads = []
+
+        def record():
+            threads.append(threading.current_thread())
+
+        if exit_with == "close":
+            fs._request_pool.submit(record).result(EVENT_TIMEOUT)
+            fs.close()
+        else:
+            with fs:
+                fs._request_pool.submit(record).result(EVENT_TIMEOUT)
+        threads[0].join(EVENT_TIMEOUT)
+        assert not threads[0].is_alive()
+
+        fs._request_pool.submit(record).result(EVENT_TIMEOUT)
+        assert threads[1] is not threads[0]
+        fs.close()
+
+    @forking
+    def test_file_inherited_across_fork(self):
+        # GH-1332: in a forked child, a file that the parent opened raises on
+        # use, and closing it, also at garbage collection, only marks it
+        # closed, without uploading or aborting anything: the upload belongs
+        # to the parent.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        f = fs.open("s3://bucket/key", "wb")
+        f.write(b"x")
+
+        def child():
+            for use in (lambda: f.write(b"y"), f.flush, f.commit, f.discard, f.read):
+                with pytest.raises(RuntimeError, match="parent of this forked process"):
+                    use()
+            requests = fs._call.call_count + len(fs._core.client.method_calls)
+            f.close()
+            return f.closed and fs._call.call_count + len(fs._core.client.method_calls) == requests
+
+        try:
+            assert run_in_forked_child(child) == 0
+        finally:
+            f._close_without_commit()
+
     def test_open_version_id(self):
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
@@ -3495,6 +3633,138 @@ class TestS3FileSystem:
         assert sorted(read) == [0, 16]
         assert operation.calls == 2
 
+    def test_read_interrupted_at_each_opcode_frees_ranges(self):
+        # GH-1332 (F5): an interrupt at any point of a parallel read, including
+        # after its wait returns, cancels the reads that have not started and
+        # frees the data of the others while the caller holds the interrupt.
+        # The data used to stay in the frame that the traceback keeps after
+        # the wait.
+        def case(interrupt):
+            fs = self._make_fs()
+            fs.info = mock.MagicMock(return_value=self._file_object("key"))
+            fs.info.return_value.size = 64
+            read = []
+
+            def get_object(path, range_, **kwargs):
+                # Unlike bytes, an array can be weakly referenced.
+                data = array.array("B", bytes(range_[1] - range_[0]))
+                read.append(weakref.ref(data))
+                return data
+
+            fs.core.get_object = get_object
+            f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4)
+            try:
+                result = interrupt(f._fetch_range, 0, 64)
+                f.close()
+                if not interrupt.fired:
+                    assert result == bytes(64)
+                    return
+                assert interrupt.error.__traceback__ is not None
+                # The threads leave the frames of the reads right after the
+                # close has waited for them.
+                poll_until(
+                    lambda: all(ref() is None for ref in read), "the data of a read was kept"
+                )
+            finally:
+                f.close()
+                fs._request_pool.shutdown()
+
+        assert interrupt_each_opcode(S3File._fetch_range, case) > 0
+
+    def test_read_interrupted_twice_frees_ranges(self):
+        # GH-1332 (F5): a second interrupt at any point of the cleanup after
+        # an interrupt of the wait, whose error then keeps the first as its
+        # context, also frees the data of the ranges that were read. The
+        # frame of the wait keeps the futures, as concurrent.futures.wait()
+        # does.
+        def interrupted_wait(futures, **kwargs):
+            # A set of its own, as concurrent.futures.wait() makes.
+            held = set(futures)
+            wait(held)
+            raise KeyboardInterrupt
+
+        def case(interrupt):
+            fs = self._make_fs()
+            fs.info = mock.MagicMock(return_value=self._file_object("key"))
+            fs.info.return_value.size = 64
+            read = []
+
+            def get_object(path, range_, **kwargs):
+                # Unlike bytes, an array can be weakly referenced.
+                data = array.array("B", bytes(range_[1] - range_[0]))
+                read.append(weakref.ref(data))
+                return data
+
+            fs.core.get_object = get_object
+            f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4)
+            try:
+                with mock.patch("pyathena.filesystem.s3.wait", interrupted_wait):
+                    try:
+                        interrupt(f._fetch_range, 0, 64)
+                        error = interrupt.error
+                    except KeyboardInterrupt as e:
+                        error = e
+                f.close()
+                # Held, as a caller that handles the interrupt does.
+                assert error.__traceback__ is not None
+                poll_until(
+                    lambda: all(ref() is None for ref in read), "the data of a read was kept"
+                )
+            finally:
+                f.close()
+                fs._request_pool.shutdown()
+
+        assert interrupt_each_opcode(S3File._fetch_range, case) > 0
+
+    @pytest.mark.skipif(
+        threading.current_thread() is not threading.main_thread(),
+        reason="SIGINT interrupts the main thread.",
+    )
+    def test_read_interrupted_by_signal_frees_ranges(self):
+        # GH-1332 (F5): a real interrupt of a parallel read while it waits for
+        # its ranges cancels those that have not started, and frees the data
+        # of the others once they end, while the caller holds the interrupt.
+        # concurrent.futures.wait() leaves its waiter on the futures when it
+        # is interrupted, which forms a reference cycle with them, so the
+        # data is freed by the cyclic garbage collector, not when they end.
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = 64
+        read = []
+        running = threading.Semaphore(0)
+        release = threading.Event()
+
+        def get_object(path, range_, **kwargs):
+            running.release()
+            release.wait(EVENT_TIMEOUT)
+            # Unlike bytes, an array can be weakly referenced.
+            data = array.array("B", bytes(range_[1] - range_[0]))
+            read.append(weakref.ref(data))
+            return data
+
+        fs.core.get_object = get_object
+        f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=2)
+        try:
+            with (
+                sigint_when(lambda: running._value >= 2),
+                pytest.raises(KeyboardInterrupt) as info,
+            ):
+                f.read()
+            release.set()
+            f.close()
+            assert info.value.__traceback__ is not None
+            poll_until(
+                lambda: all(ref() is None for ref in read),
+                "the data of a read was kept",
+                collect=True,
+            )
+            # The two ranges that had not started were cancelled.
+            assert len(read) == 2
+        finally:
+            release.set()
+            f.close()
+            fs._request_pool.shutdown()
+
     def test_interrupted_read_frees_ranges(self):
         # GH-1186: an interrupted parallel read cancels the reads that have
         # not started and frees the data of the others, also while the
@@ -3589,12 +3859,11 @@ class TestS3FileSystem:
         fs = self._make_fs()
         started = threading.Event()
         waiting = threading.Event()
-        interrupted = threading.Event()
 
         def create_multipart_upload(*args, **kw):
             started.set()
             # Still running when the interrupt arrives, which releases it.
-            interrupted.wait(30)
+            poll_until(lambda: signals, "the interrupt was not raised", timeout=30)
             return S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"})
 
         fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
@@ -3610,52 +3879,20 @@ class TestS3FileSystem:
             waiting.set()
             return waiter
 
-        handled = []
-
-        def handle_interrupt(signum, frame):
-            # Only the first interrupt is raised; repeated signals are ignored.
-            # The list is checked instead of the event, whose set() takes a
-            # lock that a nested call of this handler would wait for forever.
-            if not handled:
-                handled.append(signum)
-                interrupted.set()
-                raise KeyboardInterrupt
-
-        def interrupt():
+        with (
+            mock.patch.object(_S3WriteSession, "ready", wait_for_ready),
             # Sent only while the creation is running and the copy waits for
             # it, which the creation cannot stop doing before the interrupt.
-            if started.wait(5) and waiting.wait(5):
-                # A signal that arrives just before the main thread blocks on
-                # the creation can miss waking it, so it is repeated until handled.
-                while True:
-                    signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
-                    if interrupted.wait(0.1):
-                        break
-
-        thread = threading.Thread(target=interrupt, daemon=True)
-        previous_handler = signal.signal(signal.SIGINT, handle_interrupt)
-        try:
-            thread.start()
-            with (
-                mock.patch.object(_S3WriteSession, "ready", wait_for_ready),
-                pytest.raises(KeyboardInterrupt),
-            ):
-                fs._copy_object_with_multipart_upload(
-                    S3Path("bucket", "src"),
-                    S3Path("bucket", "dst"),
-                    MetadataDirective="REPLACE",
-                    TaggingDirective="REPLACE",
-                    AnnotationDirective="EXCLUDE",
-                )
-        finally:
-            # A late interrupt is ignored instead of reaching a later test.
-            signal.signal(signal.SIGINT, lambda signum, frame: None)
-            started.set()
-            waiting.set()
-            interrupted.set()
-            if thread.ident is not None:
-                thread.join()
-            signal.signal(signal.SIGINT, previous_handler)
+            sigint_when(lambda: started.is_set() and waiting.is_set()) as signals,
+            pytest.raises(KeyboardInterrupt),
+        ):
+            fs._copy_object_with_multipart_upload(
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+            )
 
         fs.core.abort_multipart_upload.assert_called_once()
         (upload,) = fs.core.abort_multipart_upload.call_args.args
@@ -6237,6 +6474,12 @@ class TestS3File:
         ):
             setattr(fs.core, name, mock.MagicMock())
         fs._get_lookup_kwargs.side_effect = S3FileSystem._get_lookup_kwargs
+        # The request pool, whose scopes the files take by default.
+        fs.max_workers = 4
+        fs._request_pool = S3ThreadPool(fs.max_workers)
+        fs._create_executor.side_effect = lambda max_workers: _S3PoolScope(
+            fs._request_pool, max_workers
+        )
         return fs
 
     @staticmethod

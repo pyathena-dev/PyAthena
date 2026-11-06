@@ -6,7 +6,6 @@ import functools
 import logging
 import operator
 from collections.abc import AsyncGenerator, Callable, Iterable
-from multiprocessing import cpu_count
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -65,7 +64,7 @@ class AioPandasCursor(WithAsyncFetch):
         chunksize: int | None = None,
         block_size: int | None = None,
         cache_type: str | None = None,
-        s3_max_workers: int = (cpu_count() or 1) * 5,
+        s3_max_workers: int | None = None,
         result_reuse_enable: bool = False,
         result_reuse_minutes: int = CursorIterator.DEFAULT_RESULT_REUSE_MINUTES,
         auto_optimize_chunksize: bool = False,
@@ -95,7 +94,10 @@ class AioPandasCursor(WithAsyncFetch):
                 the next block while pandas parses the current one.
                 Without ``cache_type``, PyAthena's filesystem reads a Parquet file of a chunked
                 UNLOAD result that is larger than 32 MiB without a cache.
-            s3_max_workers: Maximum number of workers of the S3 filesystem.
+            s3_max_workers: The size of the request pool of the S3 filesystem
+                that reads the result files. If None, the
+                ``max_pool_connections`` of the connection's S3 client (10
+                unless set with ``s3_config``).
             result_reuse_enable: Whether to enable Athena query result reuse.
             result_reuse_minutes: Maximum age of a reused query result in minutes.
             auto_optimize_chunksize: Whether to choose a chunk size from the size of the

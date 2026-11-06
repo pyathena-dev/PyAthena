@@ -20,7 +20,6 @@ from contextlib import AbstractContextManager, nullcontext
 from functools import partial
 from io import BytesIO, StringIO
 from itertools import islice, repeat
-from multiprocessing import cpu_count
 from types import GeneratorType
 from typing import (
     TYPE_CHECKING,
@@ -474,7 +473,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
         unload_location: str | None = None,
         block_size: int | None = None,
         cache_type: str | None = None,
-        max_workers: int = (cpu_count() or 1) * 5,
+        max_workers: int | None = None,
         chunksize: int | None = None,
         result_set_type_hints: dict[str | int, str] | None = None,
         **kwargs,
@@ -495,7 +494,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 ``"background"``; see ``S3FileSystem``. Without ``cache_type``, PyAthena's
                 filesystem reads a Parquet file of a chunked UNLOAD result that is larger than
                 32 MiB without a cache.
-            max_workers: Maximum number of worker threads.
+            max_workers: The size of the request pool of the S3 filesystem
+                that reads the result files. If None, the
+                ``max_pool_connections`` of the connection's S3 client.
             chunksize: Number of rows per chunk for memory-efficient processing.
                       If specified, data is loaded lazily in chunks for all data
                       access methods including fetchone(), fetchmany(), and iter_chunks().

@@ -16,7 +16,6 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from io import BytesIO
-from multiprocessing import cpu_count
 from typing import Any, BinaryIO, cast
 from urllib.parse import unquote_plus
 
@@ -36,7 +35,7 @@ import pyathena
 from pyathena.connection import Connection
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3DeleteResult
 from pyathena.filesystem.s3_errors import S3ClientError
-from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool
+from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool, _S3PoolScope
 from pyathena.filesystem.s3_object import (
     S3Metadata,
     S3MultipartUpload,
@@ -170,7 +169,7 @@ class S3FileSystem(AbstractFileSystem):
         connection: Connection[Any] | None = None,
         default_block_size: int | None = None,
         default_cache_type: str | None = None,
-        max_workers: int = (cpu_count() or 1) * 5,
+        max_workers: int | None = None,
         s3_additional_kwargs=None,
         allow_bucket_creation: bool = False,
         allow_bucket_deletion: bool = False,
@@ -197,7 +196,13 @@ class S3FileSystem(AbstractFileSystem):
                 read; ``"blockcache"``, which requests whole blocks and keeps
                 the most recently used ones; and ``"background"``, which is like
                 ``"blockcache"`` and also reads the next block in a thread.
-            max_workers: The number of threads for parallel transfers.
+            max_workers: The number of threads of the request pool of the
+                filesystem, which its files and parallel operations share,
+                and the default number of parallel requests of a file. If
+                None, the ``max_pool_connections`` of the S3 client (10
+                unless configured). A client that the filesystem builds gets
+                ``max_pool_connections`` from ``max_workers`` unless
+                ``config_kwargs`` sets it.
             s3_additional_kwargs: Extra arguments for the object requests of
                 ``open()`` and ``pipe_file()``; listings and other requests do
                 not use them. Each request receives those that its operation
@@ -218,13 +223,18 @@ class S3FileSystem(AbstractFileSystem):
             client = connection.s3_client
             retry_config = connection.retry_config
         else:
-            client = self._get_client_compatible_with_s3fs(**kwargs)
+            client = self._get_client_compatible_with_s3fs(max_workers=max_workers, **kwargs)
             retry_config = RetryConfig()
         self.default_block_size = (
             default_block_size if default_block_size else self.DEFAULT_BLOCK_SIZE
         )
         self.default_cache_type = default_cache_type if default_cache_type else "bytes"
-        self.max_workers = max_workers
+        # The requests of the files and parallel operations of the
+        # filesystem run in this pool, at most max_workers at once.
+        self._request_pool = S3ThreadPool(
+            max_workers if max_workers is not None else client.meta.config.max_pool_connections
+        )
+        self.max_workers: int = self._request_pool.max_workers
         self.s3_additional_kwargs = s3_additional_kwargs if s3_additional_kwargs else {}
         self.allow_bucket_creation = allow_bucket_creation
         self.allow_bucket_deletion = allow_bucket_deletion
@@ -261,7 +271,26 @@ class S3FileSystem(AbstractFileSystem):
         """
         return self._core.request_kwargs
 
-    def _get_client_compatible_with_s3fs(self, **kwargs) -> BaseClient:
+    def close(self) -> None:
+        """Release the threads of the request pool, which stays usable, once they are idle.
+
+        See :meth:`S3ThreadPool.release()
+        <pyathena.filesystem.s3_executor.S3ThreadPool.release>`. The calls in
+        progress, including the requests of open files, run to their end, and
+        a call after the release creates new threads.
+        """
+        self._request_pool.release()
+
+    def __enter__(self) -> S3FileSystem:
+        """Return the filesystem, whose threads the end of the block releases."""
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
+    def _get_client_compatible_with_s3fs(
+        self, max_workers: int | None = None, **kwargs
+    ) -> BaseClient:
         """Build a boto3 S3 client from s3fs-compatible constructor arguments.
 
         Accepts the constructor arguments that s3fs users pass through fsspec
@@ -273,6 +302,9 @@ class S3FileSystem(AbstractFileSystem):
         is used as ``profile_name`` when ``profile_name`` is not given.
 
         Args:
+            max_workers: The size of the request pool of the filesystem, which
+                becomes the ``max_pool_connections`` of the client unless
+                ``config_kwargs`` sets it; None keeps botocore's default.
             **kwargs: The filesystem constructor arguments.
 
         Returns:
@@ -280,6 +312,8 @@ class S3FileSystem(AbstractFileSystem):
         """
         config_kwargs = deepcopy(kwargs.pop("config_kwargs", {}))
         client_kwargs = deepcopy(kwargs.pop("client_kwargs", {}))
+        if max_workers is not None:
+            config_kwargs.setdefault("max_pool_connections", max_workers)
 
         user_agent_extra = config_kwargs.pop("user_agent_extra", None)
         if user_agent_extra and pyathena.user_agent_extra not in user_agent_extra:
@@ -1098,20 +1132,27 @@ class S3FileSystem(AbstractFileSystem):
             unversioned_paths, recursive=recursive, maxdepth=maxdepth
         )
 
-    def _create_executor(self, max_workers: int) -> S3Executor:
+    def _create_executor(self, max_workers: int) -> _S3PoolScope:
         """Create the executor of the parallel requests of a file or an operation.
 
         The files of ``S3FileSystem`` and ``AioS3FileSystem`` and the
-        parallel operations of ``S3FileSystem`` take their executors from
-        this method.
+        parallel operations of both take their executors from this method.
+        The requests run in the request pool of the filesystem, which they
+        share, at most ``max_workers`` of those of the executor at once;
+        shutting the executor down waits for its own requests only, and
+        leaves the pool running.
 
         Args:
-            max_workers: Maximum number of parallel workers.
+            max_workers: The maximum number of requests of the executor in
+                the request pool at once.
 
         Returns:
-            A new ``S3ThreadPool``.
+            An executor on the request pool of the filesystem.
+
+        Raises:
+            ValueError: If ``max_workers`` is not positive.
         """
-        return S3ThreadPool(max_workers=max_workers)
+        return _S3PoolScope(self._request_pool, max_workers)
 
     def _delete_objects(self, paths: list[str], max_workers: int | None = None, **kwargs) -> None:
         """Delete objects with DeleteObjects requests grouped by bucket.
@@ -2848,7 +2889,7 @@ class S3File(AbstractBufferedFile):
         path: str,
         mode: str = "rb",
         version_id: str | None = None,
-        max_workers: int = (cpu_count() or 1) * 5,
+        max_workers: int | None = None,
         executor: S3Executor | None = None,
         block_size: int = S3FileSystem.DEFAULT_BLOCK_SIZE,
         cache_type: str = "bytes",
@@ -2877,13 +2918,13 @@ class S3File(AbstractBufferedFile):
             version_id: The version ID to read. Must match the version ID in
                 the path if both are given. A version cannot be given, in
                 either form, for writing or appending.
-            max_workers: The number of parallel workers for range reads, part
-                copies, and part uploads. A write keeps at most
+            max_workers: The number of parallel requests of the file: range
+                reads, part copies, and part uploads. A write keeps at most
                 ``max_workers`` parts, including the part copies of an append,
                 in flight, waiting for one of them to finish before it submits
-                another.
-            executor: The executor for parallel operations. If None, a new
-                ``S3ThreadPool`` is created.
+                another. If None, the ``max_workers`` of the filesystem.
+            executor: The executor for parallel operations. If None, one on
+                the request pool of the filesystem (``fs._create_executor()``).
             block_size: The block size for reads and writes. Must be between
                 ``S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE`` and
                 ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE``, inclusive, unless reading.
@@ -2908,8 +2949,15 @@ class S3File(AbstractBufferedFile):
             ValueError: If the path has no key, the version IDs do not match,
                 a version is given for writing, or the block size is not
                 between ``S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE`` and
-                ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE`` for writing.
+                ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE`` for writing, or
+                ``max_workers`` is not positive.
         """
+        if max_workers is None:
+            max_workers = fs.max_workers
+        if max_workers <= 0:
+            raise ValueError("max_workers must be greater than 0")
+        # The process that opened the file; a forked child rejects it.
+        self._pid = os.getpid()
         self.max_workers = max_workers
         # The arguments are validated, and the objects looked up, before the
         # base class initializer: a file that fails here is never opened, so
@@ -2929,7 +2977,7 @@ class S3File(AbstractBufferedFile):
         self.s3_additional_kwargs: dict[str, Any] = target.request_kwargs
         self._details: S3Object | dict[str, Any] = target.details
 
-        self._executor: S3Executor = executor or S3ThreadPool(max_workers=max_workers)
+        self._executor: S3Executor = executor or fs._create_executor(max_workers=max_workers)
         # The requests and the state of the write; None when reading.
         self._session: _S3WriteSession | None = None
         if mode != "rb":
@@ -2976,12 +3024,77 @@ class S3File(AbstractBufferedFile):
         return self.fs.core.operation_params(method, self.s3_additional_kwargs)
 
     def close(self) -> None:
-        """Close the file, flushing any written data, and shut down its executor."""
+        """Close the file, flushing any written data, and shut down its executor.
+
+        In a forked child process, a file that the parent opened is only
+        marked closed: its data is neither flushed nor committed, and its
+        upload is not aborted, since they belong to the parent.
+        """
+        if self._inherited():
+            self.closed = True
+            return
         try:
             super().close()
         finally:
             # The executor is shut down even if the final flush fails.
             self._executor.shutdown()
+
+    def read(self, length: int = -1) -> bytes:
+        """Read bytes from the file.
+
+        Args:
+            length: The number of bytes to read; -1 reads to the end.
+
+        Returns:
+            The bytes read.
+
+        Raises:
+            RuntimeError: In a forked child process of the process that
+                opened the file.
+            ValueError: If the file is closed or not open for reading.
+        """
+        self._check_process()
+        data: bytes = super().read(length)
+        return data
+
+    def flush(self, force: bool = False) -> None:
+        """Upload the buffered data as a part once a block is full, or all of it with ``force``.
+
+        Args:
+            force: Whether to upload the remaining data and commit the file,
+                after which it cannot be written.
+
+        Raises:
+            RuntimeError: In a forked child process of the process that
+                opened the file.
+            ValueError: If ``force`` is given again after a forced flush.
+        """
+        self._check_process()
+        super().flush(force=force)
+
+    def _inherited(self) -> bool:
+        """Whether this process is a forked child of the process that opened the file.
+
+        Returns:
+            True in a forked child process of the process that opened the
+            file.
+        """
+        # Compared with the process ID, not a count that an at-fork hook
+        # updates, since hooks registered before it may close the file.
+        return getattr(self, "_pid", os.getpid()) != os.getpid()
+
+    def _check_process(self) -> None:
+        """Reject the use of a file that the parent of a forked process opened.
+
+        Raises:
+            RuntimeError: In a forked child process of the process that
+                opened the file.
+        """
+        if self._inherited():
+            raise RuntimeError(
+                f"s3://{self.bucket}/{self.key} was opened by the parent of this forked "
+                "process and cannot be used here; open it again in this process."
+            )
 
     def write(self, data: bytes | bytearray | memoryview) -> int:
         """Write data to the buffer, uploading each full block as a part.
@@ -2996,9 +3109,12 @@ class S3File(AbstractBufferedFile):
             BaseException: The error of a request of the write that failed
                 since the last write, after which the file is closed without
                 committing it.
+            RuntimeError: In a forked child process of the process that
+                opened the file.
             S3MultipartStateError: If the write was discarded.
             ValueError: If the file is not open for writing.
         """
+        self._check_process()
         if self._session is not None and not self.closed:
             try:
                 self._session.check()
@@ -3186,9 +3302,12 @@ class S3File(AbstractBufferedFile):
         Raises:
             FileExistsError: If an object was created at the path after the
                 file was opened in exclusive-create mode.
+            RuntimeError: In a forked child process of the process that
+                opened the file.
             S3MultipartStateError: If the write was discarded, or the write
                 or an earlier commit failed.
         """
+        self._check_process()
         session = cast(_S3WriteSession, self._session)
         if not session.multipart:
             body = None
@@ -3218,7 +3337,12 @@ class S3File(AbstractBufferedFile):
         abort. Afterwards, :meth:`commit` raises
         :class:`~pyathena.filesystem.s3_writer.S3MultipartStateError`. Does
         nothing for a committed file or a file opened for reading.
+
+        Raises:
+            RuntimeError: In a forked child process of the process that
+                opened the file.
         """
+        self._check_process()
         if self._session is not None:
             self._session.abort()
 
@@ -3307,6 +3431,7 @@ class S3File(AbstractBufferedFile):
             # Set on failure, so that the running reads make no further attempt.
             stop = threading.Event()
             futures: list[Future[bytes]] = []
+            done: set[Future[bytes]] = set()
             try:
                 with stop_retries_on(stop):
                     for r in ranges:
@@ -3319,30 +3444,38 @@ class S3File(AbstractBufferedFile):
                             futures[-1], self.fs.core.get_object, path, r, **request_kwargs
                         )
                 done = wait(futures, return_when=FIRST_EXCEPTION).done
+                failed = next(
+                    (f for f in done if not f.cancelled() and f.exception() is not None), None
+                )
+                if failed is not None:
+                    failed.result()
+                return b"".join(f.result() for f in futures)
             except BaseException as e:
-                # The reads are cancelled with the read of the range, as below,
-                # and the frames of the wait, which keep their futures, are
-                # cleared; clear_frames() skips this frame, which is executing.
-                traceback.clear_frames(e.__traceback__)
-                while futures:
-                    futures.pop().cancel()
-                # After the cancellation, which a thread that it frees could
-                # otherwise precede by taking a queued read.
-                stop.set()
+                # A failed read, or an interrupt at any point, including after
+                # the wait: the reads that have not started are cancelled, and
+                # the futures of the others are dropped, so that this frame,
+                # which the traceback of the error keeps, does not keep their
+                # data, also if another interrupt stops this cleanup. The
+                # frames of the wait, which keep the futures, are cleared, and
+                # clear_frames() skips this frame, which is executing.
+                try:
+                    # Popped, not iterated, so that no variable of this frame
+                    # keeps a future.
+                    while futures:
+                        futures.pop().cancel()
+                finally:
+                    # Also if an interrupt stops the cancellation, whose error
+                    # keeps this one as its context; the frames first, as
+                    # they keep the futures of the wait.
+                    try:
+                        traceback.clear_frames(e.__traceback__)
+                    finally:
+                        done.clear()
+                        futures.clear()
+                        # After the cancellation, which a thread that it frees
+                        # could otherwise precede by taking a queued read.
+                        stop.set()
                 raise
-            failed = next(
-                (f for f in done if not f.cancelled() and f.exception() is not None), None
-            )
-            if failed is not None:
-                # The reads that have not started are cancelled, and the
-                # futures of the others are dropped, so that this frame, which
-                # the traceback of the error keeps, does not keep their data.
-                while futures:
-                    futures.pop().cancel()
-                stop.set()
-                done.clear()
-                failed.result()
-            return b"".join(f.result() for f in futures)
         return self.fs.core.get_object(path, ranges[0], **request_kwargs)
 
     @staticmethod

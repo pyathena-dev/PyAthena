@@ -1,5 +1,6 @@
 import contextlib
 import csv
+import inspect
 import io
 import math
 import random
@@ -14,10 +15,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from pyathena.aio.pandas.cursor import AioPandasCursor
 from pyathena.error import DatabaseError, DataError, OperationalError, ProgrammingError
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.formatter import DefaultParameterFormatter
 from pyathena.model import AthenaQueryExecution
+from pyathena.pandas.async_cursor import AsyncPandasCursor
 from pyathena.pandas.converter import DefaultPandasTypeConverter
 from pyathena.pandas.cursor import PandasCursor
 from pyathena.pandas.result_set import AthenaPandasResultSet
@@ -1927,3 +1930,12 @@ class TestPandasCursor:
         assert column("col_json_not_null").tolist() == [9007199254740995, 9007199254740997]
         assert column("col_binary").tolist() == [b"\x01", None]
         assert column("col_time").tolist() == [datetime(2017, 1, 1, 1, 2, 3).time(), None]
+
+
+@pytest.mark.parametrize("cursor_class", [PandasCursor, AsyncPandasCursor, AioPandasCursor])
+def test_s3_max_workers_default(cursor_class):
+    # GH-1332: the pandas cursors default s3_max_workers to None, so that the
+    # filesystem that reads the result files takes the connection pool of the
+    # S3 client; they used to default to cpu_count() * 5.
+    default = inspect.signature(cursor_class.__init__).parameters["s3_max_workers"].default
+    assert default is None
