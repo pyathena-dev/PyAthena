@@ -845,7 +845,7 @@ class TestS3FileSystem:
 
     @staticmethod
     def _serve_keys(fs, keys, versioning=None):
-        # Answer the ListObjectsV2, HeadObject, CopyObject, and DeleteObjects
+        # Answer the ListObjectsV2, HeadObject, CopyObject, DeleteObject, and DeleteObjects
         # requests of "bucket" from a set of the given keys, which is returned.
         # GetBucketVersioning answers the status of each bucket in the
         # versioning dict, none by default, or raises versioning if it is an
@@ -866,6 +866,9 @@ class TestS3FileSystem:
                 if kwargs["CopySource"]["Key"] not in keys:
                     raise FileNotFoundError(kwargs["CopySource"]["Key"])
                 keys.add(kwargs["Key"])
+                return {}
+            if method is fs._client.delete_object:
+                keys.discard(kwargs["Key"])
                 return {}
             if method is fs._client.delete_objects:
                 keys.difference_update(o["Key"] for o in kwargs["Delete"]["Objects"])
@@ -4485,6 +4488,16 @@ class TestS3FileSystem:
         assert actual[1].size == 4
         assert actual[2].size == 2
         assert fs.ls("s3://bucket/path", versions=True) == [f.name for f in actual]
+
+    def test_rm_file_key_with_trailing_slash_drops_cached_listing(self):
+        # GH-1335: the object "dir//" is listed in the directory "bucket/dir/",
+        # whose cached listing a deletion of it invalidates.
+        fs = self._make_fs()
+        self._serve_keys(fs, ("dir//", "dir//live"))
+        assert fs.find("s3://bucket/dir", maxdepth=2) == ["bucket/dir//", "bucket/dir//live"]
+
+        fs.rm_file("s3://bucket/dir//")
+        assert fs.find("s3://bucket/dir", maxdepth=2) == ["bucket/dir//live"]
 
     def test_ls_versions_empty_segment(self):
         # GH-1335: the common prefix "path/dir//" is the directory

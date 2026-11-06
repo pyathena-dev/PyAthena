@@ -2499,6 +2499,8 @@ class S3FileSystem(AbstractFileSystem):
         accepts, and also the object path without the version, because deleting
         or copying a version can change the
         current version of the object.
+        A key that ends in a slash, such as ``dir//``, also invalidates the
+        listing of the directory that lists it (``bucket/dir/``).
 
         Args:
             path: The path to invalidate. If None, clear the whole cache.
@@ -2506,8 +2508,13 @@ class S3FileSystem(AbstractFileSystem):
         if path is None:
             self.dircache.clear()
         else:
-            path = self._strip_protocol(path)
-            if not path:
+            raw = os.fspath(path)
+            path = self._strip_protocol(raw)
+            if path:
+                # _strip_protocol() removes the trailing slashes of a key such
+                # as "dir//", whose parent listing is that of "bucket/dir/".
+                path += "/" * (len(raw) - len(raw.rstrip("/")))
+            else:
                 self._evict_cache("")
             while path:
                 base, version_id = S3Path.split_version_id(path)
