@@ -411,8 +411,12 @@ class TestS3FileSystem:
             # S3Path.parse accepts other spellings of the query.
             ("s3://bucket/a/c.txt?version_id=v1", "bucket/a/c.txt?versionId=v1"),
             ("s3://bucket/a/c.txt?versionId=v1", "bucket/a/c.txt?versionid=v1"),
-            # info() strips a slash after the version ID, as invalidation does.
+            # info() strips a slash after the version ID of a path, but not
+            # of the version_id argument.
             ("s3://bucket/a/c.txt?versionId=v1/", "bucket/a/c.txt?versionId=v1"),
+            ("s3://bucket/a/c.txt?versionId=v1/", "bucket/a/c.txt?versionId=v1/"),
+            # Without a version ID after it, the query is part of the key.
+            ("s3://bucket/a/c.txt?versionId=/", "bucket/a/c.txt?versionId="),
         ],
     )
     def test_invalidate_cache_version_drops_object_path(self, path, cache_key):

@@ -2499,48 +2499,57 @@ class S3FileSystem(AbstractFileSystem):
         accepts, and also the object path without the version, because deleting
         or copying a version can change the
         current version of the object.
-        A key that ends in a slash, such as ``dir//``, also invalidates the
-        listing of the directory that lists it (``bucket/dir/``).
+        A path that ends in slashes is invalidated both with and without
+        them, since lookups strip them while a key such as ``dir//`` is
+        listed in the directory ``bucket/dir/``.
 
         Args:
             path: The path to invalidate. If None, clear the whole cache.
         """
         if path is None:
             self.dircache.clear()
-        else:
-            raw = os.fspath(path)
-            path = self._strip_protocol(raw)
-            if path and not S3Path.has_version_id(path):
-                # _strip_protocol() removes the trailing slashes of a key such
-                # as "dir//", whose parent listing is that of "bucket/dir/".
-                # Lookups strip them from a version ID in the same way.
-                path += "/" * (len(raw) - len(raw.rstrip("/")))
-            elif not path:
-                self._evict_cache("")
-            while path:
-                base, version_id = S3Path.split_version_id(path)
-                cache_paths = [path]
-                if version_id:
-                    cache_paths.extend(
-                        f"{base}?{name}={version_id}"
-                        for name in ("versionId", "versionID", "versionid", "version_id")
-                    )
-                for cache_path in cache_paths:
-                    # _ls_dirs caches listings under (path, delimiter), and
-                    # lookups with parameters are cached under
-                    # (path, _LOOKUPS_CACHE_KEY).
-                    for cache_key in (
-                        cache_path,
-                        (cache_path, "/"),
-                        (cache_path, ""),
-                        (cache_path, _LOOKUPS_CACHE_KEY),
-                    ):
-                        self._evict_cache(cache_key)
-                # A version-qualified path continues with the path without
-                # the version, keeping a trailing slash of its key. Otherwise,
-                # one segment is removed; _parent() would also strip the
-                # slash of "bucket/dir/" (from "dir//x").
-                path = base if version_id else path.rpartition("/")[0]
+            return
+        raw = os.fspath(path)
+        stripped = self._strip_protocol(raw)
+        if not stripped:
+            self._evict_cache("")
+            return
+        self._invalidate_path(stripped)
+        trailing = len(raw) - len(raw.rstrip("/"))
+        if trailing:
+            self._invalidate_path(stripped + "/" * trailing)
+
+    def _invalidate_path(self, path: str) -> None:
+        """Remove the cached entries of a path and its parent paths.
+
+        Args:
+            path: The path without the protocol, as described in
+                :meth:`invalidate_cache`.
+        """
+        while path:
+            base, version_id = S3Path.split_version_id(path)
+            cache_paths = [path]
+            if version_id:
+                cache_paths.extend(
+                    f"{base}?{name}={version_id}"
+                    for name in ("versionId", "versionID", "versionid", "version_id")
+                )
+            for cache_path in cache_paths:
+                # _ls_dirs caches listings under (path, delimiter), and
+                # lookups with parameters are cached under
+                # (path, _LOOKUPS_CACHE_KEY).
+                for cache_key in (
+                    cache_path,
+                    (cache_path, "/"),
+                    (cache_path, ""),
+                    (cache_path, _LOOKUPS_CACHE_KEY),
+                ):
+                    self._evict_cache(cache_key)
+            # A version-qualified path continues with the path without the
+            # version, keeping a trailing slash of its key. Otherwise, one
+            # segment is removed; _parent() would also strip the slash of
+            # "bucket/dir/" (from "dir//x").
+            path = base if version_id else path.rpartition("/")[0]
 
     def _evict_cache(self, key: str | tuple[str, str]) -> None:
         """Remove a dircache entry if it exists.
