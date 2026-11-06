@@ -18,6 +18,8 @@ from unittest.mock import MagicMock, patch
 
 import polars as pl
 import pytest
+from fsspec import AbstractFileSystem
+from fsspec.registry import _registry
 
 from pyathena.aio.polars.cursor import AioPolarsCursor
 from pyathena.error import DatabaseError, DataError, OperationalError, ProgrammingError
@@ -114,6 +116,21 @@ class TestPolarsCursor:
                     "skip_instance_cache": True,
                 },
             )
+
+    def test_csv_read_ignores_registered_filesystem(self, polars_cursor, monkeypatch):
+        """A whole CSV result file is read with PyAthena's filesystem and the connection.
+
+        GH-1339: it was opened through fsspec's registry, so another registered "s3"
+        filesystem read it without the connection's credentials and region.
+        """
+
+        class _RegisteredFileSystem(AbstractFileSystem):
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("The registered s3 filesystem was used.")
+
+        monkeypatch.setitem(_registry, "s3", _RegisteredFileSystem)
+        polars_cursor.execute("SELECT * FROM one_row")
+        assert polars_cursor.fetchall() == [(1,)]
 
     @pytest.mark.parametrize(
         "polars_cursor",
