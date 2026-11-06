@@ -41,7 +41,7 @@ from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3MultipartCopyPlan
 from pyathena.filesystem.s3_errors import S3ClientError
-from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool, _S3PoolScope
+from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool, _S3Batch, _S3PoolScope
 from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
@@ -610,16 +610,21 @@ class TestS3FileSystem:
         # upload that no longer exists, in the order the aborts ended.
         fs = self._make_fs()
         fs.max_workers = 3
-        ended = {u: threading.Event() for u in ("gone", "late", "early")}
+        recorded = {u: threading.Event() for u in ("gone", "late", "early")}
+        record = _S3Batch._record
+
+        def recording(batch, error):
+            record(batch, error)
+            if error is not None:
+                recorded[str(error)].set()
 
         def abort_multipart_upload(upload):
             # "gone" ends first, then "early", then "late".
             name = upload.upload_id
             if name == "early":
-                assert ended["gone"].wait(EVENT_TIMEOUT)
+                assert recorded["gone"].wait(EVENT_TIMEOUT)
             if name == "late":
-                assert ended["early"].wait(EVENT_TIMEOUT)
-            ended[name].set()
+                assert recorded["early"].wait(EVENT_TIMEOUT)
             if name == "gone":
                 error = botocore.exceptions.ClientError(
                     {"Error": {"Code": "NoSuchUpload", "Message": name}}, "AbortMultipartUpload"
@@ -634,7 +639,10 @@ class TestS3FileSystem:
                 for u in ("gone", "late", "early")
             ]
         )
-        with pytest.raises(PermissionError, match="early"):
+        with (
+            mock.patch.object(_S3Batch, "_record", recording),
+            pytest.raises(PermissionError, match="early"),
+        ):
             fs.clear_multipart_uploads("s3://bucket/")
 
     def test_rm_requests_invalidate_shared_parent(self):

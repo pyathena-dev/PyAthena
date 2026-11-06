@@ -21,15 +21,23 @@ from unittest import mock
 import pytest
 from botocore.exceptions import ClientError
 
-from pyathena.filesystem.s3_executor import S3AioExecutor, S3Executor, S3ThreadPool, _S3PoolScope
+from pyathena.filesystem.s3_executor import (
+    S3AioExecutor,
+    S3Executor,
+    S3ThreadPool,
+    _S3Batch,
+    _S3PoolScope,
+)
 from pyathena.util import RetryConfig, override, retry_api_call, stop_retries_on
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
     OpcodeInterrupter,
     ThrottledOperation,
+    call_bounded,
     forking,
     interrupt_each_opcode,
     overlapping_calls,
+    poll_until,
     retried,
     run_in_forked_child,
     shutdown_bounded,
@@ -1118,7 +1126,7 @@ class TestS3Executor:
                 call()
                 return i * i
 
-            result = scope.map(square, range(6))
+            result = call_bounded(scope.map, square, range(6))
             assert result.outcomes == [0, 1, 4, 9, 16, 25]
             assert result.failure is None
             assert state["peak"] == 2
@@ -1142,13 +1150,14 @@ class TestS3Executor:
                 self._pool.shutdown(wait=wait)
 
         with Executor() as executor:
-            assert executor.map(str, [1, 2]).outcomes == ["1", "2"]
+            assert call_bounded(executor.map, str, [1, 2]).outcomes == ["1", "2"]
 
     @pytest.mark.parametrize("rejection", ["failed", "cancelled"])
     def test_map_executor_rejection(self, rejection):
         # GH-1332: a call that the executor fails or cancels without running
-        # it counts as a failure: it stops the batch, or is the failure of a
-        # batch without stop_on_failure, instead of being returned as a value.
+        # it counts as a failure when its future is set: it stops the batch
+        # before the next call starts, or is the failure of a batch without
+        # stop_on_failure, instead of being returned as a value.
         class Rejecting(S3Executor):
             def __init__(self):
                 self._pool = ThreadPoolExecutor(2)
@@ -1172,10 +1181,18 @@ class TestS3Executor:
                 self._pool.shutdown(wait=wait)
 
         expected = CancelledError if rejection == "cancelled" else RuntimeError
+        ran = []
+
+        def call(i):
+            ran.append(i)
+            return str(i)
+
         with Rejecting() as executor, pytest.raises(expected):
-            executor.map(str, range(3))
+            call_bounded(executor.map, call, range(3))
+        # The item submitted after the rejection does not run.
+        assert 2 not in ran
         with Rejecting() as executor:
-            result = executor.map(str, range(3), stop_on_failure=False)
+            result = call_bounded(executor.map, str, range(3), stop_on_failure=False)
         assert isinstance(result.failure, expected)
         assert isinstance(result.outcomes[1], expected)
 
@@ -1219,7 +1236,7 @@ class TestS3Executor:
                 mock.patch("pyathena.filesystem.s3_executor.wait", late_wait),
                 pytest.raises(ValueError, match="failed"),
             ):
-                scope.map(call, range(4))
+                call_bounded(scope.map, call, range(4))
             assert time.monotonic() - started < EVENT_TIMEOUT
             assert sorted(ended) == [0, 1]
             assert operation.calls == 1
@@ -1232,18 +1249,27 @@ class TestS3Executor:
         # the first to end, not the first item that failed.
         pool = S3ThreadPool(2)
         scope = _S3PoolScope(pool, 2)
-        second_failed = threading.Event()
+        recorded = threading.Event()
+        record = _S3Batch._record
+
+        def recording(batch, error):
+            record(batch, error)
+            if error is not None:
+                recorded.set()
 
         def call(i):
             if i == 0:
-                assert second_failed.wait(EVENT_TIMEOUT)
+                # Fails once the failure of the second item is recorded.
+                assert recorded.wait(EVENT_TIMEOUT)
                 raise ValueError("first item")
-            second_failed.set()
             raise KeyError("second item")
 
         try:
-            with pytest.raises(KeyError, match="second item"):
-                scope.map(call, range(2))
+            with (
+                mock.patch.object(_S3Batch, "_record", recording),
+                pytest.raises(KeyError, match="second item"),
+            ):
+                call_bounded(scope.map, call, range(2))
         finally:
             shutdown_bounded(scope)
             pool.shutdown()
@@ -1253,24 +1279,31 @@ class TestS3Executor:
         # failure reported is the first that counts in the order they ended.
         pool = S3ThreadPool(3)
         scope = _S3PoolScope(pool, 3)
-        ended = {i: threading.Event() for i in range(3)}
+        recorded = {str(i): threading.Event() for i in range(3)}
+        record = _S3Batch._record
+
+        def recording(batch, error):
+            record(batch, error)
+            if error is not None:
+                recorded[str(error)].set()
 
         def call(i):
-            # Item 0 ends first and does not count; item 2 ends before item 1.
+            # Item 0 fails first and does not count; item 2 fails before item 1.
             if i == 2:
-                assert ended[0].wait(EVENT_TIMEOUT)
+                assert recorded["0"].wait(EVENT_TIMEOUT)
             if i == 1:
-                assert ended[2].wait(EVENT_TIMEOUT)
-            ended[i].set()
+                assert recorded["2"].wait(EVENT_TIMEOUT)
             raise (LookupError if i == 0 else ValueError)(i)
 
         try:
-            result = scope.map(
-                call,
-                range(3),
-                stop_on_failure=False,
-                counts=lambda e: not isinstance(e, LookupError),
-            )
+            with mock.patch.object(_S3Batch, "_record", recording):
+                result = call_bounded(
+                    scope.map,
+                    call,
+                    range(3),
+                    stop_on_failure=False,
+                    counts=lambda e: not isinstance(e, LookupError),
+                )
             assert [type(e) for e in result.outcomes] == [LookupError, ValueError, ValueError]
             assert result.failure is result.outcomes[2]
         finally:
@@ -1306,7 +1339,7 @@ class TestS3Executor:
                 mock.patch("pyathena.filesystem.s3_executor.wait", interrupted_wait),
                 pytest.raises(KeyboardInterrupt),
             ):
-                scope.map(call, range(2), stop_on_failure=False)
+                call_bounded(scope.map, call, range(2), stop_on_failure=False)
             assert time.monotonic() - started < EVENT_TIMEOUT
             assert ran == [0]
             assert operation.calls == 1
@@ -1338,12 +1371,40 @@ class TestS3Executor:
                 mock.patch("pyathena.filesystem.s3_executor.wait", interrupted_wait),
                 pytest.raises(KeyboardInterrupt) as info,
             ):
-                scope.map(call, range(1))
+                call_bounded(scope.map, call, range(1))
             assert isinstance(info.value.__context__, KeyboardInterrupt)
             assert not release.is_set()
             assert len(scope.pending()) == 1
         finally:
             release.set()
+            shutdown_bounded(scope)
+            pool.shutdown()
+
+    def test_map_result_frees_outcomes(self):
+        # GH-1332 (F5): the outcomes of a map are freed once its result is
+        # dropped, without the cyclic garbage collector, so that the bodies of
+        # parallel reads are not kept until it runs.
+        class Body:
+            pass
+
+        refs = []
+        pool = S3ThreadPool(2)
+        scope = _S3PoolScope(pool, 2)
+
+        def call(i):
+            body = Body()
+            refs.append(weakref.ref(body))
+            return body
+
+        gc.disable()
+        try:
+            result = call_bounded(scope.map, call, range(2))
+            assert len(result.outcomes) == 2
+            del result
+            # The threads leave the frames of the calls right after they end.
+            poll_until(lambda: all(ref() is None for ref in refs), "an outcome was kept")
+        finally:
+            gc.enable()
             shutdown_bounded(scope)
             pool.shutdown()
 
@@ -1373,7 +1434,7 @@ class TestS3Executor:
 
         try:
             with pytest.raises(ValueError, match="failed") as info:
-                scope.map(call, range(2))
+                call_bounded(scope.map, call, range(2))
             gc.collect()
             assert len(refs) == 1
             assert refs[0]() is None
@@ -1448,25 +1509,30 @@ class TestS3Executor:
 
     @pytest.mark.asyncio
     async def test_map_async_failures_are_retrieved(self):
-        # GH-1332: the failures of the calls that a failure stopped are not
-        # logged as never retrieved.
+        # GH-1332: the failures of the calls that a failure stopped, which end
+        # while the map drains, are not logged as never retrieved.
         loop = asyncio.get_running_loop()
         logged = []
         previous = loop.get_exception_handler()
         loop.set_exception_handler(lambda loop, context: logged.append(context))
         pool = S3ThreadPool(2)
         scope = _S3PoolScope(pool, 2)
-        barrier = threading.Barrier(2, timeout=EVENT_TIMEOUT)
+        both_started = threading.Barrier(2, timeout=EVENT_TIMEOUT)
+        # The second call fails once the first has stopped its retries.
+        throttled = retried(ThrottledOperation(), RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
 
         def call(i):
-            barrier.wait()
-            raise ValueError(i)
+            both_started.wait()
+            if i == 0:
+                raise ValueError(i)
+            return throttled()
 
         try:
-            with pytest.raises(ValueError, match=r"^[01]$"):
+            with pytest.raises(ValueError, match=r"^0$"):
                 await scope.map_async(call, range(2))
-            gc.collect()
-            await asyncio.sleep(0)
+            for _ in range(3):
+                gc.collect()
+                await asyncio.sleep(0)
             assert logged == []
         finally:
             loop.set_exception_handler(previous)

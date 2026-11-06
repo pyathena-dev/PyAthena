@@ -350,7 +350,9 @@ creates new threads. `S3ThreadPoolExecutor` and `S3AioThreadPool` are aliases of
 `S3Executor.map()` and `S3Executor.map_async()` run a callable for each item in the
 executor and return the outcomes in the order of the items. With `stop_on_failure`,
 the default, the first failure cancels the calls that have not started, stops the
-retries of the running ones, and is raised once they have ended.
+retries of the running ones, and is raised once they have ended. A call that runs in an
+`S3ThreadPool` must not map on that pool, which would wait for the threads that the
+call holds; a scope of the filesystem runs such calls in the calling thread.
 
 The file handles of `AioS3FileSystem.open()` run their multipart uploads and parallel
 range reads in the request pool of the filesystem, at most the `max_workers` of the

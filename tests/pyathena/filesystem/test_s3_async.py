@@ -1693,15 +1693,16 @@ class TestAioS3FileSystem:
     @pytest.mark.asyncio
     async def test_rm_cancel_waits_for_running_requests(self):
         # GH-1332 (B6): a cancelled _rm() raises once its running requests
-        # have ended, each of which invalidates the cache of its objects. The
-        # requests used to run on after the cancellation was raised.
+        # have ended, and each request invalidates the cache of its objects
+        # when it ends. The requests used to run on after the cancellation was
+        # raised.
         fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
         started = {"b1": threading.Event(), "b2": threading.Event()}
-        release = threading.Event()
+        release = {"b1": threading.Event(), "b2": threading.Event()}
 
         def call(method, **request):
             started[request["Bucket"]].set()
-            release.wait(EVENT_TIMEOUT)
+            release[request["Bucket"]].wait(EVENT_TIMEOUT)
             return {}
 
         fs._sync_fs._call = fs._sync_fs._core.call = call
@@ -1713,15 +1714,17 @@ class TestAioS3FileSystem:
             fs.dircache["b1/a"] = []
             fs.dircache["b2/b"] = []
             task.cancel()
-            await asyncio.sleep(0.1)
+            release["b1"].set()
+            await wait_until(lambda: "b1/a" not in fs.dircache)
+            assert "b2/b" in fs.dircache
             assert not task.done()
-            release.set()
+            release["b2"].set()
             with pytest.raises(asyncio.CancelledError):
                 await await_bounded(task)
-            assert "b1/a" not in fs.dircache
             assert "b2/b" not in fs.dircache
         finally:
-            release.set()
+            for event in release.values():
+                event.set()
 
     @pytest.mark.asyncio
     async def test_rm_maxdepth(self):

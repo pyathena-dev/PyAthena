@@ -215,6 +215,10 @@ class _S3Batch(Generic[ItemT, T]):
         with stop_retries_on(self.stop):
             for item in items:
                 self.futures.append(Future())
+                # Records a failure that the executor reports without running
+                # the call, such as a failure to start a thread, when it is
+                # set, before the thread that sets it takes another call.
+                self.futures[-1].add_done_callback(self._settled)
                 executor.submit_to(self.futures[-1], self._call, item)
 
     def wait(self) -> None:
@@ -222,9 +226,7 @@ class _S3Batch(Generic[ItemT, T]):
         return_when = FIRST_EXCEPTION if self._stop_on_failure else ALL_COMPLETED
         pending = set(self.futures)
         while pending and not self._stopped_by_failure():
-            done, pending = wait(pending, return_when=return_when)
-            for future in done:
-                self._record(self._outcome(future))
+            pending = wait(pending, return_when=return_when).not_done
 
     async def wait_async(self) -> None:
         """Await until every call has ended or a failure has stopped the batch."""
@@ -233,9 +235,7 @@ class _S3Batch(Generic[ItemT, T]):
             self._waiters[future] = S3Executor.waiter(future)
         pending = set(self._waiters.values())
         while pending and not self._stopped_by_failure():
-            done, pending = await asyncio.wait(pending, return_when=return_when)
-            for waiter in done:
-                self._record(CancelledError() if waiter.cancelled() else waiter.exception())
+            pending = (await asyncio.wait(pending, return_when=return_when))[1]
 
     def result(self) -> S3MapResult[T]:
         """Return the outcomes of the calls, which have all ended.
@@ -305,8 +305,17 @@ class _S3Batch(Generic[ItemT, T]):
         finally:
             # Also if a further interrupt stopped the drain before its stop.
             self.stop.set()
-            self.futures.clear()
-            self._waiters.clear()
+            self.clear()
+
+    def clear(self) -> None:
+        """Drop the futures of the calls.
+
+        The done callback of each future refers to the batch, so a batch
+        that kept its futures would form a reference cycle with them, and
+        keep their outcomes until the cyclic garbage collector frees them.
+        """
+        self.futures.clear()
+        self._waiters.clear()
 
     def _stop(self) -> list[Future[T]]:
         """Stop the batch and cancel the calls that have not started.
@@ -355,12 +364,20 @@ class _S3Batch(Generic[ItemT, T]):
             self._record(e)
             raise
 
+    def _settled(self, future: Future[T]) -> None:
+        """Record the failure of a call whose future has been set.
+
+        Args:
+            future: The future of the call.
+        """
+        self._record(self._outcome(future))
+
     def _record(self, error: BaseException | None) -> None:
         """Record the first failure that counts, and stop the batch with it if requested.
 
-        A call records its own failure in its thread; the waiting thread also
-        records those that the executor reports without running the call,
-        such as a failure to start a thread.
+        A call records its own failure in its thread before its future is
+        set; the done callback of the future records those that the executor
+        reports without running the call.
 
         Args:
             error: The failure of a call, or None if it succeeded.
@@ -568,6 +585,11 @@ class S3Executor(metaclass=ABCMeta):
         and is raised once the running calls have ended. A further interrupt
         stops that wait; the running calls then end in the executor.
 
+        A thread of a scope's pool that maps on that scope runs the calls
+        itself. A thread of a bare :class:`S3ThreadPool` that maps on that
+        pool waits for threads that it may hold, so a pool must not map on
+        itself.
+
         Args:
             fn: The callable to run for each item.
             items: The items.
@@ -594,6 +616,8 @@ class S3Executor(metaclass=ABCMeta):
             finally:
                 batch.release(e)
             raise
+        finally:
+            batch.clear()
 
     async def map_async(
         self,
@@ -635,6 +659,8 @@ class S3Executor(metaclass=ABCMeta):
             finally:
                 batch.release(e)
             raise
+        finally:
+            batch.clear()
 
     def __enter__(self) -> S3Executor:
         return self
