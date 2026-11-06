@@ -522,8 +522,7 @@ class S3FileSystem(AbstractFileSystem):
         lists the keys under that prefix.
 
         Args:
-            path: The bucket or directory path to list, without the protocol
-                or a version ID.
+            path: The bucket or directory path to list, without the protocol.
             prefix: Key prefix to filter by, relative to the path. A prefixed
                 listing is neither read from nor written to the cache.
             delimiter: Delimiter to group keys by; ``""`` lists recursively.
@@ -598,9 +597,8 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             FileNotFoundError: If the bucket does not exist, or if a key path
                 is neither an object nor a directory, a path that some key
-                starts with followed by ``/``. A key path with a version ID
-                names that version of the object, which is listed alone, so
-                it raises if the version does not exist.
+                starts with followed by ``/``, or if the version that a key
+                path with a version ID names does not exist.
 
         Example:
             >>> fs = S3FileSystem()
@@ -875,8 +873,6 @@ class S3FileSystem(AbstractFileSystem):
 
         Returns:
             The objects found, and the directories if ``withdirs`` is True.
-            A key path with a version ID finds only that version, if it
-            exists.
 
         Raises:
             ValueError: If ``maxdepth`` is less than 1 or the path is the root.
@@ -966,8 +962,8 @@ class S3FileSystem(AbstractFileSystem):
         includes the path itself if withdirs is True and objects exist below
         it, unless it is a bucket, or if it is an object and nothing is listed
         below it. A key path with a version ID names that version of the
-        object: the result is the path if the version exists, and empty
-        otherwise.
+        object: the result is the version, named as ``ls(versions=True)``
+        names it, if it exists, and empty otherwise.
 
         Args:
             path: S3 path to search under (e.g., "s3://bucket/prefix").
@@ -2533,11 +2529,10 @@ class S3FileSystem(AbstractFileSystem):
                     ):
                         self._evict_cache(cache_key)
                 # A version-qualified path continues with the path without
-                # the version. Otherwise, exactly one segment is removed, so
-                # that the parent of "bucket/dir//x" is "bucket/dir/", which
-                # names the common prefix "dir//", and its parent is
-                # "bucket/dir"; _parent() would remove the trailing slash too.
-                path = self._strip_protocol(base) if version_id else path.rpartition("/")[0]
+                # the version, keeping a trailing slash of its key. Otherwise,
+                # one segment is removed; _parent() would also strip the
+                # slash of "bucket/dir/" (from "dir//x").
+                path = base if version_id else path.rpartition("/")[0]
 
     def _evict_cache(self, key: str | tuple[str, str]) -> None:
         """Remove a dircache entry if it exists.

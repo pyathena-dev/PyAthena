@@ -193,7 +193,7 @@ a negative `start` and no `end`, and raises `FileNotFoundError` for other ranges
 A directory is named after its key prefix without the last slash. A key with an empty
 segment, such as `dir//x`, therefore lies in the directory `dir/`, which `ls` of `dir`
 lists and `find` descends into. Since `ls` drops a trailing slash, `ls` of `dir/` lists
-`dir`.
+`dir`, and `walk` does not descend into `dir/`.
 
 S3 request parameters, such as `ContentType`, `ServerSideEncryption`, or `RequestPayer`,
 can be given to `open`, `pipe`, and `put` as keyword arguments or in
