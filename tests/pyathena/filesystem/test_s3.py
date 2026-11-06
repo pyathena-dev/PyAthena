@@ -3781,8 +3781,11 @@ class TestS3FileSystem:
         # context, also frees the data of the ranges that were read. The
         # frame of the wait keeps the futures, as concurrent.futures.wait()
         # does.
+        entered = threading.Event()
+
         def interrupted_wait(futures, **kwargs):
             # A set of its own, as concurrent.futures.wait() makes.
+            entered.set()
             held = set(futures)
             wait(held)
             raise KeyboardInterrupt
@@ -3794,11 +3797,14 @@ class TestS3FileSystem:
             read = []
 
             def get_object(path, range_, **kwargs):
+                # Ends once the read waits, so that its wait is interrupted.
+                assert entered.wait(EVENT_TIMEOUT)
                 # Unlike bytes, an array can be weakly referenced.
                 data = array.array("B", bytes(range_[1] - range_[0]))
                 read.append(weakref.ref(data))
                 return data
 
+            entered.clear()
             fs.core.get_object = get_object
             f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4)
             try:
@@ -3878,7 +3884,11 @@ class TestS3FileSystem:
         fs.info.return_value.size = 64
         read = []
 
+        entered = threading.Event()
+
         def get_object(path, range_, **kwargs):
+            # Ends once the read waits, so that its wait is interrupted.
+            assert entered.wait(EVENT_TIMEOUT)
             # Unlike bytes, an array can be weakly referenced.
             data = array.array("B", bytes(range_[1] - range_[0]))
             read.append(weakref.ref(data))
@@ -3889,6 +3899,7 @@ class TestS3FileSystem:
         def interrupted_wait(futures, **kwargs):
             # As the wait of concurrent.futures, whose frame keeps the futures
             # in a set, interrupted once the reads have finished.
+            entered.set()
             futures = set(futures)
             assert not wait(futures, timeout=EVENT_TIMEOUT).not_done
             raise KeyboardInterrupt

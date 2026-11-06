@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import os
+import sys
 import threading
 import traceback
 import warnings
@@ -19,7 +20,7 @@ import weakref
 from abc import ABCMeta, abstractmethod
 from collections import deque
 from collections.abc import Callable, Iterable
-from concurrent.futures import ALL_COMPLETED, FIRST_EXCEPTION, CancelledError, Future, wait
+from concurrent.futures import CancelledError, Future, wait
 from concurrent.futures.thread import ThreadPoolExecutor
 from dataclasses import dataclass
 from multiprocessing import cpu_count
@@ -198,12 +199,16 @@ class _S3Batch(Generic[ItemT, T]):
         self.stop = threading.Event()
         self._failure: BaseException | None = None
         self._lock = threading.Lock()
+        # Set when every call has settled, or when a failure stops the
+        # batch, so that the waiting thread waits for one future, which also
+        # wakes it for a failure that is a cancellation.
+        self._ended: Future[None] = Future()
+        self._remaining = 0
+        self._submitting = True
         # The futures of the calls, each tracked before it is scheduled, so
         # that an interrupt while it is being scheduled still lets it be
         # cancelled.
         self.futures: list[Future[T]] = []
-        # The asyncio wrappers of the futures, by future.
-        self._waiters: dict[Future[T], asyncio.Future[T]] = {}
 
     def submit(self, executor: S3Executor, items: Iterable[ItemT]) -> None:
         """Submit a call for each item.
@@ -214,35 +219,34 @@ class _S3Batch(Generic[ItemT, T]):
         """
         with stop_retries_on(self.stop):
             for item in items:
+                with self._lock:
+                    self._remaining += 1
                 self.futures.append(Future())
-                # Records a failure that the executor reports without running
-                # the call, such as a failure to start a thread, when it is
-                # set, before the thread that sets it takes another call.
+                # Records the outcome when the future is set, before the
+                # thread that sets it takes another call, also of a call that
+                # the executor fails or cancels without running it.
                 self.futures[-1].add_done_callback(self._settled)
                 executor.submit_to(self.futures[-1], self._call, item)
+        with self._lock:
+            self._submitting = False
+            ended = self._remaining == 0
+        if ended:
+            self._end()
 
     def wait(self) -> None:
-        """Wait until every call has ended or a failure has stopped the batch."""
-        return_when = FIRST_EXCEPTION if self._stop_on_failure else ALL_COMPLETED
-        pending = set(self.futures)
-        while pending and not self._stopped_by_failure():
-            done, pending = wait(pending, return_when=return_when)
-            # Also here, since a future wakes its waiters before it runs the
-            # callback that records it.
-            for future in done:
-                self._settled(future)
+        """Wait until every call has ended or a failure has stopped the batch.
+
+        The states are also checked every second, since an interrupt of a
+        cancellation can skip the callbacks that end the wait.
+        """
+        while not self._ended.done() and not all(f.done() for f in self.futures):
+            wait([self._ended], timeout=1.0)
 
     async def wait_async(self) -> None:
         """Await until every call has ended or a failure has stopped the batch."""
-        return_when = asyncio.FIRST_EXCEPTION if self._stop_on_failure else asyncio.ALL_COMPLETED
-        for future in self.futures:
-            self._waiters[future] = S3Executor.waiter(future)
-        pending = set(self._waiters.values())
-        while pending and not self._stopped_by_failure():
-            pending = (await asyncio.wait(pending, return_when=return_when))[1]
-            for future in self.futures:
-                if future.done():
-                    self._settled(future)
+        ended = S3Executor.waiter(self._ended)
+        while not self._ended.done() and not all(f.done() for f in self.futures):
+            await asyncio.wait([ended], timeout=1.0)
 
     def result(self) -> S3MapResult[T]:
         """Return the outcomes of the calls, which have all ended, and drop their futures.
@@ -261,8 +265,10 @@ class _S3Batch(Generic[ItemT, T]):
         """
         for future in self.futures:
             if future.done():
-                # exception() would wait for a call that has not ended.
-                self._settled(future)
+                # Also here, since a future wakes its waiters before it runs
+                # the callback that records it; exception() would wait for a
+                # call that has not ended.
+                self._record(self._outcome(future))
         if self._stopped_by_failure():
             raise cast(BaseException, self._failure)
         result = S3MapResult(
@@ -302,8 +308,7 @@ class _S3Batch(Generic[ItemT, T]):
         """Stop the batch, cancel the calls that have not started, and await the others."""
         started = self._stop()
         try:
-            waiters = [self._waiters.get(f) or S3Executor.waiter(f) for f in started]
-            self._waiters.clear()
+            waiters = [S3Executor.waiter(future) for future in started]
             while not all(future.done() for future in started):
                 await asyncio.wait(waiters, timeout=1.0)
         finally:
@@ -321,6 +326,11 @@ class _S3Batch(Generic[ItemT, T]):
         """
         try:
             traceback.clear_frames(error.__traceback__)
+            # A further interrupt that stopped the drain propagates instead;
+            # the frames of the drain, which keep the futures, are in its
+            # traceback.
+            if (propagating := sys.exception()) is not None and propagating is not error:
+                traceback.clear_frames(propagating.__traceback__)
         finally:
             # Also if a further interrupt stopped the drain before its stop.
             self.stop.set()
@@ -334,7 +344,6 @@ class _S3Batch(Generic[ItemT, T]):
         keep their outcomes until the cyclic garbage collector frees them.
         """
         self.futures.clear()
-        self._waiters.clear()
 
     def _stop(self) -> list[Future[T]]:
         """Stop the batch and cancel the calls that have not started.
@@ -384,12 +393,25 @@ class _S3Batch(Generic[ItemT, T]):
             raise
 
     def _settled(self, future: Future[T]) -> None:
-        """Record the failure of a call whose future has been set.
+        """Record the failure of a call whose future has been set, as its done callback.
+
+        A done callback must not raise, which would skip the callbacks after
+        it, such as the one that wakes an asyncio map, so an error of the
+        ``counts`` predicate is the failure.
 
         Args:
             future: The future of the call.
         """
-        self._record(self._outcome(future))
+        try:
+            self._record(self._outcome(future))
+        except BaseException as e:
+            self._latch(e)
+        finally:
+            with self._lock:
+                self._remaining -= 1
+                ended = not self._submitting and self._remaining == 0
+            if ended:
+                self._end()
 
     def _record(self, error: BaseException | None) -> None:
         """Record the first failure that counts, and stop the batch with it if requested.
@@ -403,20 +425,31 @@ class _S3Batch(Generic[ItemT, T]):
         """
         if error is None:
             return
-        if isinstance(error, Exception) and self._counts is not None:
-            try:
-                if not self._counts(error):
-                    return
-            except BaseException as e:
-                # A done callback must not raise, which would skip the
-                # callbacks after it; the error of the predicate is the
-                # failure.
-                error = e
+        if isinstance(error, Exception) and self._counts is not None and not self._counts(error):
+            return
+        self._latch(error)
+
+    def _latch(self, error: BaseException) -> None:
+        """Record a failure unless one was recorded, and stop the batch with it if requested.
+
+        Args:
+            error: The failure.
+        """
         with self._lock:
-            if self._failure is None:
-                self._failure = error
-                if self._stop_on_failure:
-                    self.stop.set()
+            if self._failure is not None:
+                return
+            self._failure = error
+            if self._stop_on_failure:
+                self.stop.set()
+        if self._stop_on_failure:
+            self._end()
+
+    def _end(self) -> None:
+        """End the wait of the waiting thread, once."""
+        with self._lock:
+            if self._ended.done():
+                return
+            self._ended.set_result(None)
 
 
 class S3Executor(metaclass=ABCMeta):
