@@ -14,7 +14,7 @@ import threading
 import time
 import traceback
 import weakref
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, wait
 from typing import Any, cast
 from unittest import mock
 
@@ -1143,6 +1143,41 @@ class TestS3Executor:
 
         with Executor() as executor:
             assert executor.map(str, [1, 2]).outcomes == ["1", "2"]
+
+    @pytest.mark.parametrize("rejection", ["failed", "cancelled"])
+    def test_map_executor_rejection(self, rejection):
+        # GH-1332: a call that the executor fails or cancels without running
+        # it counts as a failure: it stops the batch, or is the failure of a
+        # batch without stop_on_failure, instead of being returned as a value.
+        class Rejecting(S3Executor):
+            def __init__(self):
+                self._pool = ThreadPoolExecutor(2)
+                self.calls = 0
+
+            @override
+            def submit(self, fn, *args, **kwargs):
+                self.calls += 1
+                if self.calls != 2:
+                    return self._pool.submit(contextvars.copy_context().run, fn, *args, **kwargs)
+                future: Future[Any] = Future()
+                if rejection == "cancelled":
+                    future.cancel()
+                else:
+                    future.set_running_or_notify_cancel()
+                    future.set_exception(RuntimeError("cannot start a thread"))
+                return future
+
+            @override
+            def shutdown(self, wait=True):
+                self._pool.shutdown(wait=wait)
+
+        expected = CancelledError if rejection == "cancelled" else RuntimeError
+        with Rejecting() as executor, pytest.raises(expected):
+            executor.map(str, range(3))
+        with Rejecting() as executor:
+            result = executor.map(str, range(3), stop_on_failure=False)
+        assert isinstance(result.failure, expected)
+        assert isinstance(result.outcomes[1], expected)
 
     def test_map_failure_stops_batch(self):
         # GH-1332 (B2): a failure starts no further call, stops the retries

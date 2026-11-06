@@ -1188,34 +1188,6 @@ class S3FileSystem(AbstractFileSystem):
         finally:
             executor.shutdown(wait=False)
 
-    async def _map_async(
-        self,
-        fn: Callable[[ItemT], T],
-        items: Iterable[ItemT],
-        max_workers: int | None = None,
-        **kwargs: Any,
-    ) -> S3MapResult[T]:
-        """Run the parallel requests of an asyncio operation in a scope of their own.
-
-        See :meth:`_map` and
-        :meth:`S3Executor.map_async() <pyathena.filesystem.s3_executor.S3Executor.map_async>`.
-
-        Args:
-            fn: The request to run for each item.
-            items: The items.
-            max_workers: Maximum number of parallel requests. Defaults to
-                ``self.max_workers``.
-            **kwargs: The options of ``S3Executor.map_async()``.
-
-        Returns:
-            The outcomes of the requests.
-        """
-        executor = self._create_executor(max_workers=max_workers or self.max_workers)
-        try:
-            return await executor.map_async(fn, items, **kwargs)
-        finally:
-            executor.shutdown(wait=False)
-
     def _delete_objects(self, paths: list[str], max_workers: int | None = None, **kwargs) -> None:
         """Delete objects with DeleteObjects requests grouped by bucket.
 

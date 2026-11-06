@@ -222,7 +222,9 @@ class _S3Batch(Generic[ItemT, T]):
         return_when = FIRST_EXCEPTION if self._stop_on_failure else ALL_COMPLETED
         pending = set(self.futures)
         while pending and not self._stopped_by_failure():
-            pending = wait(pending, return_when=return_when).not_done
+            done, pending = wait(pending, return_when=return_when)
+            for future in done:
+                self._record(self._outcome(future))
 
     async def wait_async(self) -> None:
         """Await until every call has ended or a failure has stopped the batch."""
@@ -231,7 +233,9 @@ class _S3Batch(Generic[ItemT, T]):
             self._waiters[future] = S3Executor.waiter(future)
         pending = set(self._waiters.values())
         while pending and not self._stopped_by_failure():
-            pending = (await asyncio.wait(pending, return_when=return_when))[1]
+            done, pending = await asyncio.wait(pending, return_when=return_when)
+            for waiter in done:
+                self._record(CancelledError() if waiter.cancelled() else waiter.exception())
 
     def result(self) -> S3MapResult[T]:
         """Return the outcomes of the calls, which have all ended.
@@ -245,9 +249,22 @@ class _S3Batch(Generic[ItemT, T]):
         if self._stopped_by_failure():
             raise cast(BaseException, self._failure)
         return S3MapResult(
-            [e if (e := f.exception()) is not None else f.result() for f in self.futures],
+            [e if (e := self._outcome(f)) is not None else f.result() for f in self.futures],
             self._failure,
         )
+
+    @staticmethod
+    def _outcome(future: Future[Any]) -> BaseException | None:
+        """Return the failure of a call that has ended, or None if it succeeded.
+
+        Args:
+            future: The future of the call.
+
+        Returns:
+            Its exception, a ``CancelledError`` if the executor cancelled it,
+            or None.
+        """
+        return CancelledError() if future.cancelled() else future.exception()
 
     def drain(self) -> None:
         """Stop the batch, cancel the calls that have not started, and wait for the others.
@@ -286,6 +303,8 @@ class _S3Batch(Generic[ItemT, T]):
         try:
             traceback.clear_frames(error.__traceback__)
         finally:
+            # Also if a further interrupt stopped the drain before its stop.
+            self.stop.set()
             self.futures.clear()
             self._waiters.clear()
 
@@ -333,13 +352,28 @@ class _S3Batch(Generic[ItemT, T]):
         try:
             return self._fn(item)
         except BaseException as e:
-            if not isinstance(e, Exception) or self._counts is None or self._counts(e):
-                with self._lock:
-                    if self._failure is None:
-                        self._failure = e
-                        if self._stop_on_failure:
-                            self.stop.set()
+            self._record(e)
             raise
+
+    def _record(self, error: BaseException | None) -> None:
+        """Record the first failure that counts, and stop the batch with it if requested.
+
+        A call records its own failure in its thread; the waiting thread also
+        records those that the executor reports without running the call,
+        such as a failure to start a thread.
+
+        Args:
+            error: The failure of a call, or None if it succeeded.
+        """
+        if error is None or (
+            isinstance(error, Exception) and self._counts is not None and not self._counts(error)
+        ):
+            return
+        with self._lock:
+            if self._failure is None:
+                self._failure = error
+                if self._stop_on_failure:
+                    self.stop.set()
 
 
 class S3Executor(metaclass=ABCMeta):

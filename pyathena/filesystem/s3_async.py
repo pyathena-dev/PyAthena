@@ -16,6 +16,7 @@ import logging
 import mimetypes
 import os
 import warnings
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future, wait
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, cast
@@ -29,7 +30,7 @@ from fsspec.utils import check_contained
 from pyathena.aio.util import create_in_thread
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem, S3FileTarget
 from pyathena.filesystem.s3_core import S3Core
-from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool
+from pyathena.filesystem.s3_executor import ItemT, S3Executor, S3MapResult, S3ThreadPool, T
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3Metadata,
@@ -383,15 +384,47 @@ class AioS3FileSystem(AsyncFileSystem):
             OSError: If S3 could not delete some of the objects.
         """
         batches, params = self._sync_fs._delete_batches(paths, **kwargs)
+        if not batches:
+            return
         # At most max_workers requests at once, as S3FileSystem.rm() sends,
         # so that a large deletion does not queue ahead of the requests of
         # the files that share the request pool.
-        results = await self._sync_fs._map_async(
+        results = await self._map_async(
             functools.partial(self._sync_fs._delete_batch, **params),
             batches,
             stop_on_failure=False,
         )
         self._sync_fs._raise_delete_errors(results.outcomes)
+
+    async def _map_async(
+        self,
+        fn: Callable[[ItemT], T],
+        items: Iterable[ItemT],
+        max_workers: int | None = None,
+        **kwargs: Any,
+    ) -> S3MapResult[T]:
+        """Run the parallel requests of an operation in a scope of their own.
+
+        As :meth:`S3FileSystem._map`, with
+        :meth:`S3Executor.map_async() <pyathena.filesystem.s3_executor.S3Executor.map_async>`.
+
+        Args:
+            fn: The request to run for each item.
+            items: The items.
+            max_workers: Maximum number of parallel requests. Defaults to the
+                ``max_workers`` of the internal ``S3FileSystem``.
+            **kwargs: The options of ``S3Executor.map_async()``.
+
+        Returns:
+            The outcomes of the requests.
+        """
+        executor = self._sync_fs._create_executor(
+            max_workers=max_workers or self._sync_fs.max_workers
+        )
+        try:
+            return await executor.map_async(fn, items, **kwargs)
+        finally:
+            executor.shutdown(wait=False)
 
     async def _mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
         """Move files from one S3 location to another.
@@ -720,7 +753,7 @@ class AioS3FileSystem(AsyncFileSystem):
             raise
 
         # At most max_workers copies at once in the request pool.
-        await self._sync_fs._map_async(
+        await self._map_async(
             lambda name: self.core.copy_object_annotation(
                 name,
                 plan.source,
