@@ -206,12 +206,14 @@ with fs.open("s3://YOUR_S3_BUCKET/path/to/data.csv", "wb", ContentType="text/csv
     f.write(b"col1\n1\n")
 ```
 
-`info` and `exists` accept `ExpectedBucketOwner`, `RequestPayer`, and the
-`SSECustomer*` parameters of an object encrypted with a customer-provided key (SSE-C)
-as keyword arguments, and ignore other request parameters. The lookups of the object
-by `open`, and the existence check of `pipe` with `mode="create"`, send these
+`info`, `exists`, `find`, `glob`, and `expand_path` accept `ExpectedBucketOwner`,
+`RequestPayer`, and the `SSECustomer*` parameters of an object encrypted with a
+customer-provided key (SSE-C) as keyword arguments, and ignore other request
+parameters; each request receives those that its operation accepts. The lookups of the
+object by `open`, and the existence check of `pipe` with `mode="create"`, send these
 parameters of the file or the write. A lookup with them uses only the cached results of
-lookups with the same values, not cached listings.
+lookups with the same values, not cached listings, and a listing with them is not
+cached.
 
 ```python
 sse_c = {"SSECustomerAlgorithm": "AES256", "SSECustomerKey": YOUR_32_BYTE_KEY}
@@ -219,13 +221,14 @@ with fs.open("s3://YOUR_S3_BUCKET/path/to/encrypted.csv", "rb", **sse_c) as f:
     data = f.read()
 ```
 
-The lookups of the sources of `cp_file`, `copy`, and `mv`, and of the object of
-`setxattr`, send the source's parameters of the copy: `RequestPayer`,
-`ExpectedSourceBucketOwner` as `ExpectedBucketOwner`, and the `CopySourceSSECustomer*`
-parameters as `SSECustomer*`. `mv` deletes the copied sources with `RequestPayer` and
-that expected bucket owner. The requests that expand the paths of a recursive or glob
-`copy` or `mv`, or of a path with a version ID in a recursive one, and the checks of
-their destinations do not send these parameters.
+`cp_file`, `copy`, `mv`, and `setxattr` read their sources with the source's
+parameters of the copy: `RequestPayer`, `ExpectedSourceBucketOwner` as
+`ExpectedBucketOwner`, and the `CopySourceSSECustomer*` parameters as `SSECustomer*`.
+The expansion of the source paths of `copy` and `mv`, and the lookups of the sources,
+send them, and the lookup of a destination directory sends the lookup parameters of the
+copy (`RequestPayer`, `ExpectedBucketOwner`, and the `SSECustomer*` parameters of the
+destination). `mv` deletes the copied sources with `RequestPayer` and the source's
+expected bucket owner.
 
 ```python
 fs.cp_file(

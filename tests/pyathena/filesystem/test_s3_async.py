@@ -38,8 +38,9 @@ from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
+    COPY_PARAMS,
+    COPY_WITH_PARAMS_CALLS,
     EVENT_TIMEOUT,
-    MOVE_SOURCE_PARAMS,
     MULTIPART_COPY_BLOCK_SIZE,
     MULTIPART_COPY_KWARGS,
     ThrottledOperation,
@@ -52,7 +53,7 @@ from tests.pyathena.util import (
     run_bounded,
     run_in_forked_child,
     shutdown_bounded,
-    stub_move_with_source_params,
+    stub_copy_with_params,
     stub_multipart_copy,
     wait_until,
 )
@@ -229,9 +230,11 @@ class TestAioS3FileSystem:
             await self._multipart_copy(release_blocked_waits, fs, fail_annotation=True)
         assert [c.args[0] for c in copy_annotation.call_args_list] == ["a1"]
 
-    def test_mv_source_lookup_and_delete_params(self):
-        # GH-1333: see stub_move_with_source_params. max_workers=1 runs the
-        # copies, which _mv() gathers, in the order of the stubbed requests.
+    @pytest.mark.parametrize("case", list(COPY_WITH_PARAMS_CALLS))
+    def test_copy_and_mv_params(self, case):
+        # GH-1333: see TestS3FileSystem.test_copy_and_mv_params. max_workers=1
+        # runs the copies, which _copy() and _mv() gather, in the order of the
+        # stubbed requests.
         fs = AioS3FileSystem(
             key="dummy",
             secret="dummy",
@@ -239,13 +242,10 @@ class TestAioS3FileSystem:
             max_workers=1,
             skip_instance_cache=True,
         )
+        method, path1, path2, kwargs = COPY_WITH_PARAMS_CALLS[case]
         with Stubber(fs._sync_fs._client) as stubber:
-            stub_move_with_source_params(stubber)
-            fs.mv(
-                ["s3://bucket/a", "s3://bucket/a/x"],
-                ["s3://bucket/c", "s3://bucket/c"],
-                **MOVE_SOURCE_PARAMS,
-            )
+            stub_copy_with_params(stubber, case)
+            getattr(fs, method)(path1, path2, **kwargs, **COPY_PARAMS)
             stubber.assert_no_pending_responses()
 
     @pytest.mark.asyncio
@@ -1851,7 +1851,7 @@ class TestAioS3FileSystem:
     @pytest.mark.asyncio
     async def test_get_version(self, tmp_path, destination, expected):
         fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
-        fs._sync_fs.isdir = mock.MagicMock(return_value=False)
+        fs._sync_fs._isdir = mock.MagicMock(return_value=False)
         fs._get_file = mock.AsyncMock()
 
         lpath = f"{tmp_path}/" if destination == "directory" else tmp_path / "out.bin"

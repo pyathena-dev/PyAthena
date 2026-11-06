@@ -506,13 +506,15 @@ class S3FileSystem(AbstractFileSystem):
         next_token: str | None = None,
         max_keys: int | None = None,
         refresh: bool = False,
+        lookup_kwargs: Mapping[str, Any] | None = None,
     ) -> list[S3Object]:
         """List the objects and common prefixes under a path.
 
         A complete, non-empty listing of the path is cached under
         ``(path, delimiter)``, and an empty one evicts it.
         ``invalidate_cache`` drops it when the path or a path under it is
-        invalidated.
+        invalidated. A listing with lookup parameters is neither read from
+        nor written to the cache, whose listings are made without them.
 
         Args:
             path: The bucket or directory path to list.
@@ -524,12 +526,15 @@ class S3FileSystem(AbstractFileSystem):
                 the cache.
             max_keys: Maximum number of keys per ListObjectsV2 request.
             refresh: If True, bypass the cache and list from S3.
+            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
+                to send with the requests.
 
         Returns:
             The listed directories and files.
         """
         s3_path = S3Path.parse(path)
-        use_cache = not prefix and not next_token
+        lookup_kwargs = lookup_kwargs or {}
+        use_cache = not prefix and not next_token and not lookup_kwargs
         if s3_path.key:
             prefix = f"{s3_path.key}/{prefix if prefix else ''}"
 
@@ -545,6 +550,7 @@ class S3FileSystem(AbstractFileSystem):
             delimiter=delimiter,
             max_keys=max_keys,
             continuation_token=next_token,
+            **self.core.operation_params("list_objects_v2", lookup_kwargs),
         ):
             files.extend(
                 self._directory_object(
@@ -829,8 +835,9 @@ class S3FileSystem(AbstractFileSystem):
             maxdepth: Maximum number of levels to descend, at least 1
                 (None for unlimited).
             withdirs: Whether to include directories in the result.
-            **kwargs: Additional arguments including ``prefix`` and
-                ``refresh``, as described in ``find``.
+            **kwargs: Additional arguments including ``prefix``,
+                ``refresh`` and the lookup parameters, as described in
+                ``find``.
 
         Returns:
             The objects found, and the directories if ``withdirs`` is True.
@@ -846,15 +853,22 @@ class S3FileSystem(AbstractFileSystem):
         s3_path = S3Path.parse(path)
         prefix = kwargs.pop("prefix", "")
         refresh = kwargs.pop("refresh", False)
+        lookup_kwargs = self._get_lookup_kwargs(kwargs)
 
         if maxdepth is not None:
             # The entries listed with the prefix lie as many levels further
             # below the path as the prefix has slashes.
             files = self._find_levels(
-                path, maxdepth - prefix.count("/"), prefix=prefix, refresh=refresh
+                path,
+                maxdepth - prefix.count("/"),
+                prefix=prefix,
+                refresh=refresh,
+                lookup_kwargs=lookup_kwargs,
             )
         else:
-            files = self._ls_dirs(path, prefix=prefix, delimiter="", refresh=refresh)
+            files = self._ls_dirs(
+                path, prefix=prefix, delimiter="", refresh=refresh, lookup_kwargs=lookup_kwargs
+            )
             # S3 doesn't return directory entries without a delimiter, so the
             # directories are derived from the listed keys, below the last
             # slash of the prefix, as with maxdepth.
@@ -873,7 +887,7 @@ class S3FileSystem(AbstractFileSystem):
             # As in fsspec, the path itself is returned if it is an object,
             # or with withdirs if it is a directory.
             try:
-                files = [self.info(path, refresh=refresh)]
+                files = [self.info(path, refresh=refresh, **lookup_kwargs)]
             except FileNotFoundError:
                 files = []
 
@@ -882,7 +896,12 @@ class S3FileSystem(AbstractFileSystem):
         return files
 
     def _find_levels(
-        self, path: str, maxdepth: int, prefix: str = "", refresh: bool = False
+        self,
+        path: str,
+        maxdepth: int,
+        prefix: str = "",
+        refresh: bool = False,
+        lookup_kwargs: Mapping[str, Any] | None = None,
     ) -> list[S3Object]:
         """List the entries below a path level by level with ``Delimiter="/"``.
 
@@ -892,6 +911,8 @@ class S3FileSystem(AbstractFileSystem):
             prefix: Key prefix, relative to the path, to filter the first
                 level by.
             refresh: If True, bypass the cache and list from S3.
+            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
+                to send with the requests.
 
         Returns:
             The objects and directories found.
@@ -899,10 +920,16 @@ class S3FileSystem(AbstractFileSystem):
         if maxdepth < 1:
             return []
         result: list[S3Object] = []
-        for item in self._ls_dirs(path, prefix=prefix, delimiter="/", refresh=refresh):
+        for item in self._ls_dirs(
+            path, prefix=prefix, delimiter="/", refresh=refresh, lookup_kwargs=lookup_kwargs
+        ):
             result.append(item)
             if item.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
-                result.extend(self._find_levels(item.name, maxdepth - 1, refresh=refresh))
+                result.extend(
+                    self._find_levels(
+                        item.name, maxdepth - 1, refresh=refresh, lookup_kwargs=lookup_kwargs
+                    )
+                )
         return result
 
     def find(
@@ -935,6 +962,11 @@ class S3FileSystem(AbstractFileSystem):
                     With withdirs, the directories above the prefix, such as
                     ``sub`` for ``sub/deep/``, are not included.
                 refresh: If True, bypass the cache and list from S3.
+                ExpectedBucketOwner, RequestPayer, SSECustomerAlgorithm,
+                SSECustomerKey, SSECustomerKeyMD5: The lookup parameters
+                described in :meth:`info`. Each request receives those that
+                its operation accepts, and cached listings are not used.
+                Other request parameters are ignored.
 
         Returns:
             Dictionary mapping paths to S3Objects (if detail=True) or
@@ -966,7 +998,9 @@ class S3FileSystem(AbstractFileSystem):
             path: S3 path, glob pattern, or list of them.
             recursive: Whether to include the paths below the directories.
             maxdepth: Maximum depth of the expansion, at least 1.
-            **kwargs: Additional arguments passed to ``glob`` and ``find``.
+            **kwargs: Additional arguments passed to ``glob`` and ``find``,
+                including the lookup parameters (see :meth:`find`), which the
+                existence checks of the paths also receive.
 
         Returns:
             The sorted matching paths.
@@ -978,7 +1012,8 @@ class S3FileSystem(AbstractFileSystem):
         if maxdepth is not None and maxdepth < 1:
             raise ValueError("maxdepth must be at least 1")
         versions, others = self._split_version_paths(path)
-        out = {p for p in versions if not recursive or self.exists(p)}
+        lookup_kwargs = self._get_lookup_kwargs(kwargs)
+        out = {p for p in versions if not recursive or self.exists(p, **lookup_kwargs)}
         if others:
             try:
                 out.update(
@@ -1456,6 +1491,7 @@ class S3FileSystem(AbstractFileSystem):
                 recursive=recursive,
                 maxdepth=maxdepth,
                 source_params=source_params,
+                destination_params=kwargs,
             )
             if self._copy_file(p1, p2, **kwargs)
         ]
@@ -1468,6 +1504,7 @@ class S3FileSystem(AbstractFileSystem):
         recursive: bool = False,
         maxdepth: int | None = None,
         source_params: Mapping[str, Any] | None = None,
+        destination_params: Mapping[str, Any] | None = None,
     ) -> list[tuple[str, str]]:
         """Pair and check the paths of a move (see :meth:`S3PathPairing.move_pairs`).
 
@@ -1478,8 +1515,11 @@ class S3FileSystem(AbstractFileSystem):
             recursive: Whether to include the contents of the directories.
             maxdepth: Maximum depth of the expansion.
             source_params: The parameters of the requests that read the
-                sources (see :meth:`S3Core.copy_source_params`), sent with
-                the lookups of the sources.
+                sources (see :meth:`S3Core.copy_source_params`), whose lookup
+                parameters the expansion and the lookups of the sources
+                receive.
+            destination_params: The parameters of the copies, whose lookup
+                parameters the lookup of the destination receives.
 
         Returns:
             The sources and destinations that are moved.
@@ -1489,7 +1529,9 @@ class S3FileSystem(AbstractFileSystem):
             OSError: If bucket versioning cannot be read.
         """
         pairing = S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
-        pairs = self._copy_pairs(pairing)
+        pairs = self._copy_pairs(
+            pairing, source_params=source_params, destination_params=destination_params
+        )
         paths = {p: S3Path.parse(p) for pair in pairs for p in pair}
         unversioned = {p.name for p in paths.values() if not p.version_id}
         buckets = {
@@ -1513,7 +1555,11 @@ class S3FileSystem(AbstractFileSystem):
         )
 
     def _copy_pairs(
-        self, pairing: S3PathPairing, isdir: Callable[[str], bool] | None = None
+        self,
+        pairing: S3PathPairing,
+        isdir: Callable[[str], bool] | None = None,
+        source_params: Mapping[str, Any] | None = None,
+        destination_params: Mapping[str, Any] | None = None,
     ) -> list[tuple[str, str]]:
         """Expand and pair the paths of a copy (see :meth:`S3PathPairing.copy_pairs`).
 
@@ -1522,25 +1568,53 @@ class S3FileSystem(AbstractFileSystem):
         Args:
             pairing: The paths of the copy.
             isdir: Whether the destination is a directory, by default
-                ``self.isdir``; ``get()`` passes the local filesystem's.
+                ``self.isdir`` with ``destination_params``; ``get()`` passes
+                the local filesystem's.
+            source_params: The parameters of the requests that read the
+                sources (see :meth:`S3Core.copy_source_params`), whose lookup
+                parameters the expansion and the lookups of the sources
+                receive.
+            destination_params: The parameters of the copy, whose lookup
+                parameters the lookup of the destination receives.
 
         Returns:
             The sources and their destinations.
         """
         if not pairing.expands:
             return pairing.copy_pairs()
+        source_lookup = self._get_lookup_kwargs(source_params or {})
         sources = self.expand_path(
-            pairing.path1, recursive=pairing.recursive, maxdepth=pairing.maxdepth
+            pairing.path1, recursive=pairing.recursive, maxdepth=pairing.maxdepth, **source_lookup
         )
         if pairing.skips_directories:
-            sources = [p for p in sources if not (trailing_sep(p) or self.isdir(p))]
+            sources = [p for p in sources if not (trailing_sep(p) or self._isdir(p, source_lookup))]
+        destination_lookup = self._get_lookup_kwargs(destination_params or {})
         destination_is_dir = (
             # A string, as looks_up_destination checks.
-            (isdir or self.isdir)(cast(str, pairing.path2))
+            (isdir or (lambda p: self._isdir(p, destination_lookup)))(cast(str, pairing.path2))
             if sources and pairing.looks_up_destination
             else None
         )
         return pairing.copy_pairs(sources, destination_is_dir)
+
+    def _isdir(self, path: str, lookup_kwargs: Mapping[str, Any]) -> bool:
+        """Check whether a path is a directory, as fsspec's ``isdir()`` does.
+
+        Args:
+            path: S3 path.
+            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
+                to send with the requests.
+
+        Returns:
+            True if the path is a directory; False if it is an object, or
+            the lookup fails.
+        """
+        try:
+            return bool(
+                self.info(path, **lookup_kwargs).type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
+            )
+        except OSError:
+            return False
 
     def copy(self, path1, path2, recursive=False, maxdepth=None, on_error=None, **kwargs) -> None:
         """Copy files within S3.
@@ -1560,11 +1634,25 @@ class S3FileSystem(AbstractFileSystem):
                 default ``"ignore"`` with ``recursive`` and ``"raise"``
                 otherwise.
             **kwargs: Additional S3 copy parameters passed to ``cp_file()``.
+                The expansion of the paths and the lookups of the sources
+                receive their lookup parameters as :meth:`cp_file` maps them,
+                and the lookup of the destination receives those of the
+                destination.
         """
         sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
-        if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
+        source_params = self.core.copy_source_params(kwargs)
+        if isinstance(path2, str) and (
+            any(S3Path.has_version_id(p) for p in sources)
+            or source_params
+            or self._get_lookup_kwargs(kwargs)
+        ):
+            # Expanded and paired here, so that the requests receive the
+            # parameters of the source or of the destination that they
+            # read; fsspec expands the paths with those of the copy.
             pairs = self._copy_pairs(
-                S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
+                S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth),
+                source_params=source_params,
+                destination_params=kwargs,
             )
             if not pairs:
                 return

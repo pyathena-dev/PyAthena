@@ -1438,78 +1438,148 @@ MULTIPART_COPY_KWARGS = {
 }
 
 
-# The CopyObject parameters of a move from an SSE-C, requester-pays source
-# with an expected owner (GH-1333).
-MOVE_SOURCE_PARAMS = {
+# The CopyObject parameters of a copy or move from an SSE-C, requester-pays
+# source with an expected owner to a destination with another expected owner
+# (GH-1333), and the lookup parameters of the source and of the destination.
+COPY_PARAMS = {
     "CopySourceSSECustomerAlgorithm": "AES256",
     "CopySourceSSECustomerKey": "k" * 32,
     "RequestPayer": "requester",
     "ExpectedSourceBucketOwner": "111111111111",
+    "ExpectedBucketOwner": "222222222222",
 }
+_SOURCE_LOOKUP = {
+    "SSECustomerAlgorithm": "AES256",
+    "SSECustomerKey": "k" * 32,
+    "RequestPayer": "requester",
+    "ExpectedBucketOwner": "111111111111",
+}
+_SOURCE_LISTING = {"RequestPayer": "requester", "ExpectedBucketOwner": "111111111111"}
+_DESTINATION_LOOKUP = {"RequestPayer": "requester", "ExpectedBucketOwner": "222222222222"}
 
 
-def stub_move_with_source_params(stubber):
-    """Queue the requests of a move of bucket/a and bucket/a/x onto bucket/c.
-
-    The move is made with MOVE_SOURCE_PARAMS, and no object exists at
-    bucket/a. Because bucket/a has bucket/a/x below it and the same
-    destination, the move depends on whether bucket/a is an object; the copy
-    of bucket/a looks it up again, and skips it as a directory. The lookups
-    of the sources receive the parameters that authorize the access to the
-    source, and the deletion of the copied source those that DeleteObjects
-    accepts.
-
-    Args:
-        stubber: The Stubber of the S3 client.
-    """
-    lookup = {
-        "SSECustomerAlgorithm": "AES256",
-        "SSECustomerKey": "k" * 32,
-        "RequestPayer": "requester",
-        "ExpectedBucketOwner": "111111111111",
-    }
-    for _ in range(2):
-        stubber.add_client_error(
-            "head_object",
-            service_error_code="404",
-            http_status_code=404,
-            expected_params={"Bucket": "bucket", "Key": "a", **lookup},
-        )
+def _stub_missing(stubber, key, lookup, listing, listed=None):
+    # A HeadObject that finds no object at the key, and the listing that
+    # looks for keys below it.
+    stubber.add_client_error(
+        "head_object",
+        service_error_code="404",
+        http_status_code=404,
+        expected_params={"Bucket": "bucket", "Key": key, **lookup},
+    )
     stubber.add_response(
         "list_objects_v2",
-        {"KeyCount": 1, "Contents": [{"Key": "a/x"}]},
+        {"KeyCount": 1, "Contents": [{"Key": listed}]} if listed else {"KeyCount": 0},
         {
             "Bucket": "bucket",
-            "Prefix": "a/",
+            "Prefix": f"{key}/",
             "Delimiter": "/",
             "MaxKeys": 1,
-            "RequestPayer": "requester",
-            "ExpectedBucketOwner": "111111111111",
+            **listing,
         },
     )
-    stubber.add_response(
-        "head_object", {"ContentLength": 1}, {"Bucket": "bucket", "Key": "a/x", **lookup}
-    )
+
+
+def _stub_copy(stubber, source, destination):
     stubber.add_response(
         "copy_object",
         {},
         {
-            "CopySource": {"Bucket": "bucket", "Key": "a/x"},
+            "CopySource": {"Bucket": "bucket", "Key": source},
             "Bucket": "bucket",
-            "Key": "c",
-            **MOVE_SOURCE_PARAMS,
+            "Key": destination,
+            **COPY_PARAMS,
         },
     )
+
+
+def _stub_delete(stubber, key):
     stubber.add_response(
         "delete_objects",
         {},
         {
             "Bucket": "bucket",
-            "Delete": {"Objects": [{"Key": "a/x"}], "Quiet": True},
+            "Delete": {"Objects": [{"Key": key}], "Quiet": True},
             "RequestPayer": "requester",
             "ExpectedBucketOwner": "111111111111",
         },
     )
+
+
+def stub_copy_with_params(stubber, case):
+    """Queue the requests of a copy or move made with COPY_PARAMS.
+
+    Every request that reads a source receives the source's lookup
+    parameters, the listings of the sources their RequestPayer and expected
+    owner, every lookup of the destination the destination's lookup
+    parameters, and the deletion of a moved source those that DeleteObjects
+    accepts.
+
+    Args:
+        stubber: The Stubber of the S3 client.
+        case: ``"copy"`` or ``"mv"`` of the object bucket/a to the missing
+            bucket/b; ``"copy-recursive"`` of the directory bucket/d, which
+            holds bucket/d/x, to the missing bucket/e; or ``"mv-lists"``, a
+            move of bucket/a and bucket/a/x onto bucket/c, given as lists, of
+            which bucket/a is no object. Because bucket/a has bucket/a/x below
+            it and the same destination, that move depends on whether
+            bucket/a is an object; its copy looks it up again, and skips it as
+            a directory.
+    """
+    if case in {"copy", "mv"}:
+        stubber.add_response(
+            "head_object", {"ContentLength": 1}, {"Bucket": "bucket", "Key": "a", **_SOURCE_LOOKUP}
+        )
+        _stub_missing(stubber, "b", _DESTINATION_LOOKUP, _DESTINATION_LOOKUP)
+        _stub_copy(stubber, "a", "b")
+        if case == "mv":
+            _stub_delete(stubber, "a")
+    elif case == "copy-recursive":
+        stubber.add_response(
+            "list_objects_v2",
+            {"KeyCount": 1, "Contents": [{"Key": "d/x"}]},
+            {"Bucket": "bucket", "Prefix": "d/", "Delimiter": "", **_SOURCE_LISTING},
+        )
+        _stub_missing(stubber, "e", _DESTINATION_LOOKUP, _DESTINATION_LOOKUP)
+        # The directory is among the expanded sources, and is skipped.
+        _stub_missing(stubber, "d", _SOURCE_LOOKUP, _SOURCE_LISTING, listed="d/x")
+        stubber.add_response(
+            "head_object",
+            {"ContentLength": 1},
+            {"Bucket": "bucket", "Key": "d/x", **_SOURCE_LOOKUP},
+        )
+        _stub_copy(stubber, "d/x", "e/x")
+    elif case == "mv-lists":
+        stubber.add_client_error(
+            "head_object",
+            service_error_code="404",
+            http_status_code=404,
+            expected_params={"Bucket": "bucket", "Key": "a", **_SOURCE_LOOKUP},
+        )
+        _stub_missing(stubber, "a", _SOURCE_LOOKUP, _SOURCE_LISTING, listed="a/x")
+        stubber.add_response(
+            "head_object",
+            {"ContentLength": 1},
+            {"Bucket": "bucket", "Key": "a/x", **_SOURCE_LOOKUP},
+        )
+        _stub_copy(stubber, "a/x", "c")
+        _stub_delete(stubber, "a/x")
+    else:
+        raise ValueError(case)
+
+
+# The calls of stub_copy_with_params by case.
+COPY_WITH_PARAMS_CALLS = {
+    "copy": ("copy", "s3://bucket/a", "s3://bucket/b", {}),
+    "mv": ("mv", "s3://bucket/a", "s3://bucket/b", {}),
+    "copy-recursive": ("copy", "s3://bucket/d", "s3://bucket/e", {"recursive": True}),
+    "mv-lists": (
+        "mv",
+        ["s3://bucket/a", "s3://bucket/a/x"],
+        ["s3://bucket/c", "s3://bucket/c"],
+        {},
+    ),
+}
 
 
 def _annotation(name):
