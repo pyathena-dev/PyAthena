@@ -102,12 +102,12 @@ uv run --env-file .env pytest -n 1 tests/pyathena/test_cursor.py -v
 
 ### Markdown Lint
 
-`docs/**/*.md`, `benchmarks/*.md`, `scripts/**/*.md`, `cloudformation/**/*.md`, and project-root `*.md` files are linted with [markdownlint-cli2](https://github.com/DavidAnson/markdownlint-cli2). The config lives at `.markdownlint-cli2.jsonc`. CI runs lint + Sphinx build on PRs that touch docs (`.github/workflows/docs-lint.yaml`).
+`docs/**/*.md`, `benchmarks/*.md`, `scripts/**/*.md`, `cloudformation/**/*.md`, and project-root `*.md` files are linted with [rumdl](https://github.com/rvben/rumdl). The config lives at `.rumdl.toml`. CI runs lint + Sphinx build on PRs that touch docs (`.github/workflows/docs-lint.yaml`).
 
-`markdownlint-cli2` is pinned in `.mise.toml`, so [`mise`](https://mise.jdx.dev/) installs the exact version used in CI. Run locally:
+`rumdl` is pinned in `.mise.toml`, so [`mise`](https://mise.jdx.dev/) installs the exact version used in CI. Run locally:
 
 ```bash
-mise install          # one-time: installs markdownlint-cli2
+mise install          # one-time: installs rumdl
 just docs lint        # check
 just docs format      # auto-fix what's possible
 just docs build       # build the Sphinx site under docs/_build/html

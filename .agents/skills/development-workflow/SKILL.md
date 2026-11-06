@@ -51,7 +51,7 @@ Prefer existing fixtures and integration classes; do not build a parallel mock f
 | SQLAlchemy dialect | Relevant PyAthena tests in `tests/pyathena/sqlalchemy/` plus `just test sqla`; also `tests/pyathena/aio/sqlalchemy/` and `just test sqla-async` for shared reflection or async paths. Both PyAthena directories are included in `just test pyathena`. |
 | Filesystem | Affected S3 filesystem tests, including listing and path boundaries |
 | Documentation | `just docs lint`; `just docs build` for rendered documentation changes |
-| Agent skills | `just docs lint` and `mise exec -- markdownlint-cli2 '.agents/skills/**/*.md'`; inspect links and walk through realistic workflow scenarios |
+| Agent skills | `just docs lint` and `mise exec -- rumdl check .agents/skills`; inspect links and walk through realistic workflow scenarios |
 | Dependency, packaging, or CI configuration | Affected build/install checks and supported Python/dependency combinations from `pyproject.toml`, `uv.lock`, and CI |
 
 The `tests/pyathena/` directory includes AWS integration tests despite the recipe's "unit tests" label.
