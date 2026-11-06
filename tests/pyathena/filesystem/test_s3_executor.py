@@ -33,6 +33,7 @@ from tests.pyathena.util import (
     EVENT_TIMEOUT,
     OpcodeInterrupter,
     ThrottledOperation,
+    await_bounded,
     call_bounded,
     forking,
     interrupt_each_opcode,
@@ -1159,16 +1160,20 @@ class TestS3Executor:
         # before the next call starts, or is the failure of a batch without
         # stop_on_failure, instead of being returned as a value.
         class Rejecting(S3Executor):
+            # Runs the other calls in the submitting thread, before submit()
+            # returns, so that the call after the rejection starts before the
+            # map waits.
             def __init__(self):
-                self._pool = ThreadPoolExecutor(2)
                 self.calls = 0
 
             @override
             def submit(self, fn, *args, **kwargs):
                 self.calls += 1
-                if self.calls != 2:
-                    return self._pool.submit(contextvars.copy_context().run, fn, *args, **kwargs)
                 future: Future[Any] = Future()
+                if self.calls != 2:
+                    future.set_running_or_notify_cancel()
+                    future.set_result(contextvars.copy_context().run(fn, *args, **kwargs))
+                    return future
                 if rejection == "cancelled":
                     future.cancel()
                 else:
@@ -1178,7 +1183,7 @@ class TestS3Executor:
 
             @override
             def shutdown(self, wait=True):
-                self._pool.shutdown(wait=wait)
+                pass
 
         expected = CancelledError if rejection == "cancelled" else RuntimeError
         ran = []
@@ -1195,6 +1200,38 @@ class TestS3Executor:
             result = call_bounded(executor.map, str, range(3), stop_on_failure=False)
         assert isinstance(result.failure, expected)
         assert isinstance(result.outcomes[1], expected)
+
+    def test_map_failure_cancels_queued_calls(self):
+        # GH-1332 (B2): a failure cancels the calls that have not started
+        # without waiting for them to start, also when the executor would
+        # never start them.
+        class Holding(S3Executor):
+            # Runs the first call, and holds the others until they are
+            # cancelled.
+            def __init__(self):
+                self._pool = ThreadPoolExecutor(1)
+                self.held: list[Future[Any]] = []
+                self.calls = 0
+
+            @override
+            def submit(self, fn, *args, **kwargs):
+                self.calls += 1
+                if self.calls > 1:
+                    self.held.append(Future())
+                    return self.held[-1]
+                return self._pool.submit(contextvars.copy_context().run, fn, *args, **kwargs)
+
+            @override
+            def shutdown(self, wait=True):
+                self._pool.shutdown(wait=wait)
+
+        def call(i):
+            raise ValueError(i)
+
+        with Holding() as executor:
+            with pytest.raises(ValueError, match=r"^0$"):
+                call_bounded(executor.map, call, range(2))
+            assert all(future.cancelled() for future in executor.held)
 
     def test_map_failure_stops_batch(self):
         # GH-1332 (B2): a failure starts no further call, stops the retries
@@ -1288,11 +1325,11 @@ class TestS3Executor:
                 recorded[str(error)].set()
 
         def call(i):
-            # Item 0 fails first and does not count; item 2 fails before item 1.
-            if i == 2:
-                assert recorded["0"].wait(EVENT_TIMEOUT)
+            # Item 0 fails first and does not count; item 1 fails before item 2.
             if i == 1:
-                assert recorded["2"].wait(EVENT_TIMEOUT)
+                assert recorded["0"].wait(EVENT_TIMEOUT)
+            if i == 2:
+                assert recorded["1"].wait(EVENT_TIMEOUT)
             raise (LookupError if i == 0 else ValueError)(i)
 
         try:
@@ -1305,7 +1342,7 @@ class TestS3Executor:
                     counts=lambda e: not isinstance(e, LookupError),
                 )
             assert [type(e) for e in result.outcomes] == [LookupError, ValueError, ValueError]
-            assert result.failure is result.outcomes[2]
+            assert result.failure is result.outcomes[1]
         finally:
             shutdown_bounded(scope)
             pool.shutdown()
@@ -1472,7 +1509,8 @@ class TestS3Executor:
                 shutdown_bounded(scope)
                 pool.shutdown()
 
-        assert interrupt_each_opcode(S3Executor.map, case) > 0
+        # The tracer is installed in the thread that runs the case.
+        assert call_bounded(interrupt_each_opcode, S3Executor.map, case, timeout=120) > 0
 
     @pytest.mark.asyncio
     async def test_map_async_cancelled(self):
@@ -1506,6 +1544,39 @@ class TestS3Executor:
         finally:
             await asyncio.to_thread(shutdown_bounded, scope)
             pool.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_map_async_counts_error_in_callback(self):
+        # GH-1332: an error of the counts predicate in the done callback that
+        # records a failure the executor reports later, in another thread, is
+        # the failure of the map. It used to skip the callbacks after it,
+        # including the one that wakes the map, which then waited forever.
+        class Deferring(S3Executor):
+            @override
+            def submit(self, fn, *args, **kwargs):
+                future: Future[Any] = Future()
+
+                def reject():
+                    future.set_running_or_notify_cancel()
+                    future.set_exception(RuntimeError("rejected"))
+
+                threading.Timer(0.05, reject).start()
+                return future
+
+            @override
+            def shutdown(self, wait=True):
+                pass
+
+        class Abort(BaseException):
+            # Not an Exception, which concurrent.futures would only log; not
+            # SystemExit, which asyncio raises out of the event loop.
+            pass
+
+        def counts(error):
+            raise Abort("predicate")
+
+        with pytest.raises(Abort, match="predicate"):
+            await await_bounded(Deferring().map_async(str, range(1), counts=counts))
 
     @pytest.mark.asyncio
     async def test_map_async_failures_are_retrieved(self):

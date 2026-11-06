@@ -226,7 +226,11 @@ class _S3Batch(Generic[ItemT, T]):
         return_when = FIRST_EXCEPTION if self._stop_on_failure else ALL_COMPLETED
         pending = set(self.futures)
         while pending and not self._stopped_by_failure():
-            pending = wait(pending, return_when=return_when).not_done
+            done, pending = wait(pending, return_when=return_when)
+            # Also here, since a future wakes its waiters before it runs the
+            # callback that records it.
+            for future in done:
+                self._settled(future)
 
     async def wait_async(self) -> None:
         """Await until every call has ended or a failure has stopped the batch."""
@@ -236,9 +240,18 @@ class _S3Batch(Generic[ItemT, T]):
         pending = set(self._waiters.values())
         while pending and not self._stopped_by_failure():
             pending = (await asyncio.wait(pending, return_when=return_when))[1]
+            for future in self.futures:
+                if future.done():
+                    self._settled(future)
 
     def result(self) -> S3MapResult[T]:
-        """Return the outcomes of the calls, which have all ended.
+        """Return the outcomes of the calls, which have all ended, and drop their futures.
+
+        The futures are dropped here, not by the map, so that an interrupt
+        after this method returns finds no future kept by the batch; their
+        callbacks refer to the batch, which would otherwise form a reference
+        cycle with them that keeps the outcomes until the cyclic garbage
+        collector frees them.
 
         Returns:
             The outcomes.
@@ -246,12 +259,18 @@ class _S3Batch(Generic[ItemT, T]):
         Raises:
             BaseException: The failure that stopped the batch.
         """
+        for future in self.futures:
+            if future.done():
+                # exception() would wait for a call that has not ended.
+                self._settled(future)
         if self._stopped_by_failure():
             raise cast(BaseException, self._failure)
-        return S3MapResult(
+        result = S3MapResult(
             [e if (e := self._outcome(f)) is not None else f.result() for f in self.futures],
             self._failure,
         )
+        self.clear()
+        return result
 
     @staticmethod
     def _outcome(future: Future[Any]) -> BaseException | None:
@@ -382,10 +401,17 @@ class _S3Batch(Generic[ItemT, T]):
         Args:
             error: The failure of a call, or None if it succeeded.
         """
-        if error is None or (
-            isinstance(error, Exception) and self._counts is not None and not self._counts(error)
-        ):
+        if error is None:
             return
+        if isinstance(error, Exception) and self._counts is not None:
+            try:
+                if not self._counts(error):
+                    return
+            except BaseException as e:
+                # A done callback must not raise, which would skip the
+                # callbacks after it; the error of the predicate is the
+                # failure.
+                error = e
         with self._lock:
             if self._failure is None:
                 self._failure = error
@@ -616,8 +642,6 @@ class S3Executor(metaclass=ABCMeta):
             finally:
                 batch.release(e)
             raise
-        finally:
-            batch.clear()
 
     async def map_async(
         self,
@@ -659,8 +683,6 @@ class S3Executor(metaclass=ABCMeta):
             finally:
                 batch.release(e)
             raise
-        finally:
-            batch.clear()
 
     def __enter__(self) -> S3Executor:
         return self
