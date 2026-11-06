@@ -20,7 +20,7 @@ from typing import (
 import botocore.session
 from boto3.session import Session
 from botocore.config import Config
-from botocore.credentials import CredentialProvider, RefreshableCredentials
+from botocore.credentials import CredentialProvider, CredentialResolver, RefreshableCredentials
 
 import pyathena
 from pyathena.common import BaseCursor, CursorIterator, OnPollCallback
@@ -414,8 +414,9 @@ class Connection(Generic[ConnectionCursor]):
             mandatory_timeout=min(10 * 60, duration_seconds // 6),
         )
         botocore_session = botocore.session.Session()
-        botocore_session.get_component("credential_provider").insert_before(
-            "env", _STSCredentialProvider(credentials)
+        # The only credentials of the session: botocore's chain of providers is not used.
+        botocore_session.register_component(
+            "credential_provider", CredentialResolver([_STSCredentialProvider(credentials)])
         )
         return Session(
             region_name=self.region_name,
