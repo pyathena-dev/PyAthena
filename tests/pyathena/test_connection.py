@@ -539,8 +539,10 @@ class TestConnection:
             body = b"{}" if "athena" in request.url else b"<ListAllMyBucketsResult/>"
             return AWSResponse(request.url, 200, {}, _RawBody(body))
 
-        with patch.object(Connection, sts_method, side_effect=lambda **_: next(responses)) as sts:
-            conn = _connection(**kwargs)
+        with (
+            patch.object(Connection, sts_method, side_effect=lambda **_: next(responses)) as sts,
+            contextlib.closing(_connection(**kwargs)) as conn,
+        ):
             for client in (conn.client, conn.s3_client):
                 client.meta.events.register("before-send", send)
             conn.client.list_work_groups()
@@ -548,7 +550,35 @@ class TestConnection:
 
         assert sts.call_count == 2
         assert signed_with == ["ASIAREFRESHED", "ASIAREFRESHED"]
-        conn.close()
+
+    @pytest.mark.parametrize(
+        ("kwargs", "sts_method", "requests"),
+        [
+            ({"role_arn": "arn:aws:iam::123456789012:role/role"}, "_assume_role", 2),
+            # Each request prompts for an MFA code, so it waits for the mandatory refresh.
+            ({"serial_number": "arn:aws:iam::123456789012:mfa/device"}, "_get_session_token", 1),
+        ],
+        ids=["role_arn", "serial_number"],
+    )
+    def test_sts_credentials_advisory_refresh(
+        self, isolated_aws_config, kwargs, sts_method, requests
+    ):
+        now = datetime.now(UTC)
+        responses = iter(
+            [
+                # Within the advisory refresh window of a duration of an hour (15
+                # minutes), but not within the mandatory one (10 minutes).
+                _sts_credentials("ASIAADVISORY", now + timedelta(minutes=12)),
+                _sts_credentials("ASIAREFRESHED", now + timedelta(hours=1)),
+            ]
+        )
+        with (
+            patch.object(Connection, sts_method, side_effect=lambda **_: next(responses)) as sts,
+            contextlib.closing(_connection(**kwargs)) as conn,
+        ):
+            conn.session.get_credentials().get_frozen_credentials()
+
+        assert sts.call_count == requests
 
     def test_close_closes_built_clients(self):
         conn = _connection()

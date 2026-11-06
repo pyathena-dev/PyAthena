@@ -7,6 +7,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from functools import partial
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -263,14 +264,15 @@ class Connection(Generic[ConnectionCursor]):
             profile_name: AWS profile name for authentication.
             role_arn: IAM role ARN to assume for authentication. The session and
                 clients of the connection use the role's credentials, which are
-                requested again before they expire; the profile and credential
-                arguments sign the AssumeRole requests.
+                requested again before they expire; the profile, credential and
+                ``botocore_session`` arguments sign only the AssumeRole requests.
             role_session_name: Session name when assuming IAM role.
             external_id: External ID for role assumption (if required by role).
             serial_number: MFA device serial number, for role assumption with
                 ``role_arn`` or for GetSessionToken without it. Each request for
-                credentials, at connection and before they expire, prompts for an
-                MFA code with ``input()``.
+                credentials, at connection and once they are about to expire,
+                prompts for an MFA code with ``input()``; the other threads that
+                need them wait.
             duration_seconds: The duration in seconds of the credentials of
                 ``role_arn`` or ``serial_number``. Defaults to 3600.
             converter: Custom type converter. Uses DefaultTypeConverter if None.
@@ -346,19 +348,23 @@ class Connection(Generic[ConnectionCursor]):
         # Whether the credentials come from the session alone, because it was given or
         # its STS credentials are refreshed, so that the arguments do not reproduce them.
         self._credentials_from_session = bool(session or role_arn or serial_number)
-        # The profile and credential arguments that the STS requests use; the session
-        # and clients of the connection use the credentials that STS returns.
-        self._sts_profile_name: str | None = None
-        self._sts_kwargs: dict[str, Any] = {}
         if session:
             self._session = session
         elif role_arn or serial_number:
-            self._sts_profile_name = self.profile_name
+            # The profile, credential and botocore session arguments sign only the STS
+            # requests, which one client sends; the session and clients of the
+            # connection use the credentials that STS returns.
+            sts_client = Session(
+                region_name=self.region_name,
+                profile_name=self.profile_name,
+                **self._session_kwargs,
+            ).client("sts", region_name=self.region_name, config=self.config, **self._client_kwargs)
             self.profile_name = None
-            self._sts_kwargs = {
-                k: self._kwargs.pop(k) for k in self._STS_SOURCE_ARGS if k in self._kwargs
-            }
-            self._session = self._create_refreshable_session(duration_seconds)
+            for key in self._STS_SOURCE_ARGS:
+                self._kwargs.pop(key, None)
+            self._session = self._create_refreshable_session(
+                sts_client, duration_seconds, prompts=bool(serial_number)
+            )
         else:
             self._session = Session(
                 region_name=self.region_name,
@@ -391,27 +397,35 @@ class Connection(Generic[ConnectionCursor]):
             self._session, self.region_name, self.config, self._client_kwargs
         )
 
-    def _create_refreshable_session(self, duration_seconds: int) -> Session:
+    def _create_refreshable_session(
+        self, sts_client: BaseClient, duration_seconds: int, prompts: bool
+    ) -> Session:
         """Create the session whose credentials STS returns and refreshes before they expire.
 
         The credentials are requested now, and again once less than a quarter of
         ``duration_seconds``, at most 15 minutes, is left before they expire; they
         must be refreshed once less than a sixth, at most 10 minutes, is left.
         botocore's defaults of 15 and 10 minutes would request new credentials on
-        every use with a ``duration_seconds`` of 15 minutes.
+        every use with a ``duration_seconds`` of 15 minutes. A request that prompts
+        for an MFA code is made only once the refresh is mandatory, since botocore
+        retries a failed advisory refresh on every use of the credentials.
 
         Args:
+            sts_client: The client that sends the STS requests.
             duration_seconds: The duration of the credentials.
+            prompts: Whether each request prompts for an MFA code.
 
         Returns:
             A session whose clients sign their requests with the refreshed credentials.
         """
+        request_credentials = partial(self._request_credentials, sts_client)
+        mandatory_timeout = min(10 * 60, duration_seconds // 6)
         credentials = RefreshableCredentials.create_from_metadata(
-            metadata=self._request_credentials(),
-            refresh_using=self._request_credentials,
+            metadata=request_credentials(),
+            refresh_using=request_credentials,
             method=_STSCredentialProvider.METHOD,
-            advisory_timeout=min(15 * 60, duration_seconds // 4),
-            mandatory_timeout=min(10 * 60, duration_seconds // 6),
+            advisory_timeout=mandatory_timeout if prompts else min(15 * 60, duration_seconds // 4),
+            mandatory_timeout=mandatory_timeout,
         )
         botocore_session = botocore.session.Session()
         # The only credentials of the session: botocore's chain of providers is not used.
@@ -424,11 +438,14 @@ class Connection(Generic[ConnectionCursor]):
             **self._session_kwargs,
         )
 
-    def _request_credentials(self) -> dict[str, str]:
+    def _request_credentials(self, sts_client: BaseClient) -> dict[str, str]:
         """Request credentials from STS with the connection's ``role_arn`` or ``serial_number``.
 
         With ``serial_number``, each request prompts for an MFA code (see
         ``_assume_role()`` and ``_get_session_token()``).
+
+        Args:
+            sts_client: The client that sends the STS requests.
 
         Returns:
             The credentials as botocore's credential metadata: ``access_key``,
@@ -436,8 +453,7 @@ class Connection(Generic[ConnectionCursor]):
         """
         if self._kwargs["role_arn"]:
             creds = self._assume_role(
-                profile_name=self._sts_profile_name,
-                region_name=self.region_name,
+                client=sts_client,
                 role_arn=self._kwargs["role_arn"],
                 role_session_name=self._kwargs["role_session_name"],
                 external_id=self._kwargs["external_id"],
@@ -446,8 +462,7 @@ class Connection(Generic[ConnectionCursor]):
             )
         else:
             creds = self._get_session_token(
-                profile_name=self._sts_profile_name,
-                region_name=self.region_name,
+                client=sts_client,
                 serial_number=self._kwargs["serial_number"],
                 duration_seconds=self._kwargs["duration_seconds"],
             )
@@ -473,8 +488,7 @@ class Connection(Generic[ConnectionCursor]):
 
     def _assume_role(
         self,
-        profile_name: str | None,
-        region_name: str | None,
+        client: BaseClient,
         role_arn: str,
         role_session_name: str,
         external_id: str | None,
@@ -488,8 +502,8 @@ class Connection(Generic[ConnectionCursor]):
         when a serial number is provided.
 
         Args:
-            profile_name: AWS profile name to use for the STS client.
-            region_name: AWS region for the STS client.
+            client: The STS client, with the connection's profile and credential
+                arguments.
             role_arn: ARN of the IAM role to assume.
             role_session_name: Name for the role session.
             external_id: External ID for additional security when assuming role.
@@ -504,19 +518,6 @@ class Connection(Generic[ConnectionCursor]):
             When MFA is required (serial_number provided), this method will
             prompt for an MFA token code via input().
         """
-        session = Session(
-            region_name=region_name,
-            profile_name=profile_name,
-            **self._session_kwargs,
-            **self._sts_session_kwargs,
-        )
-        client = session.client(
-            "sts",
-            region_name=region_name,
-            config=self.config,
-            **self._client_kwargs,
-            **self._sts_client_kwargs,
-        )
         request = {
             "RoleArn": role_arn,
             "RoleSessionName": role_session_name,
@@ -542,8 +543,7 @@ class Connection(Generic[ConnectionCursor]):
 
     def _get_session_token(
         self,
-        profile_name: str | None,
-        region_name: str | None,
+        client: BaseClient,
         serial_number: str | None,
         duration_seconds: int,
     ) -> dict[str, Any]:
@@ -553,8 +553,8 @@ class Connection(Generic[ConnectionCursor]):
         This is used when MFA is required but role assumption is not needed.
 
         Args:
-            profile_name: AWS profile name to use for the STS client.
-            region_name: AWS region for the STS client.
+            client: The STS client, with the connection's profile and credential
+                arguments.
             serial_number: MFA device serial number.
             duration_seconds: Duration of the temporary credentials in seconds.
 
@@ -565,16 +565,6 @@ class Connection(Generic[ConnectionCursor]):
         Note:
             This method will prompt for an MFA token code via input().
         """
-        session = Session(
-            profile_name=profile_name, **self._session_kwargs, **self._sts_session_kwargs
-        )
-        client = session.client(
-            "sts",
-            region_name=region_name,
-            config=self.config,
-            **self._client_kwargs,
-            **self._sts_client_kwargs,
-        )
         token_code = input("Enter the MFA code: ")
         request = {
             "DurationSeconds": duration_seconds,
@@ -604,27 +594,6 @@ class Connection(Generic[ConnectionCursor]):
             boto3 client constructor.
         """
         return {k: v for k, v in self._kwargs.items() if k in self._CLIENT_PASSING_ARGS}
-
-    @property
-    def _sts_session_kwargs(self) -> dict[str, Any]:
-        """Get the credential arguments of the session that sends the STS requests.
-
-        Returns:
-            The credential and botocore session arguments given to the connection with
-            ``role_arn`` or ``serial_number``, which the connection's own session
-            does not use.
-        """
-        return {k: v for k, v in self._sts_kwargs.items() if k in self._SESSION_PASSING_ARGS}
-
-    @property
-    def _sts_client_kwargs(self) -> dict[str, Any]:
-        """Get the credential arguments of the STS client.
-
-        Returns:
-            The credential arguments given to the connection with ``role_arn`` or
-            ``serial_number``.
-        """
-        return {k: v for k, v in self._sts_kwargs.items() if k in self._CLIENT_PASSING_ARGS}
 
     @property
     def _s3_client_kwargs(self) -> dict[str, Any]:
