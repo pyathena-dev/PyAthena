@@ -308,14 +308,15 @@ def to_sql(
     with executor_class(max_workers=max_workers) as e:
         futures: list[concurrent.futures.Future[Any]] = []
         # The workers build their own sessions from these arguments, which
-        # resolve the connection's credentials again unless the connection was
-        # given its session. Then they get its credentials as of now, unless
-        # explicit keys or a botocore session, which boto3 would set them on,
-        # take precedence.
+        # resolve the connection's credentials again unless they come from its
+        # session alone: a given session, or refreshed STS credentials of
+        # role_arn or serial_number. Then they get its credentials as of now,
+        # unless explicit keys or a botocore session, which boto3 would set them
+        # on, take precedence.
         session_kwargs = deepcopy(conn._session_kwargs)
         session_kwargs.update({"profile_name": conn.profile_name})
         if (
-            conn._session_given
+            conn._credentials_from_session
             and not conn._s3_client_kwargs.get("aws_access_key_id")
             and not session_kwargs.get("botocore_session")
             and (credentials := conn.session.get_credentials())

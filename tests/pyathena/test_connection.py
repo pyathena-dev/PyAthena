@@ -8,13 +8,17 @@
 import contextlib
 import inspect
 import os
+import re
 import threading
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from inspect import signature
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.awsrequest import AWSResponse
 from botocore.config import Config
 
 import pyathena
@@ -142,6 +146,47 @@ class RecordingCursor(Cursor):
     def __init__(self, custom_option: Any = None, **kwargs: Any) -> None:
         self.kwargs = {**kwargs, "custom_option": custom_option}
         super().__init__(**kwargs)
+
+
+class _RawBody:
+    """The raw body of a botocore HTTP response."""
+
+    def __init__(self, body: bytes) -> None:
+        """Initialize the body.
+
+        Args:
+            body: The bytes of the response body.
+        """
+        self._body = body
+
+    def stream(self, **_: Any) -> Iterator[bytes]:
+        """Yield the body.
+
+        Args:
+            **_: The streaming options, which are ignored.
+
+        Yields:
+            The bytes of the body.
+        """
+        yield self._body
+
+
+def _sts_credentials(access_key_id: str, expiration: datetime) -> dict[str, Any]:
+    """Build the ``Credentials`` of an STS response.
+
+    Args:
+        access_key_id: The access key ID.
+        expiration: The expiration time.
+
+    Returns:
+        The credentials as STS returns them.
+    """
+    return {
+        "AccessKeyId": access_key_id,
+        "SecretAccessKey": "secret_key",
+        "SessionToken": "session_token",
+        "Expiration": expiration,
+    }
 
 
 def _connection(**kwargs: Any) -> Connection[Any]:
@@ -465,6 +510,45 @@ class TestConnection:
         assert "s3-agent" in s3_config.user_agent_extra
         assert conn.client.meta.config.max_pool_connections == 20
         assert "s3-agent" not in conn.client.meta.config.user_agent_extra
+
+    @pytest.mark.parametrize(
+        ("kwargs", "sts_method"),
+        [
+            ({"role_arn": "arn:aws:iam::123456789012:role/role"}, "_assume_role"),
+            ({"serial_number": "arn:aws:iam::123456789012:mfa/device"}, "_get_session_token"),
+        ],
+        ids=["role_arn", "serial_number"],
+    )
+    def test_sts_credentials_refreshed(self, isolated_aws_config, kwargs, sts_method):
+        # GH-1343: the STS credentials were stored as static keys, so every client
+        # of a long-lived connection failed with ExpiredToken after duration_seconds.
+        now = datetime.now(UTC)
+        responses = iter(
+            [
+                # Expire within botocore's mandatory refresh window.
+                _sts_credentials("ASIAEXPIRING", now + timedelta(minutes=1)),
+                _sts_credentials("ASIAREFRESHED", now + timedelta(hours=1)),
+            ]
+        )
+        signed_with = []
+
+        def send(request, **_):
+            authorization = request.headers["Authorization"].decode()
+            signed_with.append(re.search(r"Credential=([^/]+)/", authorization).group(1))
+            # Athena answers in JSON, S3 in XML.
+            body = b"{}" if "athena" in request.url else b"<ListAllMyBucketsResult/>"
+            return AWSResponse(request.url, 200, {}, _RawBody(body))
+
+        with patch.object(Connection, sts_method, side_effect=lambda **_: next(responses)) as sts:
+            conn = _connection(**kwargs)
+            for client in (conn.client, conn.s3_client):
+                client.meta.events.register("before-send", send)
+            conn.client.list_work_groups()
+            conn.s3_client.list_buckets()
+
+        assert sts.call_count == 2
+        assert signed_with == ["ASIAREFRESHED", "ASIAREFRESHED"]
+        conn.close()
 
     def test_close_closes_built_clients(self):
         conn = _connection()
