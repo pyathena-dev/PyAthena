@@ -30,6 +30,7 @@ from tests.pyathena.util import (
     forking,
     interrupt_each_opcode,
     overlapping_calls,
+    retried,
     run_in_forked_child,
     shutdown_bounded,
     sigint_when,
@@ -1070,11 +1071,397 @@ class TestS3Executor:
         executor = _DeferringExecutor()
         future: Future[int] = Future()
         executor.submit_to(future, sum, [1, 2])
-        assert future.cancel()
         (submitted,) = executor.submitted
+        # Started, so that the cancellation of the future does not reach it.
         submitted.set_running_or_notify_cancel()
+        assert future.cancel()
         submitted.set_exception(RuntimeError("cannot schedule new futures after shutdown"))
 
         _, not_done = wait([future], timeout=EVENT_TIMEOUT)
         assert not not_done
         assert future.cancelled()
+
+    def test_submit_to_cancel_frees_waiting_call(self):
+        # GH-1332 (S8): cancelling the future of a call that submit_to() put
+        # in a scope's queue drops the call at once, so that its arguments are
+        # not kept until a place frees.
+        class Body:
+            pass
+
+        pool = S3ThreadPool(1)
+        scope = _S3PoolScope(pool, 1)
+        release = threading.Event()
+        body = Body()
+        body_ref = weakref.ref(body)
+        try:
+            scope.submit(release.wait, EVENT_TIMEOUT)
+            future: Future[None] = Future()
+            scope.submit_to(future, lambda b: None, body)
+            del body
+            assert future.cancel()
+            gc.collect()
+            assert body_ref() is None
+        finally:
+            release.set()
+            shutdown_bounded(scope)
+            pool.shutdown()
+
+    def test_map(self):
+        # GH-1332 (B1): the outcomes are in the order of the items, at most
+        # the executor's limit at once.
+        call, state = overlapping_calls(2)
+        pool = S3ThreadPool(4)
+        scope = _S3PoolScope(pool, 2)
+        try:
+
+            def square(i):
+                call()
+                return i * i
+
+            result = scope.map(square, range(6))
+            assert result.outcomes == [0, 1, 4, 9, 16, 25]
+            assert result.failure is None
+            assert state["peak"] == 2
+        finally:
+            shutdown_bounded(scope)
+            pool.shutdown()
+
+    def test_map_executor_without_limit(self):
+        # GH-1332: an executor that has only submit() and shutdown(), as one
+        # given to S3File(executor=), maps its items.
+        class Executor(S3Executor):
+            def __init__(self):
+                self._pool = ThreadPoolExecutor(2)
+
+            @override
+            def submit(self, fn, *args, **kwargs):
+                return self._pool.submit(contextvars.copy_context().run, fn, *args, **kwargs)
+
+            @override
+            def shutdown(self, wait=True):
+                self._pool.shutdown(wait=wait)
+
+        with Executor() as executor:
+            assert executor.map(str, [1, 2]).outcomes == ["1", "2"]
+
+    def test_map_failure_stops_batch(self):
+        # GH-1332 (B2): a failure starts no further call, stops the retries
+        # of the running one, whose backoff wait would take at least
+        # EVENT_TIMEOUT seconds, and is raised once that call has ended. The
+        # call that the failure frees the place for makes no request, also
+        # when its thread takes it before the waiting thread resumes.
+        operation = ThrottledOperation()
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+        ended = []
+        pool = S3ThreadPool(2)
+        scope = _S3PoolScope(pool, 2)
+
+        def call(i):
+            try:
+                if i == 0:
+                    return throttled()
+                if i == 1:
+                    assert operation.started.wait(EVENT_TIMEOUT)
+                    assert waiting.wait(EVENT_TIMEOUT)
+                    raise ValueError("failed")
+                return i
+            finally:
+                ended.append(i)
+
+        waiting = threading.Event()
+
+        def late_wait(futures, **kwargs):
+            # The waiting thread resumes after the thread of the failed call
+            # has taken the next one.
+            waiting.set()
+            done = wait(futures, **kwargs)
+            time.sleep(0.2)
+            return done
+
+        try:
+            started = time.monotonic()
+            with (
+                mock.patch("pyathena.filesystem.s3_executor.wait", late_wait),
+                pytest.raises(ValueError, match="failed"),
+            ):
+                scope.map(call, range(4))
+            assert time.monotonic() - started < EVENT_TIMEOUT
+            assert sorted(ended) == [0, 1]
+            assert operation.calls == 1
+        finally:
+            shutdown_bounded(scope)
+            pool.shutdown()
+
+    def test_map_raises_first_failure_to_end(self):
+        # GH-1332 (B2): the failure raised is the one that stopped the batch,
+        # the first to end, not the first item that failed.
+        pool = S3ThreadPool(2)
+        scope = _S3PoolScope(pool, 2)
+        second_failed = threading.Event()
+
+        def call(i):
+            if i == 0:
+                assert second_failed.wait(EVENT_TIMEOUT)
+                raise ValueError("first item")
+            second_failed.set()
+            raise KeyError("second item")
+
+        try:
+            with pytest.raises(KeyError, match="second item"):
+                scope.map(call, range(2))
+        finally:
+            shutdown_bounded(scope)
+            pool.shutdown()
+
+    def test_map_counts_failures(self):
+        # GH-1332 (B5): without stop_on_failure, every call runs, and the
+        # failure reported is the first that counts in the order they ended.
+        pool = S3ThreadPool(3)
+        scope = _S3PoolScope(pool, 3)
+        ended = {i: threading.Event() for i in range(3)}
+
+        def call(i):
+            # Item 0 ends first and does not count; item 2 ends before item 1.
+            if i == 2:
+                assert ended[0].wait(EVENT_TIMEOUT)
+            if i == 1:
+                assert ended[2].wait(EVENT_TIMEOUT)
+            ended[i].set()
+            raise (LookupError if i == 0 else ValueError)(i)
+
+        try:
+            result = scope.map(
+                call,
+                range(3),
+                stop_on_failure=False,
+                counts=lambda e: not isinstance(e, LookupError),
+            )
+            assert [type(e) for e in result.outcomes] == [LookupError, ValueError, ValueError]
+            assert result.failure is result.outcomes[2]
+        finally:
+            shutdown_bounded(scope)
+            pool.shutdown()
+
+    def test_map_interrupted_without_stop_on_failure(self):
+        # GH-1332 (B3): an interrupt of the wait cancels the calls that have
+        # not started and stops the retries of the running one, whose backoff
+        # wait would take at least EVENT_TIMEOUT seconds, also without
+        # stop_on_failure, and is raised once that call has ended.
+        operation = ThrottledOperation()
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+        ran = []
+        waits = []
+        pool = S3ThreadPool(1)
+        scope = _S3PoolScope(pool, 1)
+
+        def call(i):
+            ran.append(i)
+            return throttled()
+
+        def interrupted_wait(futures, **kwargs):
+            waits.append(futures)
+            if len(waits) == 1:
+                assert operation.started.wait(EVENT_TIMEOUT)
+                raise KeyboardInterrupt
+            return wait(futures, **kwargs)
+
+        try:
+            started = time.monotonic()
+            with (
+                mock.patch("pyathena.filesystem.s3_executor.wait", interrupted_wait),
+                pytest.raises(KeyboardInterrupt),
+            ):
+                scope.map(call, range(2), stop_on_failure=False)
+            assert time.monotonic() - started < EVENT_TIMEOUT
+            assert ran == [0]
+            assert operation.calls == 1
+            assert scope.pending() == []
+        finally:
+            waits.clear()
+            shutdown_bounded(scope)
+            pool.shutdown()
+
+    def test_map_interrupted_twice(self):
+        # GH-1332 (B3, I1 amended): a second interrupt stops the wait for the
+        # running calls, which then end in the executor.
+        release = threading.Event()
+        started = threading.Event()
+        pool = S3ThreadPool(1)
+        scope = _S3PoolScope(pool, 1)
+
+        def call(i):
+            started.set()
+            release.wait(EVENT_TIMEOUT)
+            return i
+
+        def interrupted_wait(futures, **kwargs):
+            assert started.wait(EVENT_TIMEOUT)
+            raise KeyboardInterrupt
+
+        try:
+            with (
+                mock.patch("pyathena.filesystem.s3_executor.wait", interrupted_wait),
+                pytest.raises(KeyboardInterrupt) as info,
+            ):
+                scope.map(call, range(1))
+            assert isinstance(info.value.__context__, KeyboardInterrupt)
+            assert not release.is_set()
+            assert len(scope.pending()) == 1
+        finally:
+            release.set()
+            shutdown_bounded(scope)
+            pool.shutdown()
+
+    def test_map_failure_frees_outcomes(self):
+        # GH-1332 (F5): the outcome of a call that ends while a failed map
+        # waits for it is not kept by the traceback of the failure.
+        class Body:
+            pass
+
+        refs = []
+        failed = threading.Event()
+        both_started = threading.Barrier(2, timeout=EVENT_TIMEOUT)
+        pool = S3ThreadPool(2)
+        scope = _S3PoolScope(pool, 2)
+
+        def call(i):
+            both_started.wait()
+            if i == 0:
+                failed.set()
+                raise ValueError("failed")
+            assert failed.wait(EVENT_TIMEOUT)
+            # Ends after the failure, while the map waits for it.
+            time.sleep(0.1)
+            body = Body()
+            refs.append(weakref.ref(body))
+            return body
+
+        try:
+            with pytest.raises(ValueError, match="failed") as info:
+                scope.map(call, range(2))
+            gc.collect()
+            assert len(refs) == 1
+            assert refs[0]() is None
+            assert info.value.__traceback__ is not None
+        finally:
+            shutdown_bounded(scope)
+            pool.shutdown()
+
+    def test_map_interrupted_at_each_opcode(self):
+        # GH-1332 (B6, S1, S5): an interrupt at any opcode of map() leaves no
+        # call in the scope, and every call that it started has ended when it
+        # raises.
+        def case(interrupt):
+            pool = S3ThreadPool(2)
+            scope = _S3PoolScope(pool, 2)
+            running = []
+            lock = threading.Lock()
+
+            def call(i):
+                with lock:
+                    running.append(i)
+                time.sleep(0.01)
+                with lock:
+                    running.remove(i)
+                return i
+
+            try:
+                result = interrupt(scope.map, call, range(4))
+                if not interrupt.fired:
+                    assert result.outcomes == [0, 1, 2, 3]
+                    return
+                assert running == []
+                assert scope.pending() == []
+            finally:
+                shutdown_bounded(scope)
+                pool.shutdown()
+
+        assert interrupt_each_opcode(S3Executor.map, case) > 0
+
+    @pytest.mark.asyncio
+    async def test_map_async_cancelled(self):
+        # GH-1332 (B3, B6): a cancellation of the waiting task cancels the
+        # calls that have not started, stops the retries of the running one,
+        # and is raised once that call has ended.
+        operation = ThrottledOperation()
+        throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+        ran = []
+        ended = []
+        pool = S3ThreadPool(1)
+        scope = _S3PoolScope(pool, 1)
+
+        def call(i):
+            ran.append(i)
+            try:
+                return throttled()
+            finally:
+                ended.append(i)
+
+        try:
+            task = asyncio.ensure_future(scope.map_async(call, range(2)))
+            assert await asyncio.to_thread(operation.started.wait, EVENT_TIMEOUT)
+            started = time.monotonic()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, EVENT_TIMEOUT)
+            assert time.monotonic() - started < EVENT_TIMEOUT
+            assert ran == ended == [0]
+            assert operation.calls == 1
+        finally:
+            await asyncio.to_thread(shutdown_bounded, scope)
+            pool.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_map_async_failures_are_retrieved(self):
+        # GH-1332: the failures of the calls that a failure stopped are not
+        # logged as never retrieved.
+        loop = asyncio.get_running_loop()
+        logged = []
+        previous = loop.get_exception_handler()
+        loop.set_exception_handler(lambda loop, context: logged.append(context))
+        pool = S3ThreadPool(2)
+        scope = _S3PoolScope(pool, 2)
+        barrier = threading.Barrier(2, timeout=EVENT_TIMEOUT)
+
+        def call(i):
+            barrier.wait()
+            raise ValueError(i)
+
+        try:
+            with pytest.raises(ValueError, match=r"^[01]$"):
+                await scope.map_async(call, range(2))
+            gc.collect()
+            await asyncio.sleep(0)
+            assert logged == []
+        finally:
+            loop.set_exception_handler(previous)
+            await asyncio.to_thread(shutdown_bounded, scope)
+            pool.shutdown()
+
+    def test_map_async_at_loop_shutdown(self):
+        # GH-1332 (B6): the end of asyncio.run() cancels a waiting map, which
+        # waits for its running call before the loop closes.
+        release = threading.Event()
+        started = threading.Event()
+        ended = []
+        pool = S3ThreadPool(1)
+        scope = _S3PoolScope(pool, 1)
+
+        def call(i):
+            started.set()
+            release.wait(0.5)
+            ended.append(i)
+
+        tasks = []
+
+        async def main():
+            tasks.append(asyncio.ensure_future(scope.map_async(call, range(1))))
+            await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+
+        try:
+            asyncio.run(main())
+            assert ended == [0]
+        finally:
+            release.set()
+            shutdown_bounded(scope)
+            pool.shutdown()

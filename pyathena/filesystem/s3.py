@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import logging
 import mimetypes
 import os.path
-import threading
 import time
-import traceback
 from collections.abc import Callable, Mapping
-from concurrent.futures import FIRST_EXCEPTION, Future, as_completed, wait
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -48,7 +46,7 @@ from pyathena.filesystem.s3_object import (
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.filesystem.s3_writer import _S3WriteSession
-from pyathena.util import RetryConfig, override, stop_retries_on
+from pyathena.util import RetryConfig, override
 
 _logger = logging.getLogger(__name__)
 
@@ -1173,10 +1171,16 @@ class S3FileSystem(AbstractFileSystem):
             return
 
         max_workers = max_workers if max_workers else self.max_workers
-        with self._create_executor(max_workers=max_workers) as executor:
-            fs = [executor.submit(self._delete_batch, batch, **params) for batch in batches]
-        # The executor has waited for every request, also after a failure.
-        self._raise_delete_errors([f.exception() or f.result() for f in fs])
+        executor = self._create_executor(max_workers=max_workers)
+        try:
+            # Every request runs also after another failed, and an interrupt
+            # cancels those that have not started.
+            results = executor.map(
+                functools.partial(self._delete_batch, **params), batches, stop_on_failure=False
+            )
+        finally:
+            executor.shutdown(wait=False)
+        self._raise_delete_errors(results.outcomes)
 
     @staticmethod
     def _delete_batches(paths: list[str], **kwargs) -> tuple[list[S3DeleteBatch], dict[str, Any]]:
@@ -2257,31 +2261,16 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError(f"ACL not in {self.core.OBJECT_ACLS}.")
         if recursive:
             paths = self.find(path, withdirs=False)
-            # Set on failure, so that the running requests make no further attempt.
-            stop = threading.Event()
-            with self._create_executor(max_workers=self.max_workers) as executor:
-                futures: list[Future[None]] = []
-                try:
-                    with stop_retries_on(stop):
-                        for p in paths:
-                            # Tracked before it is scheduled, so that an
-                            # interrupt while it is being scheduled still lets
-                            # it be cancelled.
-                            future: Future[None] = Future()
-                            futures.append(future)
-                            executor.submit_to(
-                                future, self.chmod, p, acl, recursive=False, **kwargs
-                            )
-                    for future in as_completed(futures):
-                        future.result()
-                except BaseException:
-                    # No more ACL is applied after one failed. The updates that
-                    # have not started are cancelled before the stop, which
-                    # would let a thread that it frees take one of them.
-                    for future in futures:
-                        future.cancel()
-                    stop.set()
-                    raise
+            executor = self._create_executor(max_workers=self.max_workers)
+            try:
+                executor.map(
+                    lambda p: self.chmod(p, acl, recursive=False, **kwargs),
+                    paths,
+                )
+            finally:
+                # The map has waited for the updates it started, unless a
+                # second interrupt stopped it.
+                executor.shutdown(wait=False)
             if s3_path.key:
                 # A key prefix is not an object itself; only the objects
                 # below it have ACLs.
@@ -2392,30 +2381,37 @@ class S3FileSystem(AbstractFileSystem):
         uploads = self.list_multipart_uploads(path)
         if not uploads:
             return
-        error: Exception | None = None
-        with self._create_executor(max_workers=self.max_workers) as executor:
-            futures = [
-                executor.submit(
-                    self.core.abort_multipart_upload,
-                    upload,
-                )
-                for upload in uploads
-            ]
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    cause = e.__cause__
-                    if (
-                        isinstance(e, FileNotFoundError)
-                        and isinstance(cause, botocore.exceptions.ClientError)
-                        and S3ClientError(cause).code == "NoSuchUpload"
-                    ):
-                        continue
-                    if error is None:
-                        error = e
-        if error is not None:
-            raise error
+        executor = self._create_executor(max_workers=self.max_workers)
+        try:
+            # Every abort runs also after another failed, and an interrupt
+            # cancels those that have not started.
+            results = executor.map(
+                self.core.abort_multipart_upload,
+                uploads,
+                stop_on_failure=False,
+                counts=self._is_not_no_such_upload,
+            )
+        finally:
+            executor.shutdown(wait=False)
+        if results.failure is not None:
+            raise results.failure
+
+    @staticmethod
+    def _is_not_no_such_upload(error: BaseException) -> bool:
+        """Return whether an error of an abort is other than an upload that no longer exists.
+
+        Args:
+            error: The error of ``abort_multipart_upload``.
+
+        Returns:
+            False for the ``FileNotFoundError`` of a ``NoSuchUpload`` error.
+        """
+        cause = error.__cause__
+        return not (
+            isinstance(error, FileNotFoundError)
+            and isinstance(cause, botocore.exceptions.ClientError)
+            and S3ClientError(cause).code == "NoSuchUpload"
+        )
 
     def created(self, path: str) -> datetime:
         """Return the creation time of the path.
@@ -3408,9 +3404,11 @@ class S3File(AbstractBufferedFile):
         may request a range that is empty or reaches past the end of the
         object. S3 would answer the former with the whole object and a range
         starting past the end with an ``InvalidRange`` error. A range larger
-        than the block size is read with parallel requests; when one fails,
-        those that have not started are cancelled, the running ones make no
-        further attempt, and its error is raised.
+        than the block size is read with parallel requests (see
+        :meth:`S3Executor.map() <pyathena.filesystem.s3_executor.S3Executor.map>`);
+        when one fails, those that have not started are cancelled, the running
+        ones make no further attempt, and its error is raised once they have
+        ended.
 
         Args:
             start: The offset of the first byte to read.
@@ -3428,54 +3426,17 @@ class S3File(AbstractBufferedFile):
         path = S3Path(self.bucket, self.key, self.version_id)
         request_kwargs = self._get_request_kwargs("get_object")
         if len(ranges) > 1:
-            # Set on failure, so that the running reads make no further attempt.
-            stop = threading.Event()
-            futures: list[Future[bytes]] = []
-            done: set[Future[bytes]] = set()
-            try:
-                with stop_retries_on(stop):
-                    for r in ranges:
-                        # Tracked before it is scheduled, so that an interrupt
-                        # while it is being scheduled still lets it be
-                        # cancelled; not by a variable, which would keep it in
-                        # this frame, which the traceback of an error keeps.
-                        futures.append(Future())
-                        self._executor.submit_to(
-                            futures[-1], self.fs.core.get_object, path, r, **request_kwargs
-                        )
-                done = wait(futures, return_when=FIRST_EXCEPTION).done
-                failed = next(
-                    (f for f in done if not f.cancelled() and f.exception() is not None), None
+            # Not kept by a variable of this frame, which the traceback of an
+            # interrupt keeps (F5).
+            return b"".join(
+                cast(
+                    list[bytes],
+                    self._executor.map(
+                        functools.partial(self.fs.core.get_object, path, **request_kwargs),
+                        ranges,
+                    ).outcomes,
                 )
-                if failed is not None:
-                    failed.result()
-                return b"".join(f.result() for f in futures)
-            except BaseException as e:
-                # A failed read, or an interrupt at any point, including after
-                # the wait: the reads that have not started are cancelled, and
-                # the futures of the others are dropped, so that this frame,
-                # which the traceback of the error keeps, does not keep their
-                # data, also if another interrupt stops this cleanup. The
-                # frames of the wait, which keep the futures, are cleared, and
-                # clear_frames() skips this frame, which is executing.
-                try:
-                    # Popped, not iterated, so that no variable of this frame
-                    # keeps a future.
-                    while futures:
-                        futures.pop().cancel()
-                finally:
-                    # Also if an interrupt stops the cancellation, whose error
-                    # keeps this one as its context; the frames first, as
-                    # they keep the futures of the wait.
-                    try:
-                        traceback.clear_frames(e.__traceback__)
-                    finally:
-                        done.clear()
-                        futures.clear()
-                        # After the cancellation, which a thread that it frees
-                        # could otherwise precede by taking a queued read.
-                        stop.set()
-                raise
+            )
         return self.fs.core.get_object(path, ranges[0], **request_kwargs)
 
     @staticmethod

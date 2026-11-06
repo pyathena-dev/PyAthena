@@ -45,6 +45,7 @@ from tests.pyathena.util import (
     await_bounded,
     cancel_when_started,
     forking,
+    interrupt_each_opcode,
     mock_connection,
     overlapping_calls,
     retried,
@@ -1248,6 +1249,54 @@ class TestAioS3FileSystem:
         assert operation.calls == 1
 
     @pytest.mark.asyncio
+    async def test_copy_object_with_multipart_upload_cancelled_annotation_copy(self):
+        # GH-1332 (B6): a cancelled copy raises once its running annotation
+        # copy has ended, which used to run on after the cancellation.
+        fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        plan = S3MultipartCopyPlan(
+            source=S3Path("bucket", "src"),
+            destination=S3Path("bucket", "dst"),
+            size=1,
+            ranges=((0, 1),),
+            annotations=("a1",),
+        )
+        sync_fs.core.plan_multipart_copy = mock.MagicMock(return_value=plan)
+        sync_fs.core.create_multipart_upload = mock.MagicMock(
+            return_value=S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "id"})
+        )
+        sync_fs.core.upload_part_copy = mock.MagicMock(
+            side_effect=lambda **kw: SimpleNamespace(etag='"e"', part_number=kw["part_number"])
+        )
+        sync_fs.core.complete_multipart_upload = mock.MagicMock(
+            return_value=SimpleNamespace(version_id=None, etag='"e"')
+        )
+        started = threading.Event()
+        release = threading.Event()
+        ended = []
+
+        def copy_object_annotation(name, *args, **kwargs):
+            started.set()
+            release.wait(EVENT_TIMEOUT)
+            ended.append(name)
+
+        sync_fs.core.copy_object_annotation = mock.MagicMock(side_effect=copy_object_annotation)
+        task = asyncio.ensure_future(
+            fs._copy_object_with_multipart_upload(plan.source, plan.destination)
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+            task.cancel()
+            await asyncio.sleep(0.1)
+            assert not task.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await await_bounded(task)
+            assert ended == ["a1"]
+        finally:
+            release.set()
+
+    @pytest.mark.asyncio
     async def test_copy_object_with_multipart_upload_failed_annotation_skips_queued_copies(self):
         # GH-1203: the annotation copies that wait for a thread of the filesystem
         # when one fails are not sent.
@@ -1642,47 +1691,37 @@ class TestAioS3FileSystem:
         ]
 
     @pytest.mark.asyncio
-    async def test_rm_cancel_invalidates_cache_after_each_request(self):
-        # The request threads keep running after _rm() is cancelled, so each
-        # request invalidates the cache of its objects when it finishes.
+    async def test_rm_cancel_waits_for_running_requests(self):
+        # GH-1332 (B6): a cancelled _rm() raises once its running requests
+        # have ended, each of which invalidates the cache of its objects. The
+        # requests used to run on after the cancellation was raised.
         fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
         started = {"b1": threading.Event(), "b2": threading.Event()}
-        release = {"b1": threading.Event(), "b2": threading.Event()}
+        release = threading.Event()
 
         def call(method, **request):
             started[request["Bucket"]].set()
-            release[request["Bucket"]].wait(10)
+            release.wait(EVENT_TIMEOUT)
             return {}
-
-        async def wait_invalidated(path):
-            for _ in range(100):
-                if path not in fs.dircache:
-                    return
-                await asyncio.sleep(0.01)
 
         fs._sync_fs._call = fs._sync_fs._core.call = call
         task = asyncio.create_task(fs._rm(["s3://b1/a", "s3://b2/b"]))
-        for event in started.values():
-            await asyncio.to_thread(event.wait, 10)
-        # Cancel every other task, as asyncio.run() does at shutdown, so the
-        # request tasks are cancelled directly, not only through _rm().
-        for other in asyncio.all_tasks():
-            if other is not asyncio.current_task():
-                other.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        # Cached while the requests still run, e.g. by a concurrent info().
-        fs.dircache["b1/a"] = []
-        fs.dircache["b2/b"] = []
-
-        release["b1"].set()
-        await wait_invalidated("b1/a")
-        assert "b1/a" not in fs.dircache
-        assert "b2/b" in fs.dircache
-
-        release["b2"].set()
-        await wait_invalidated("b2/b")
-        assert "b2/b" not in fs.dircache
+        try:
+            for event in started.values():
+                assert await asyncio.to_thread(event.wait, EVENT_TIMEOUT)
+            # Cached while the requests run, e.g. by a concurrent info().
+            fs.dircache["b1/a"] = []
+            fs.dircache["b2/b"] = []
+            task.cancel()
+            await asyncio.sleep(0.1)
+            assert not task.done()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await await_bounded(task)
+            assert "b1/a" not in fs.dircache
+            assert "b2/b" not in fs.dircache
+        finally:
+            release.set()
 
     @pytest.mark.asyncio
     async def test_rm_maxdepth(self):
@@ -2737,9 +2776,62 @@ class TestAioS3StreamedFile:
         fs.core.complete_multipart_upload.assert_called_once()
         fs.core.abort_multipart_upload.assert_not_called()
 
+    def test_close_after_interrupted_cancel(self):
+        # GH-1332 (F2, I1): an interrupt at any point of the cancellation of a
+        # request that a close waits for, including one that skips the
+        # callbacks of its future, does not keep the close waiting.
+        def case(interrupt):
+            fs = AioS3FileSystem(
+                connection=mock_connection(), max_workers=1, skip_instance_cache=True
+            )
+            info = S3Object(
+                init={"Key": "key", "ETag": '"etag"'},
+                type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+                bucket="bucket",
+                key="key",
+            )
+            info.size = 1
+            fs._sync_fs.info = mock.MagicMock(return_value=info)
+            pool = fs._sync_fs._request_pool
+            release = threading.Event()
+            loop = asyncio.new_event_loop()
+            thread = threading.Thread(target=loop.run_forever, daemon=True)
+            thread.start()
+            try:
+                # Holds the only thread of the pool, longer than the waits
+                # below, so that the pool cannot reach the cancelled request.
+                _S3PoolScope(pool, 1).submit(release.wait, 3 * EVENT_TIMEOUT)
+                f = asyncio.run_coroutine_threadsafe(
+                    fs.open_async("s3://bucket/key", "rb"), loop
+                ).result(EVENT_TIMEOUT)
+                future = f._requests.submit(sum, [1, 2])
+                waiting = threading.Event()
+                add_done_callback = future.add_done_callback
+
+                def watch(fn):
+                    add_done_callback(fn)
+                    waiting.set()
+
+                future.add_done_callback = watch  # type: ignore[method-assign]
+                closed = asyncio.run_coroutine_threadsafe(f.close(), loop)
+                assert waiting.wait(EVENT_TIMEOUT)
+                interrupt(future.cancel)
+                if not future.cancelled():
+                    # Interrupted before it changed the state.
+                    assert future.cancel()
+                closed.result(EVENT_TIMEOUT)
+            finally:
+                release.set()
+                loop.call_soon_threadsafe(loop.stop)
+                thread.join(EVENT_TIMEOUT)
+                loop.close()
+                pool.shutdown()
+
+        assert interrupt_each_opcode(Future.cancel, case) > 0
+
     @pytest.mark.asyncio
     async def test_close_waits_for_cancelled_read(self, fs):
-        # GH-1332 (F2): closing a file whose read was cancelled while its
+        # GH-1332 (F2): closing a file whose read was cancelled twice while its
         # request ran waits for the request, which used to run on after the
         # close returned.
         block_size = 2**10
@@ -2767,6 +2859,11 @@ class TestAioS3StreamedFile:
         close = None
         try:
             assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+            # The read waits for its running request (B6) until a second
+            # cancellation stops that wait.
+            read.cancel()
+            await asyncio.sleep(0.1)
+            assert not read.done()
             read.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await read
@@ -3178,11 +3275,10 @@ class TestAioS3StreamedFile:
 
     @pytest.mark.asyncio
     async def test_cancelled_read_frees_ranges(self, fs):
-        # GH-1186: a cancelled parallel read cancels the reads that have not
-        # finished, which stops their retries, and frees the data of the
+        # GH-1186: a cancelled parallel read stops the retries of the running
+        # reads, waits for them (GH-1332, B6), and frees the data of the
         # others, also while the cancellation is held, as a failed read does.
         block_size = 2**10
-        loop = asyncio.get_running_loop()
         read = []
         all_read = threading.Barrier(4, timeout=EVENT_TIMEOUT)
         held = threading.Event()
@@ -3190,24 +3286,11 @@ class TestAioS3StreamedFile:
         operation = ThrottledOperation(failures=1)
         throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
 
-        async def others_done():
-            def running_reads():
-                return [
-                    t
-                    for t in asyncio.all_tasks()
-                    if t.get_coro().__qualname__ == "S3Executor.run" and not t.done()
-                ]
-
-            # At least the held read is found.
-            assert running_reads()
-            await wait_until(lambda: len(running_reads()) <= 1)
-
         def get_object(path, range_, **kwargs):
             if range_[0] == 0:
+                # Retrying when the read is cancelled, once the other ranges
+                # have been read.
                 all_read.wait()
-                # Retrying when the read is cancelled, once the tasks of the
-                # other ranges have taken their results.
-                asyncio.run_coroutine_threadsafe(others_done(), loop).result(EVENT_TIMEOUT)
                 held.set()
                 try:
                     throttled()

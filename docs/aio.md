@@ -334,6 +334,10 @@ ends. A request that has already been sent still runs to its end in its thread. 
 requests that run to their end after a cancellation keep their retries: the commit of a
 file, the CompleteMultipartUpload request of a multipart copy, and the aborts of
 multipart uploads.
+The range reads of a file, the DeleteObjects requests of `_rm()`, and the annotation
+copies of a multipart copy are waited for before the cancellation is raised, also when
+the shutdown of the event loop at the end of `asyncio.run()` cancels the coroutine; a
+second cancellation stops that wait.
 
 ### Executor strategy
 
@@ -343,6 +347,10 @@ and runs them in a pool of `max_workers` threads; in a forked child process, the
 creates new threads. `S3ThreadPoolExecutor` and `S3AioThreadPool` are aliases of `S3ThreadPool`.
 `S3AioExecutor` is kept for compatibility: it is an `S3ThreadPool` that ignores its
 `loop` argument, with a `DeprecationWarning` if one is given.
+`S3Executor.map()` and `S3Executor.map_async()` run a callable for each item in the
+executor and return the outcomes in the order of the items. With `stop_on_failure`,
+the default, the first failure cancels the calls that have not started, stops the
+retries of the running ones, and is raised once they have ended.
 
 The file handles of `AioS3FileSystem.open()` run their multipart uploads and parallel
 range reads in the request pool of the filesystem, at most the `max_workers` of the
