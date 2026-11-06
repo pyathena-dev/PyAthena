@@ -121,7 +121,8 @@ class TestPolarsCursor:
         """A whole CSV result file is read with PyAthena's filesystem and the connection.
 
         GH-1339: it was opened through fsspec's registry, so another registered "s3"
-        filesystem read it without the connection's credentials and region.
+        filesystem, such as s3fs, received the connection as a storage option and
+        failed or read without it.
         """
 
         class _RegisteredFileSystem(AbstractFileSystem):
