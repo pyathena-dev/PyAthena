@@ -348,13 +348,16 @@ class Connection(Generic[ConnectionCursor]):
         # Whether the credentials come from the session alone, because it was given or
         # its STS credentials are refreshed, so that the arguments do not reproduce them.
         self._credentials_from_session = bool(session or role_arn or serial_number)
+        # The client of the STS requests of role_arn or serial_number, closed with the
+        # connection.
+        self._sts_client: BaseClient | None = None
         if session:
             self._session = session
         elif role_arn or serial_number:
             # The profile, credential and botocore session arguments sign only the STS
             # requests, which one client sends; the session and clients of the
             # connection use the credentials that STS returns.
-            sts_client = Session(
+            self._sts_client = Session(
                 region_name=self.region_name,
                 profile_name=self.profile_name,
                 **self._session_kwargs,
@@ -363,7 +366,7 @@ class Connection(Generic[ConnectionCursor]):
             for key in self._STS_SOURCE_ARGS:
                 self._kwargs.pop(key, None)
             self._session = self._create_refreshable_session(
-                sts_client, duration_seconds, prompts=bool(serial_number)
+                self._sts_client, duration_seconds, prompts=bool(serial_number)
             )
         else:
             self._session = Session(
@@ -769,15 +772,17 @@ class Connection(Generic[ConnectionCursor]):
     def close(self) -> None:
         """Close the connection.
 
-        Closes the network connections of the Athena client and of the Glue and
-        S3 clients if they were built. A client used after this opens new
-        network connections.
+        Closes the network connections of the Athena client, of the STS client of
+        ``role_arn`` or ``serial_number``, and of the Glue and S3 clients if they
+        were built. A client used after this opens new network connections.
 
         Note:
             This method is called automatically when using the connection
             as a context manager (with statement).
         """
         self._client.close()
+        if self._sts_client is not None:
+            self._sts_client.close()
         self._glue.close()
         with self._s3_client_lock:
             if self._s3_client is not None:

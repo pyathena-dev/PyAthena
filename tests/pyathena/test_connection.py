@@ -16,7 +16,9 @@ from datetime import UTC, datetime, timedelta
 from inspect import signature
 from typing import Any
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qsl
 
+import botocore.session
 import pytest
 from botocore.awsrequest import AWSResponse
 from botocore.config import Config
@@ -171,22 +173,63 @@ class _RawBody:
         yield self._body
 
 
-def _sts_credentials(access_key_id: str, expiration: datetime) -> dict[str, Any]:
-    """Build the ``Credentials`` of an STS response.
+def _sts_credentials(access_key_id: str, expiration: datetime) -> tuple[str, datetime]:
+    """Describe the credentials of an STS response.
 
     Args:
         access_key_id: The access key ID.
         expiration: The expiration time.
 
     Returns:
-        The credentials as STS returns them.
+        The access key ID and the expiration time.
     """
-    return {
-        "AccessKeyId": access_key_id,
-        "SecretAccessKey": "secret_key",
-        "SessionToken": "session_token",
-        "Expiration": expiration,
-    }
+    return access_key_id, expiration
+
+
+class _STSResponder:
+    """Answer the STS requests of a botocore session with the given credentials, in order."""
+
+    def __init__(self, credentials: list[tuple[str, datetime]]) -> None:
+        """Register the responder on a new botocore session.
+
+        Args:
+            credentials: The access key ID and expiration of each response.
+        """
+        self._credentials = iter(credentials)
+        #: The parameters of each request, by name.
+        self.requests: list[dict[str, str]] = []
+        #: The access key ID that signed each request.
+        self.signed_with: list[str] = []
+        self.botocore_session = botocore.session.Session()
+        self.botocore_session.register("before-send.sts", self._send)
+
+    def _send(self, request: Any, **_: Any) -> AWSResponse:
+        """Record the request and answer it with the next credentials.
+
+        Args:
+            request: The prepared STS request.
+            **_: The other event arguments.
+
+        Returns:
+            The STS response.
+        """
+        body = request.body.decode() if isinstance(request.body, bytes) else request.body
+        params = dict(parse_qsl(body))
+        self.requests.append(params)
+        authorization = request.headers["Authorization"].decode()
+        self.signed_with.append(re.search(r"Credential=([^/]+)/", authorization).group(1))
+        access_key_id, expiration = next(self._credentials)
+        action = params["Action"]
+        xml = (
+            f'<{action}Response xmlns="https://sts.amazonaws.com/doc/2011-06-15/">'
+            f"<{action}Result><Credentials>"
+            f"<AccessKeyId>{access_key_id}</AccessKeyId>"
+            "<SecretAccessKey>secret_key</SecretAccessKey>"
+            "<SessionToken>session_token</SessionToken>"
+            f"<Expiration>{expiration.strftime('%Y-%m-%dT%H:%M:%SZ')}</Expiration>"
+            f"</Credentials></{action}Result></{action}Response>"
+        )
+        return AWSResponse(request.url, 200, {}, _RawBody(xml.encode()))
 
 
 def _connection(**kwargs: Any) -> Connection[Any]:
@@ -512,24 +555,33 @@ class TestConnection:
         assert "s3-agent" not in conn.client.meta.config.user_agent_extra
 
     @pytest.mark.parametrize(
-        ("kwargs", "sts_method"),
+        ("kwargs", "prompts"),
         [
-            ({"role_arn": "arn:aws:iam::123456789012:role/role"}, "_assume_role"),
-            ({"serial_number": "arn:aws:iam::123456789012:mfa/device"}, "_get_session_token"),
+            ({"role_arn": "arn:aws:iam::123456789012:role/role"}, False),
+            ({"serial_number": "arn:aws:iam::123456789012:mfa/device"}, True),
+            (
+                {
+                    "role_arn": "arn:aws:iam::123456789012:role/role",
+                    "serial_number": "arn:aws:iam::123456789012:mfa/device",
+                },
+                True,
+            ),
         ],
-        ids=["role_arn", "serial_number"],
+        ids=["role_arn", "serial_number", "role_arn_with_mfa"],
     )
-    def test_sts_credentials_refreshed(self, isolated_aws_config, kwargs, sts_method):
+    def test_sts_credentials_refreshed(self, isolated_aws_config, monkeypatch, kwargs, prompts):
         # GH-1343: the STS credentials were stored as static keys, so every client
         # of a long-lived connection failed with ExpiredToken after duration_seconds.
         now = datetime.now(UTC)
-        responses = iter(
+        sts = _STSResponder(
             [
                 # Expire within botocore's mandatory refresh window.
                 _sts_credentials("ASIAEXPIRING", now + timedelta(minutes=1)),
                 _sts_credentials("ASIAREFRESHED", now + timedelta(hours=1)),
             ]
         )
+        codes = iter(["111111", "222222"])
+        monkeypatch.setattr("builtins.input", lambda _: next(codes))
         signed_with = []
 
         def send(request, **_):
@@ -539,32 +591,40 @@ class TestConnection:
             body = b"{}" if "athena" in request.url else b"<ListAllMyBucketsResult/>"
             return AWSResponse(request.url, 200, {}, _RawBody(body))
 
-        with (
-            patch.object(Connection, sts_method, side_effect=lambda **_: next(responses)) as sts,
-            contextlib.closing(_connection(**kwargs)) as conn,
-        ):
+        with contextlib.closing(
+            _connection(botocore_session=sts.botocore_session, **kwargs)
+        ) as conn:
             for client in (conn.client, conn.s3_client):
                 client.meta.events.register("before-send", send)
             conn.client.list_work_groups()
             conn.s3_client.list_buckets()
 
-        assert sts.call_count == 2
         assert signed_with == ["ASIAREFRESHED", "ASIAREFRESHED"]
+        # The STS requests are signed with the connection's credential arguments.
+        assert sts.signed_with == ["access_key", "access_key"]
+        action = "AssumeRole" if "role_arn" in kwargs else "GetSessionToken"
+        assert [r["Action"] for r in sts.requests] == [action, action]
+        if prompts:
+            # Each request prompts for a new MFA code.
+            assert [r["TokenCode"] for r in sts.requests] == ["111111", "222222"]
+            assert all(r["SerialNumber"] == kwargs["serial_number"] for r in sts.requests)
+        else:
+            assert all("TokenCode" not in r for r in sts.requests)
 
     @pytest.mark.parametrize(
-        ("kwargs", "sts_method", "requests"),
+        ("kwargs", "requests"),
         [
-            ({"role_arn": "arn:aws:iam::123456789012:role/role"}, "_assume_role", 2),
+            ({"role_arn": "arn:aws:iam::123456789012:role/role"}, 2),
             # Each request prompts for an MFA code, so it waits for the mandatory refresh.
-            ({"serial_number": "arn:aws:iam::123456789012:mfa/device"}, "_get_session_token", 1),
+            ({"serial_number": "arn:aws:iam::123456789012:mfa/device"}, 1),
         ],
         ids=["role_arn", "serial_number"],
     )
     def test_sts_credentials_advisory_refresh(
-        self, isolated_aws_config, kwargs, sts_method, requests
+        self, isolated_aws_config, monkeypatch, kwargs, requests
     ):
         now = datetime.now(UTC)
-        responses = iter(
+        sts = _STSResponder(
             [
                 # Within the advisory refresh window of a duration of an hour (15
                 # minutes), but not within the mandatory one (10 minutes).
@@ -572,13 +632,13 @@ class TestConnection:
                 _sts_credentials("ASIAREFRESHED", now + timedelta(hours=1)),
             ]
         )
-        with (
-            patch.object(Connection, sts_method, side_effect=lambda **_: next(responses)) as sts,
-            contextlib.closing(_connection(**kwargs)) as conn,
-        ):
+        monkeypatch.setattr("builtins.input", lambda _: "123456")
+        with contextlib.closing(
+            _connection(botocore_session=sts.botocore_session, **kwargs)
+        ) as conn:
             conn.session.get_credentials().get_frozen_credentials()
 
-        assert sts.call_count == requests
+        assert len(sts.requests) == requests
 
     def test_close_closes_built_clients(self):
         conn = _connection()
@@ -602,6 +662,18 @@ class TestConnection:
         athena_close.assert_called_once_with()
         glue_close.assert_called_once_with()
         s3_close.assert_called_once_with()
+
+    def test_close_closes_sts_client(self, isolated_aws_config):
+        # GH-1343: the STS client that refreshes the credentials of role_arn is
+        # closed with the connection.
+        sts = _STSResponder([_sts_credentials("ASIAROLE", datetime.now(UTC) + timedelta(hours=1))])
+        conn = _connection(
+            role_arn="arn:aws:iam::123456789012:role/role", botocore_session=sts.botocore_session
+        )
+        with patch.object(conn._sts_client, "close") as sts_close:
+            conn.close()
+
+        sts_close.assert_called_once_with()
 
     def test_internal_cursor_leaves_out_default_cursor_options(self):
         cursor_kwargs = {
