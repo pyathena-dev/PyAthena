@@ -343,8 +343,9 @@ path is a version; any other `?` is part of the key. A path with a version is no
 glob pattern: `copy()`, `mv()` and `get()` copy that version to a destination named
 after its key. `ls()` and `find()` of a key path with a version return only that
 version, named as `ls(versions=True)` names it, without listing the keys under the
-path. If the version does not exist, `ls()` raises `FileNotFoundError` and `find()`
-returns nothing.
+path. They look the version up as `info()` does: if HeadObject reports it missing,
+`ls()` raises `FileNotFoundError` and `find()` returns nothing, and other errors, such
+as the `400 Bad Request` of a version ID that the bucket rejects, are raised.
 
 ```python
 fs = S3FileSystem(

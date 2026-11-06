@@ -4486,6 +4486,18 @@ class TestS3FileSystem:
         assert actual[2].size == 2
         assert fs.ls("s3://bucket/path", versions=True) == [f.name for f in actual]
 
+    def test_ls_versions_empty_segment(self):
+        # GH-1335: the common prefix "path/dir//" is the directory
+        # "bucket/path/dir/", as in a listing without versions.
+        fs = self._make_fs()
+        fs.version_aware = True
+        fs._call.return_value = {
+            "CommonPrefixes": [{"Prefix": "path/dir//"}],
+            "IsTruncated": False,
+        }
+
+        assert fs.ls("s3://bucket/path/dir", versions=True) == ["bucket/path/dir/"]
+
     def test_ls_versions_missing_path(self):
         fs = self._make_fs()
         fs.version_aware = True

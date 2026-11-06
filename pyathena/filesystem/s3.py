@@ -597,8 +597,8 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             FileNotFoundError: If the bucket does not exist, or if a key path
                 is neither an object nor a directory, a path that some key
-                starts with followed by ``/``, or if the version that a key
-                path with a version ID names does not exist.
+                starts with followed by ``/``, or if HeadObject reports the
+                version that a key path with a version ID names missing.
 
         Example:
             >>> fs = S3FileSystem()
@@ -963,7 +963,7 @@ class S3FileSystem(AbstractFileSystem):
         it, unless it is a bucket, or if it is an object and nothing is listed
         below it. A key path with a version ID names that version of the
         object: the result is the version, named as ``ls(versions=True)``
-        names it, if it exists, and empty otherwise.
+        names it, or empty if HeadObject reports it missing.
 
         Args:
             path: S3 path to search under (e.g., "s3://bucket/prefix").
