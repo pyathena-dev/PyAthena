@@ -2510,11 +2510,12 @@ class S3FileSystem(AbstractFileSystem):
         else:
             raw = os.fspath(path)
             path = self._strip_protocol(raw)
-            if path:
+            if path and not S3Path.has_version_id(path):
                 # _strip_protocol() removes the trailing slashes of a key such
                 # as "dir//", whose parent listing is that of "bucket/dir/".
+                # Lookups strip them from a version ID in the same way.
                 path += "/" * (len(raw) - len(raw.rstrip("/")))
-            else:
+            elif not path:
                 self._evict_cache("")
             while path:
                 base, version_id = S3Path.split_version_id(path)
