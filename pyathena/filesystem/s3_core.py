@@ -490,6 +490,17 @@ class S3MultipartCopyPlan:
     fits_single_request: bool = False
 
 
+# The parameters of a copy that authorize the access to its source, and their
+# names in the requests that read the source.
+_COPY_SOURCE_PARAMS = {
+    "RequestPayer": "RequestPayer",
+    "ExpectedSourceBucketOwner": "ExpectedBucketOwner",
+    "CopySourceSSECustomerAlgorithm": "SSECustomerAlgorithm",
+    "CopySourceSSECustomerKey": "SSECustomerKey",
+    "CopySourceSSECustomerKeyMD5": "SSECustomerKeyMD5",
+}
+
+
 class S3Core:
     """Typed S3 operations on a boto3 S3 client.
 
@@ -1674,14 +1685,33 @@ class S3Core:
             parameters under the names of the requests that read the source
             (``ExpectedBucketOwner`` and ``SSECustomer*``), where given.
         """
-        source_params = {
-            "RequestPayer": params.get("RequestPayer"),
-            "ExpectedBucketOwner": params.get("ExpectedSourceBucketOwner"),
-            "SSECustomerAlgorithm": params.get("CopySourceSSECustomerAlgorithm"),
-            "SSECustomerKey": params.get("CopySourceSSECustomerKey"),
-            "SSECustomerKeyMD5": params.get("CopySourceSSECustomerKeyMD5"),
+        return {
+            read: params[copy]
+            for copy, read in _COPY_SOURCE_PARAMS.items()
+            if params.get(copy) is not None
         }
-        return {k: v for k, v in source_params.items() if v is not None}
+
+    @staticmethod
+    def copy_from_source_params(params: Mapping[str, Any]) -> dict[str, Any]:
+        """Map the parameters of the requests that read an object to those of a copy from it.
+
+        The inverse of :meth:`copy_source_params`, for a copy whose source is
+        read with ``params``, such as the part copies of an append.
+
+        Args:
+            params: The parameters of the requests that read the object.
+
+        Returns:
+            ``RequestPayer``, and the expected bucket owner and SSE-C
+            parameters under the names of the copy source
+            (``ExpectedSourceBucketOwner`` and ``CopySourceSSECustomer*``),
+            where given.
+        """
+        return {
+            copy: params[read]
+            for copy, read in _COPY_SOURCE_PARAMS.items()
+            if params.get(read) is not None
+        }
 
     def list_objects_page(
         self,

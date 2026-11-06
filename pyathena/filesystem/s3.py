@@ -2867,7 +2867,9 @@ class S3FileTarget:
                     # the methods of the file use it too.
                     path = f"{path}?versionId={version_id}"
             if etag := info.get("etag"):
-                kwargs.update({"IfMatch": etag})
+                # A caller's condition is sent as given, so that a read of
+                # another object fails as S3 answers it (412).
+                kwargs.setdefault("IfMatch", etag)
             details = info
             if size is None:
                 size = info.get("size")
@@ -2876,19 +2878,42 @@ class S3FileTarget:
             # which a cached listing entry lacks, so look up the object.
             with contextlib.suppress(FileNotFoundError):
                 appended = fs.info(path, refresh=True, **lookup_kwargs)
+            if (
+                appended is not None
+                and appended.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
+            ):
+                # A prefix has no object to append to, as when reading.
+                appended = None
             if appended is not None:
+                etag = appended.get("etag")
                 if appended.get("size", 0) < fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE:
                     # Too small to be a part of a multipart upload: rewritten
-                    # from the buffer. Only the lookup parameters are sent, so
-                    # that the whole object is read.
-                    append_data = fs.cat_file(path, **lookup_kwargs)
+                    # from the buffer. Only the lookup parameters, and the
+                    # condition on the object looked up, are sent, so that
+                    # the whole object is read, and an object replaced since
+                    # is not.
+                    condition = {"IfMatch": etag} if etag else {}
+                    append_data = fs.cat_file(path, **condition, **lookup_kwargs)
                 kwargs.update(appended.to_api_repr())
+                # The part copies read the object looked up, with the
+                # parameters that authorize the access to it under the names
+                # of the copy source; a caller's values are kept.
+                copy_source = fs.core.copy_from_source_params(lookup_kwargs)
+                if etag:
+                    copy_source["CopySourceIfMatch"] = etag
+                for k, v in copy_source.items():
+                    kwargs.setdefault(k, v)
                 details = appended
         elif "x" in mode:
             # Checked up front so that no data is uploaded for an existing
-            # object, and on commit with IfNoneMatch for one created since.
-            if fs.exists(path, **lookup_kwargs):
-                raise FileExistsError(path)
+            # object, and on commit with IfNoneMatch for one created since. A
+            # prefix has no object, as when reading.
+            with contextlib.suppress(FileNotFoundError):
+                if (
+                    fs.info(path, **lookup_kwargs).get("type")
+                    != S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
+                ):
+                    raise FileExistsError(path)
             kwargs.update({"IfNoneMatch": "*"})
         return cls(
             path=path,
@@ -3029,16 +3054,23 @@ class S3File(AbstractBufferedFile):
             cache_type=cache_type,
             cache_options=cache_options,
             size=target.size,
+            # Kept as ``self.kwargs``, which fsspec passes to open() when it
+            # reopens the file (e.g., when it is unpickled): the parameters
+            # of the requests, including the condition on the object looked
+            # up, so that the reopened file reads the same object or fails.
+            **(target.request_kwargs if mode == "rb" else {}),
         )
 
         self.append_block = False
+        # The size of the appended object, as looked up when opening.
+        self._append_size = 0
         if target.appended is not None:
             if target.append_data is not None:
                 self.write(target.append_data)
             else:
                 # Copied with UploadPartCopy as the leading part(s).
                 self.append_block = True
-            self.loc = target.appended.get("size", 0)
+            self._append_size = self.loc = target.appended.get("size", 0)
 
     def _get_request_kwargs(self, method: str) -> dict[str, Any]:
         """Select the parameters of the file that an S3 operation accepts.
@@ -3238,15 +3270,10 @@ class S3File(AbstractBufferedFile):
             # Raises the failure of the creation.
             session.check()
             if self.append_block:
-                whole_source = self.tell() <= self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE
-                size = self.tell()
-                if not whole_source:
-                    info = self.fs.info(
-                        self.path,
-                        version_id=self.version_id,
-                        **self.fs._get_lookup_kwargs(self.s3_additional_kwargs),
-                    )
-                    size = info.get("size", 0)
+                # The size of the object looked up when opening, which the
+                # part copies are conditional on.
+                size = self._append_size
+                whole_source = size <= self.fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE
                 source = S3Path(self.bucket, self.key)
                 for part_number, range_ in session.iter_copy_parts(size):
                     # The part copies count toward max_workers, as the parts do.
@@ -3326,7 +3353,8 @@ class S3File(AbstractBufferedFile):
         the file is closed without committing it, and its upload is aborted;
         if the abort also fails, the upload is kept so that :meth:`discard`
         can abort it. Committing again after a successful commit sends no
-        request. Invalidates the cache of the path afterwards.
+        request. Invalidates the cache of the path afterwards. Does nothing
+        for a file opened for reading.
 
         Raises:
             FileExistsError: If an object was created at the path after the
@@ -3337,7 +3365,10 @@ class S3File(AbstractBufferedFile):
                 or an earlier commit failed.
         """
         self._check_process()
-        session = cast(_S3WriteSession, self._session)
+        if self._session is None:
+            # A file opened for reading has nothing to commit.
+            return
+        session = self._session
         if not session.multipart:
             body = None
             if self.buffer is not None and self.tell():
@@ -3375,60 +3406,99 @@ class S3File(AbstractBufferedFile):
         if self._session is not None:
             self._session.abort()
 
+    def _lookup_kwargs(self) -> dict[str, Any]:
+        """Select the parameters of the file on which the access to its object depends.
+
+        Returns:
+            The lookup parameters of the file (see
+            ``S3FileSystem._get_lookup_kwargs``), such as ``RequestPayer`` or
+            the ``SSECustomer*`` parameters of an object encrypted with a
+            customer-provided key.
+        """
+        return self.fs._get_lookup_kwargs(self.s3_additional_kwargs)
+
     def url(self, expiration: int = 3600, **kwargs) -> str:
         """Generate a presigned HTTP URL to read this file (if it already exists).
 
+        The URL is signed with the lookup parameters of the file, such as
+        ``RequestPayer`` or the ``SSECustomer*`` parameters, whose headers
+        the request with the URL must then send.
+
         Args:
             expiration: URL expiration time in seconds. Defaults to 3600 (1 hour).
-            **kwargs: Additional parameters passed to :meth:`S3FileSystem.sign`.
+            **kwargs: Additional parameters passed to :meth:`S3FileSystem.sign`,
+                which take precedence over those of the file.
 
         Returns:
             Presigned URL string that provides temporary access to the S3 object.
         """
-        return cast(str, self.fs.sign(self.path, expiration=expiration, **kwargs))
+        return cast(
+            str,
+            self.fs.sign(self.path, expiration=expiration, **{**self._lookup_kwargs(), **kwargs}),
+        )
 
     def metadata(self, **kwargs) -> S3Metadata:
         """Return the metadata of the file.
 
-        See :meth:`S3FileSystem.metadata`.
+        See :meth:`S3FileSystem.metadata`. The HeadObject request receives the
+        lookup parameters of the file, such as ``RequestPayer`` or the
+        ``SSECustomer*`` parameters.
 
         Args:
-            **kwargs: Additional parameters passed to the HeadObject API.
+            **kwargs: Additional parameters passed to the HeadObject API,
+                which take precedence over those of the file.
 
         Returns:
             S3Metadata, which behaves as a read-only mapping of the
             user-defined metadata and exposes the system-defined metadata
             as typed properties.
         """
-        return self.fs.metadata(self.path, **kwargs)
+        return self.fs.metadata(self.path, **{**self._lookup_kwargs(), **kwargs})
 
     def getxattr(self, xattr_name: str, **kwargs) -> str | None:
         """Get an attribute from the user-defined metadata of the file.
 
-        See :meth:`S3FileSystem.getxattr`.
+        See :meth:`S3FileSystem.getxattr`, and :meth:`metadata` for the
+        parameters of the request.
 
         Args:
             xattr_name: The name of the attribute.
-            **kwargs: Additional parameters passed to the HeadObject API.
+            **kwargs: Additional parameters passed to the HeadObject API,
+                which take precedence over those of the file.
 
         Returns:
             The value of the attribute, or None if the attribute is not set.
         """
-        return self.fs.getxattr(self.path, xattr_name, **kwargs)
+        return self.fs.getxattr(self.path, xattr_name, **{**self._lookup_kwargs(), **kwargs})
 
     def setxattr(self, copy_kwargs: dict[str, Any] | None = None, **kwargs) -> None:
         """Set the user-defined metadata of the file.
 
-        See :meth:`S3FileSystem.setxattr`.
+        See :meth:`S3FileSystem.setxattr`. The copy of the object onto itself
+        receives the lookup parameters of the file both for its source and
+        for its destination: ``RequestPayer``, the expected bucket owner as
+        ``ExpectedSourceBucketOwner`` and ``ExpectedBucketOwner``, and the
+        ``SSECustomer*`` parameters also as ``CopySourceSSECustomer*``, so
+        that an object encrypted with a customer-provided key keeps it.
 
         Args:
             copy_kwargs: Additional parameters to use for the underlying
-                CopyObject API call.
+                CopyObject API call, which take precedence over those of the
+                file.
             **kwargs: Key-value pairs of metadata to set.
         """
         if self.writable():
             raise NotImplementedError("Cannot update metadata while the file is open for writing.")
-        self.fs.setxattr(self.path, copy_kwargs=copy_kwargs, **kwargs)
+        lookup_kwargs = self._lookup_kwargs()
+        self.fs.setxattr(
+            self.path,
+            copy_kwargs={
+                **lookup_kwargs,
+                **self.fs.core.copy_from_source_params(lookup_kwargs),
+                **(copy_kwargs or {}),
+            },
+            **kwargs,
+        )
 
     def _fetch_range(self, start: int, end: int) -> bytes:
         """Read a byte range of the object for the fsspec cache.

@@ -238,6 +238,19 @@ fs.cp_file(
 )
 ```
 
+A file opened for reading sends its reads on the condition of the ETag looked up when it
+was opened (`IfMatch`), so reading an object replaced since raises `OSError`; an
+`IfMatch` given to `open` is sent instead. A file that fsspec reopens, such as an
+unpickled file, keeps the request parameters of the file, including the
+`SSECustomerKey` of an SSE-C object, and this condition. `metadata()`, `getxattr()`,
+`url()`, and `setxattr()` of a file send its lookup parameters; `setxattr()` sends them
+also under the names of the copy source. In an append, the existing object is read or
+copied as parts on the condition of the ETag looked up when the file was opened, so an
+append to an object replaced since raises `OSError`, and its multipart upload, if any,
+is aborted. A
+key that is only a prefix of other keys has no object: reading it raises
+`FileNotFoundError`, and appending or exclusive creation (`"xb"`) writes a new object.
+
 (filesystem-read-caching)=
 
 ## Read caching
