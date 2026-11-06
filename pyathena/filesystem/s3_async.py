@@ -57,11 +57,13 @@ class AioS3FileSystem(AsyncFileSystem):
     This class wraps ``S3FileSystem`` to provide native asyncio support. Its
     coroutines run the blocking boto3 calls in an ``S3ThreadPool`` with
     ``max_workers`` threads that the filesystem owns, instead of the default
-    executor of the event loop, and run parallel requests with
-    ``asyncio.gather``. The single requests that these calls run in
-    parallel, such as the parts of a file or a copy and the DeleteObjects
-    batches of ``_rm()``, run in the request pool of the wrapped
-    ``S3FileSystem``, which its files share.
+    executor of the event loop, and run parallel per-object calls, such as
+    the copies of ``_mv()``, with ``asyncio.gather``. The single requests
+    that these calls run in parallel, such as the parts of a file or a copy,
+    and the DeleteObjects batches of ``_rm()``, run in the request pool of
+    the wrapped ``S3FileSystem``, which its files share, through
+    :meth:`~pyathena.filesystem.s3_executor.S3Executor.map_async` or a write
+    session.
 
     The implementation uses composition: an internal ``S3FileSystem`` instance handles
     all boto3 calls, while this class delegates to it in the threads of its pool.
