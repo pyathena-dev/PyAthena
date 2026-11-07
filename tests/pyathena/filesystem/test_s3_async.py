@@ -2269,6 +2269,36 @@ class TestAioS3StreamedFile:
         core.operation_params = mock.MagicMock(side_effect=lambda method, params: dict(params))
         return fs
 
+    @pytest.mark.asyncio
+    async def test_reopen_keeps_parameters_and_pin(self, fs):
+        # GH-1334: fsspec reopens an unpickled streamed file with its kwargs,
+        # which carry the parameters of the requests, including the SSE-C
+        # key, and the ETag looked up when it was opened, so that the
+        # reopened file reads the same object, or fails.
+        sse_c = {"SSECustomerAlgorithm": "AES256", "SSECustomerKey": "k" * 32}
+
+        def lookup(etag, size):
+            return S3Object(
+                init={"ContentLength": size, "ETag": etag},
+                type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+                bucket="bucket",
+                key="key",
+            )
+
+        fs._sync_fs.info = mock.MagicMock(return_value=lookup('"e"', 4))
+        f = await fs.open_async("s3://bucket/key", "rb", **sse_c)
+        reopen, args = f.__reduce__()
+        await f.close()
+
+        # The object is replaced by a larger one before the file is reopened.
+        fs._sync_fs.info.return_value = lookup('"new"', 8)
+        with await asyncio.to_thread(reopen, *args) as g:
+            assert g.size == 4
+            assert {k: g.s3_additional_kwargs.get(k) for k in [*sse_c, "IfMatch"]} == {
+                **sse_c,
+                "IfMatch": '"e"',
+            }
+
     @forking
     def test_file_inherited_across_fork(self, fs):
         # GH-1332: in a forked child, a file that the parent opened raises on

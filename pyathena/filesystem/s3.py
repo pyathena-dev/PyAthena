@@ -3435,9 +3435,10 @@ class S3File(AbstractBufferedFile):
     def url(self, expiration: int = 3600, **kwargs) -> str:
         """Generate a presigned HTTP URL to read this file (if it already exists).
 
-        The URL is signed with the lookup parameters of the file, such as
-        ``RequestPayer`` or the ``SSECustomer*`` parameters, whose headers
-        the request with the URL must then send.
+        The URL is signed with the lookup parameters of the file that the
+        signed operation accepts, such as ``RequestPayer`` or the
+        ``SSECustomer*`` parameters, whose headers the request with the URL
+        must then send.
 
         Args:
             expiration: URL expiration time in seconds. Defaults to 3600 (1 hour).
@@ -3447,10 +3448,11 @@ class S3File(AbstractBufferedFile):
         Returns:
             Presigned URL string that provides temporary access to the S3 object.
         """
-        return cast(
-            str,
-            self.fs.sign(self.path, expiration=expiration, **{**self._lookup_kwargs(), **kwargs}),
+        # Only the parameters of the file that the signed operation accepts.
+        params = self.fs.core.operation_params(
+            kwargs.get("client_method", "get_object"), self._lookup_kwargs()
         )
+        return cast(str, self.fs.sign(self.path, expiration=expiration, **{**params, **kwargs}))
 
     def metadata(self, **kwargs) -> S3Metadata:
         """Return the metadata of the file.
@@ -3494,7 +3496,9 @@ class S3File(AbstractBufferedFile):
         for its destination: ``RequestPayer``, the expected bucket owner as
         ``ExpectedSourceBucketOwner`` and ``ExpectedBucketOwner``, and the
         ``SSECustomer*`` parameters also as ``CopySourceSSECustomer*``, so
-        that an object encrypted with a customer-provided key keeps it.
+        that an object encrypted with a customer-provided key keeps it. A
+        ``ServerSideEncryption`` in ``copy_kwargs`` replaces the
+        ``SSECustomer*`` parameters of the destination.
 
         Args:
             copy_kwargs: Additional parameters to use for the underlying
@@ -3504,13 +3508,20 @@ class S3File(AbstractBufferedFile):
         """
         if self.writable():
             raise NotImplementedError("Cannot update metadata while the file is open for writing.")
+        copy_kwargs = copy_kwargs or {}
         lookup_kwargs = self._lookup_kwargs()
+        destination = lookup_kwargs
+        if "ServerSideEncryption" in copy_kwargs:
+            # Another encryption of the copy replaces the customer-provided key.
+            destination = {
+                k: v for k, v in lookup_kwargs.items() if not k.startswith("SSECustomer")
+            }
         self.fs.setxattr(
             self.path,
             copy_kwargs={
-                **lookup_kwargs,
+                **destination,
                 **self.fs.core.copy_from_source_params(lookup_kwargs),
-                **(copy_kwargs or {}),
+                **copy_kwargs,
             },
             **kwargs,
         )

@@ -7,6 +7,7 @@ import functools
 import gc
 import gzip
 import io
+import itertools
 import lzma
 import os
 import re
@@ -2930,26 +2931,51 @@ class TestS3FileSystem:
             f.metadata()
             f.getxattr("a")
             f.url()
+            # Only the parameters that the signed operation accepts.
+            f.url(client_method="delete_object")
             f.setxattr(a="1")
+            # Another encryption replaces the key of the destination.
+            f.setxattr(copy_kwargs={"ServerSideEncryption": "AES256"}, a="2")
         assert [request for name, request in requests if name == "head_object"] == [
             {"Bucket": "bucket", "Key": "key", **self.LOOKUP_KWARGS}
-        ] * 3
-        (url,) = [request for name, request in requests if name == "generate_presigned_url"]
-        assert url["Params"] == {"Bucket": "bucket", "Key": "key", **self.LOOKUP_KWARGS}
-        (copy,) = [request for name, request in requests if name == "copy_object"]
-        assert {
-            k: v
-            for k, v in copy.items()
-            if k not in {"Metadata", "MetadataDirective", "StorageClass"}
-        } == {
+        ] * 4
+        urls = [request["Params"] for name, request in requests if name == "generate_presigned_url"]
+        assert urls == [
+            {"Bucket": "bucket", "Key": "key", **self.LOOKUP_KWARGS},
+            {
+                "Bucket": "bucket",
+                "Key": "key",
+                "ExpectedBucketOwner": "111122223333",
+                "RequestPayer": "requester",
+            },
+        ]
+        copies = [
+            {
+                k: v
+                for k, v in request.items()
+                if k not in {"Metadata", "MetadataDirective", "StorageClass"}
+            }
+            for name, request in requests
+            if name == "copy_object"
+        ]
+        source = {
             "CopySource": {"Bucket": "bucket", "Key": "key"},
             "Bucket": "bucket",
             "Key": "key",
-            **self.LOOKUP_KWARGS,
+            "ExpectedBucketOwner": "111122223333",
+            "RequestPayer": "requester",
             "ExpectedSourceBucketOwner": "111122223333",
             "CopySourceSSECustomerAlgorithm": "AES256",
             "CopySourceSSECustomerKey": "k" * 32,
         }
+        assert copies == [
+            {
+                **source,
+                "SSECustomerAlgorithm": "AES256",
+                "SSECustomerKey": "k" * 32,
+            },
+            {**source, "ServerSideEncryption": "AES256"},
+        ]
 
     def test_open_append_pins_read_object(self):
         # GH-1334: an existing object read into the buffer is read on the
@@ -6932,6 +6958,14 @@ class TestS3File:
         fs.info.assert_called_once()
         copies = fs.core.upload_part_copy.call_args_list
         assert copies
+        # The ranges cover the object looked up, and nothing beyond it.
+        ranges = [
+            c.kwargs.get("range_") for c in sorted(copies, key=lambda c: c.kwargs["part_number"])
+        ]
+        if ranges != [None]:
+            assert ranges[0][0] == 0
+            assert ranges[-1][1] == len(existing)
+            assert all(a[1] == b[0] for a, b in itertools.pairwise(ranges))
         for c in copies:
             assert {
                 k: c.kwargs[k]

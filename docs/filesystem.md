@@ -244,10 +244,12 @@ was opened (`IfMatch`), so reading an object replaced since raises `OSError`; an
 unpickled file, keeps the request parameters of the file, including the
 `SSECustomerKey` of an SSE-C object, and this condition. `metadata()`, `getxattr()`,
 `url()`, and `setxattr()` of a file send its lookup parameters; `setxattr()` sends them
-also under the names of the copy source. In an append, the existing object is read or
-copied as parts on the condition of the ETag looked up when the file was opened, so an
-append to an object replaced since raises `OSError`, and its multipart upload, if any,
-is aborted. A key that is only a prefix of other keys has no object: reading it raises
+also under the names of the copy source. In an append, the existing object is read when
+the file is opened, or copied as parts when its upload starts, on the condition of the
+ETag looked up when the file was opened. If the object was replaced before it is read or
+copied, the append raises `OSError`, and its multipart upload, if any, is aborted. The
+write of the appended object is not conditional, so it replaces an object written after
+the existing object was read or copied. A key that is only a prefix of other keys has no object: reading it raises
 `FileNotFoundError`, and appending, exclusive creation (`"xb"`), and `pipe`/`put` with
 `mode="create"` write a new object.
 
