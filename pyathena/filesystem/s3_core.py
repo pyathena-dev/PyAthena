@@ -1354,7 +1354,8 @@ class S3Core:
                 )
             )
             if annotation_directive == "COPY"
-            and "CopySourceSSECustomerAlgorithm" not in params
+            # The parameters of the copy, or the request_kwargs added to it.
+            and "CopySourceSSECustomerAlgorithm" not in {**self._request_kwargs, **params}
             and not source.is_directory_bucket
             else ()
         )

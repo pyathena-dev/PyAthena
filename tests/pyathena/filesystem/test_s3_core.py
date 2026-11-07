@@ -1374,6 +1374,28 @@ class TestS3Core:
         with stubber, pytest.raises(ValueError, match="no size"):
             core.plan_multipart_copy(S3Path("bucket", "src"), S3Path("bucket", "dst"))
 
+    def test_plan_multipart_copy_request_kwargs_sse_c(self):
+        # GH-1372: a source whose customer-provided key comes from the
+        # request_kwargs has no annotations to list, as with one given to
+        # the copy, so ListObjectAnnotations is not sent.
+        core, stubber = _make_core(
+            request_kwargs={
+                "CopySourceSSECustomerAlgorithm": "AES256",
+                "CopySourceSSECustomerKey": "k" * 32,
+            }
+        )
+        stubber.add_response("head_object", {"ContentLength": MULTIPART_COPY_SIZE})
+        with stubber:
+            plan = core.plan_multipart_copy(
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
+                MULTIPART_COPY_BLOCK_SIZE,
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+            )
+        stubber.assert_no_pending_responses()
+        assert plan.annotations == ()
+
     def test_plan_multipart_copy_unknown_parameter(self):
         # A parameter that CopyObject does not accept is passed on to
         # CreateMultipartUpload, so that botocore still rejects it.

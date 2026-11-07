@@ -222,8 +222,9 @@ parameters, are sent with every request of the filesystem whose operation accept
 listings and copies included. A copy also sends them for its source, as
 `ExpectedSourceBucketOwner` and the `CopySourceSSECustomer*` parameters. The parameters
 of a call take precedence. With an `SSECustomerKey` there, every object that the
-filesystem reads or copies must be encrypted with that key. `sign` signs only the
-parameters given to it.
+filesystem reads or copies must be encrypted with that key, and every object that it
+writes is: a call that asks for another encryption with `ServerSideEncryption` sends both,
+which S3 rejects. `sign` signs only the parameters given to it.
 
 ```python
 fs = S3FileSystem(s3_additional_kwargs={"RequestPayer": "requester", **sse_c})

@@ -1136,12 +1136,12 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             TypeError: If kwargs has ``bucket``, ``key`` or ``version_id``,
-                which the path gives.
+                or ``Bucket``, ``Key`` or ``VersionId``, which the path gives.
         """
         s3_path = S3Path.parse(path)
         if not s3_path.key:
             return
-        for name in ("bucket", "key", "version_id"):
+        for name in ("bucket", "key", "version_id", "Bucket", "Key", "VersionId"):
             if name in kwargs:
                 raise TypeError(f"rm_file() got multiple values for keyword argument '{name}'")
         _logger.debug(f"Delete object: {s3_path.uri}")
@@ -1500,7 +1500,7 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError("Cannot touch the file with the version specified.")
         if "Body" in kwargs:
             raise TypeError("touch() creates an empty object; use pipe_file() to write data.")
-        if not truncate and self._object_exists(path, self._get_lookup_kwargs(kwargs)):
+        if not truncate and self._key_exists(s3_path, self._get_lookup_kwargs(kwargs)):
             raise ValueError("Cannot touch the existing file without specifying truncate.")
         if not s3_path.key:
             raise ValueError("Cannot touch the bucket.")
@@ -2652,6 +2652,28 @@ class S3FileSystem(AbstractFileSystem):
         with contextlib.suppress(KeyError):
             del self.dircache[key]
 
+    def _key_exists(self, path: S3Path, lookup_kwargs: Mapping[str, Any]) -> bool:
+        """Check whether an object exists at the key of the path as written.
+
+        Unlike :meth:`_object_exists`, a key that ends in a slash, such as a
+        folder marker, is looked up as it is, for a write of that key.
+
+        Args:
+            path: The path of the object.
+            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
+                to send with the requests.
+
+        Returns:
+            True if an object exists at the key.
+        """
+        if not (path.key or "").endswith("/"):
+            return self._object_exists(path.uri, lookup_kwargs)
+        try:
+            self.core.head_object(path, **lookup_kwargs)
+        except FileNotFoundError:
+            return False
+        return True
+
     def _object_exists(self, path: str, lookup_kwargs: Mapping[str, Any]) -> bool:
         """Check whether an object exists at the path, for a write that must not replace one.
 
@@ -3619,7 +3641,8 @@ class S3File(AbstractBufferedFile):
         ``SSECustomer*`` parameters also as ``CopySourceSSECustomer*``, so
         that an object encrypted with a customer-provided key keeps it. A
         ``ServerSideEncryption`` in ``copy_kwargs`` replaces the
-        ``SSECustomer*`` parameters of the destination.
+        ``SSECustomer*`` parameters of the file for the destination; those
+        in the ``s3_additional_kwargs`` of the filesystem are still sent.
 
         Args:
             copy_kwargs: Additional parameters to use for the underlying

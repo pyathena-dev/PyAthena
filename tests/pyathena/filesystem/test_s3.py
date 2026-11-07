@@ -456,7 +456,8 @@ class TestS3FileSystem:
         fs._call.side_effect = [FileNotFoundError("bucket/a/c.txt"), {}]
         assert not fs.exists("s3://bucket/a/c.txt")
 
-    @pytest.mark.parametrize("name", ["bucket", "key", "version_id"])
+    # GH-1372: also as the parameters of DeleteObject, which rm_file passes.
+    @pytest.mark.parametrize("name", ["bucket", "key", "version_id", "Bucket", "Key", "VersionId"])
     def test_rm_file_path_kwargs(self, name):
         # The path gives these; rm_file() must not delete another version
         # than the one asked for.
@@ -1318,6 +1319,20 @@ class TestS3FileSystem:
         (put,) = [request for name, request in requests if name == "put_object"]
         assert put == {"Bucket": "bucket", "Key": "dir", **sse_c}
 
+    def test_touch_no_truncate_folder_marker(self):
+        # GH-1372: touch() writes the key as written, so an object at a key
+        # that ends in a slash, such as a folder marker, is looked up as it
+        # is and not replaced.
+        fs = self._make_fs()
+        requests = self._record_requests(fs)
+
+        with pytest.raises(ValueError, match="existing file"):
+            fs.touch("s3://bucket/dir/", truncate=False)
+        assert [request for name, request in requests if name == "head_object"] == [
+            {"Bucket": "bucket", "Key": "dir/"}
+        ]
+        assert "put_object" not in [name for name, _ in requests]
+
     def test_pipe_file_small_uses_put_object(self):
         fs = self._make_fs()
         fs.default_block_size = S3FileSystem.DEFAULT_BLOCK_SIZE
@@ -1389,8 +1404,8 @@ class TestS3FileSystem:
             key="dummy",
             secret="dummy",
             region_name="us-east-1",
-            requester_pays=True,
             s3_additional_kwargs={
+                "RequestPayer": "requester",
                 "ExpectedBucketOwner": "111122223333",
                 "SSECustomerAlgorithm": "AES256",
                 "SSECustomerKey": "k" * 32,
