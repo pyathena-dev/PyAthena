@@ -79,7 +79,8 @@ fs = S3FileSystem(anon=True)
 The filesystem uses a given client as it is and does not close it. Combining `client`
 with an argument from which the filesystem builds a client, such as `key`, `secret`,
 `token`, `profile`, `anon`, `endpoint_url`, `client_kwargs`, `config_kwargs`, or
-`region_name`, raises `TypeError`. `requester_pays`, `max_workers`, the cache options,
+`region_name`, raises `TypeError`; such settings from fsspec's configuration, such as
+the `FSSPEC_S3_ENDPOINT_URL` environment variable, are ignored. `requester_pays`, `max_workers`, the cache options,
 and the arguments of fsspec can be combined with it. `s3_filesystem()` takes the other
 arguments of the filesystem, and `AioS3FileSystem` as its second argument.
 

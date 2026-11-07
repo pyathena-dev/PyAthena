@@ -611,9 +611,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         """Get the arguments of the S3FileSystem that reads the result files.
 
         ``_read_csv()`` opens a CSV result file with an ``S3FileSystem`` that
-        ``s3_filesystem()`` creates from the connection and them, and passes the
-        open file to Polars; the chunked read of UNLOAD results with pyarrow reads
-        its files with one.
+        ``s3_filesystem()`` creates with them and the S3 client of the connection,
+        and passes the open file to Polars; the chunked read of UNLOAD results with
+        pyarrow reads its files with one.
 
         Returns:
             The ``S3FileSystem`` arguments other than the client of the connection.

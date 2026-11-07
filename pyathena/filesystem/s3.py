@@ -26,6 +26,7 @@ from botocore.client import BaseClient, Config
 from fsspec import AbstractFileSystem
 from fsspec.callbacks import _DEFAULT_CALLBACK, Callback
 from fsspec.compression import compr
+from fsspec.config import apply_config
 from fsspec.core import get_compression
 from fsspec.implementations.local import LocalFileSystem, make_path_posix, trailing_sep
 from fsspec.spec import AbstractBufferedFile
@@ -417,7 +418,8 @@ class S3FileSystem(AbstractFileSystem):
                 ``retry_config``, or ``client`` or ``connection`` with an
                 argument from which the filesystem builds a client, such as
                 ``key``, ``profile``, ``anon``, ``endpoint_url``,
-                ``client_kwargs``, or ``region_name``.
+                ``client_kwargs``, or ``region_name``, other than one that
+                fsspec's configuration supplies.
         """
         super().__init__(*args, **kwargs)
         self.batch_size = self._check_batch_size(batch_size)
@@ -432,8 +434,14 @@ class S3FileSystem(AbstractFileSystem):
                 raise TypeError("connection cannot be combined with client or retry_config.")
         self._client_injected = client is not None or connection is not None
         if self._client_injected:
+            # The settings of fsspec's configuration for the protocol, such as
+            # the FSSPEC_S3_* environment variables, apply to every filesystem
+            # and are ignored instead.
+            configured = apply_config(type(self), {})
             building_args = sorted(
-                k for k in self._CLIENT_BUILDING_ARGS if kwargs.get(k) is not None
+                k
+                for k in self._CLIENT_BUILDING_ARGS
+                if kwargs.get(k) is not None and (k not in configured or kwargs[k] != configured[k])
             )
             if building_args:
                 raise TypeError(
