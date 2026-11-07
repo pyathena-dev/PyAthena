@@ -221,10 +221,9 @@ the access to the objects, `RequestPayer`, `ExpectedBucketOwner`, and the `SSECu
 parameters, are sent with every request of the filesystem whose operation accepts them,
 listings and copies included. A copy also sends them for its source, as
 `ExpectedSourceBucketOwner` and the `CopySourceSSECustomer*` parameters. The parameters
-of a call take precedence, and a `ServerSideEncryption` of a call replaces the
-`SSECustomer*` parameters for the object it writes. With an `SSECustomerKey` there,
-every object that the filesystem reads or copies must be encrypted with that key. `sign`
-signs only the parameters given to it.
+of a call take precedence. With an `SSECustomerKey` there, every object that the
+filesystem reads or copies must be encrypted with that key. `sign` signs only the
+parameters given to it.
 
 ```python
 fs = S3FileSystem(s3_additional_kwargs={"RequestPayer": "requester", **sse_c})
