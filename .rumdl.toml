@@ -16,6 +16,7 @@ include = [
     "scripts/**/*.md",
     "cloudformation/**/*.md",
     "/*.md",
+    ".agents/skills/**/*.md",
 ]
 # Run the rule set of markdownlint 0.38 (used by markdownlint-cli2 0.18.1,
 # the previous linter) instead of every rule rumdl enables by default.
