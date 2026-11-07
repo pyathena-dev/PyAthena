@@ -1237,15 +1237,15 @@ class TestS3FileSystem:
             fs.mkdir("s3://new-bucket", acl="invalid-acl")
         fs._call.assert_not_called()
 
-    def test_mkdir_translates_invalid_parameters(self):
+    def test_mkdir_keeps_bucket_listing_on_failure(self):
         fs = self._make_fs()
         fs.allow_bucket_creation = True
         fs.exists = mock.MagicMock(return_value=False)
         fs._client.meta.region_name = "us-east-1"
-        fs._call.side_effect = botocore.exceptions.ParamValidationError(report="Invalid name")
+        fs._call.side_effect = ValueError("Parameter validation failed")
         fs.dircache[""] = ["stale-bucket-listing"]
 
-        with pytest.raises(ValueError, match="Bucket create failed 'new-bucket'"):
+        with pytest.raises(ValueError, match="Parameter validation failed"):
             fs.mkdir("s3://new-bucket")
         # Nothing was created, so the cached bucket listing is kept.
         assert "" in fs.dircache
@@ -2587,7 +2587,7 @@ class TestS3FileSystem:
                 {"Bucket": "bucket", "Key": "dst", "UploadId": "u"},
                 {"Bucket": "bucket", "Key": "dst", "ContentTyp": "text/csv"},
             )
-            with pytest.raises(botocore.exceptions.ParamValidationError, match="ContentTyp"):
+            with pytest.raises(ValueError, match="ContentTyp"):
                 self._multipart_copy(
                     fs,
                     ContentTyp="text/csv",

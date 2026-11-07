@@ -17,7 +17,6 @@ from io import BytesIO
 from typing import Any, BinaryIO, cast
 from urllib.parse import unquote_plus
 
-import botocore.exceptions
 from boto3 import Session
 from botocore import UNSIGNED
 from botocore.client import BaseClient, Config
@@ -1090,6 +1089,11 @@ class S3FileSystem(AbstractFileSystem):
             True if the path exists, False otherwise. A bucket that HeadBucket
             denies access to (403) exists.
 
+        Raises:
+            PermissionError: If the lookup of an object is denied (403).
+                Without ``s3:ListBucket`` on the bucket, S3 also answers 403
+                for a key that does not exist.
+
         Example:
             >>> fs = S3FileSystem()
             >>> fs.exists("s3://my-bucket/file.txt")
@@ -1376,7 +1380,8 @@ class S3FileSystem(AbstractFileSystem):
                 ``create_parents`` is False.
             PermissionError: If the bucket would be created but bucket
                 creation is not enabled on this filesystem instance.
-            ValueError: If the ACL is invalid or the path is empty.
+            ValueError: If the ACL is invalid, the path is empty, or
+                botocore rejects the parameters of the CreateBucket request.
         """
         path = self._strip_protocol(path).rstrip("/")
         if not path:
@@ -1393,15 +1398,12 @@ class S3FileSystem(AbstractFileSystem):
                     "Bucket creation is disabled. "
                     "Set allow_bucket_creation=True on the filesystem to enable it."
                 )
-            try:
-                self.core.create_bucket(
-                    s3_path.bucket,
-                    acl=kwargs.pop("acl", None),
-                    region_name=kwargs.pop("region_name", None),
-                    **self.core.operation_params("create_bucket", kwargs),
-                )
-            except botocore.exceptions.ParamValidationError as e:
-                raise ValueError(f"Bucket create failed {s3_path.bucket!r}: {e}") from e
+            self.core.create_bucket(
+                s3_path.bucket,
+                acl=kwargs.pop("acl", None),
+                region_name=kwargs.pop("region_name", None),
+                **self.core.operation_params("create_bucket", kwargs),
+            )
             # invalidate_cache of the bucket keeps the cached bucket
             # listing, so evict it directly.
             self._evict_cache("")

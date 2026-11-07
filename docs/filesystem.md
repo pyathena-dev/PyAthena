@@ -343,6 +343,26 @@ operations raise natural errors instead of botocore's `ClientError`:
 | `RequestTimeout` | `TimeoutError` |
 | Others | `OSError` with the matching `errno` |
 
+`S3ClientError.code_of()` returns the S3 error code of a translated error, or `None` for
+an error that is not translated from an S3 error response:
+
+```python
+from pyathena.filesystem.s3_errors import S3ClientError
+
+try:
+    fs.pipe_file("s3://YOUR_S3_BUCKET/path/to/object", b"data")
+except OSError as e:
+    if S3ClientError.code_of(e) == "SlowDown":
+        ...
+```
+
+Request parameters that botocore rejects before sending the request
+(`ParamValidationError`), such as a misspelled parameter name, raise `ValueError`.
+
+`exists()` returns `True` for a bucket that HeadBucket answers with `403`. For an object,
+a `403` raises `PermissionError`: without the `s3:ListBucket` permission on the bucket,
+S3 also answers `403` for a key that does not exist.
+
 ## Object metadata, tags, and ACLs
 
 ```python
@@ -679,8 +699,10 @@ ListObjectAnnotations unless the directives or the source exclude them, and writ
 nothing. If HeadObject reports a size that fits in one CopyObject request, nothing else
 is read, and the plan's `fits_single_request` says to copy with `copy_object()`
 instead. `copy_object_annotation()` copies one annotation onto the destination after
-the upload completes, with GetObjectAnnotation and PutObjectAnnotation. The
-filesystems' `cp_file()`, `copy()` and `mv()` run these plans.
+the upload completes, with GetObjectAnnotation and PutObjectAnnotation. As with
+`get_object()`, the payload is closed after the read, and a failure to read it raises
+the botocore exception and is not retried. The filesystems' `cp_file()`, `copy()` and
+`mv()` run these plans.
 
 The multipart primitives take the `S3MultipartUpload` returned by creation,
 keeping its bucket, key, upload ID and checksum configuration together.
