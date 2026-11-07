@@ -49,9 +49,8 @@ from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
-    COPY_PARAMS,
-    COPY_WITH_PARAMS_CALLS,
     EVENT_TIMEOUT,
+    MOVE_SOURCE_PARAMS,
     MULTIPART_COPY_BLOCK_SIZE,
     MULTIPART_COPY_KWARGS,
     MULTIPART_COPY_SIZE,
@@ -64,7 +63,7 @@ from tests.pyathena.util import (
     retried,
     run_in_forked_child,
     sigint_when,
-    stub_copy_with_params,
+    stub_move_with_source_params,
     stub_multipart_copy,
 )
 
@@ -1509,11 +1508,11 @@ class TestS3FileSystem:
         # A list of sources is mapped without looking up the destination.
         fs = self._make_fs()
         fs.expand_path = mock.MagicMock(return_value=["bucket/x/a", "bucket/y/a"])
-        fs._isdir = mock.MagicMock()
+        fs.isdir = mock.MagicMock()
 
         with pytest.raises(ValueError, match="same destination"):
             fs.mv(["s3://bucket/x/a", "s3://bucket/y/a"], "s3://bucket/out", recursive=True)
-        fs._isdir.assert_not_called()
+        fs.isdir.assert_not_called()
         fs._call.assert_not_called()
 
     def test_mv_keeps_given_paths(self):
@@ -1981,7 +1980,7 @@ class TestS3FileSystem:
         # Only directories within maxdepth: nothing is moved, as with copy().
         fs = self._make_fs()
         fs.expand_path = mock.MagicMock(return_value=["bucket/src/sub"])
-        fs._isdir = mock.MagicMock(return_value=True)
+        fs.isdir = mock.MagicMock(return_value=True)
 
         fs.mv("s3://bucket/src", "s3://bucket/dst/", recursive=True, maxdepth=1)
         fs._call.assert_not_called()
@@ -6020,18 +6019,16 @@ class TestS3FileSystem:
             fs.cp_file("s3://bucket/src", "s3://bucket/dst", **copy_params)
             stubber.assert_no_pending_responses()
 
-    @pytest.mark.parametrize("case", list(COPY_WITH_PARAMS_CALLS))
-    def test_copy_and_mv_params(self, case):
-        # GH-1333: see stub_copy_with_params. The pairing of the paths, the
-        # expansion of the sources, and the lookups of the sources and of the
-        # destination of a copy or move sent only Bucket and Key, or no
-        # parameter of the call, so a copy from an SSE-C or requester-pays
-        # source failed before CopyObject was sent.
+    def test_mv_source_lookup_and_delete_params(self):
+        # GH-1333: see stub_move_with_source_params.
         fs = self._stubbed_fs()
-        method, path1, path2, kwargs = COPY_WITH_PARAMS_CALLS[case]
         with Stubber(fs._client) as stubber:
-            stub_copy_with_params(stubber, case)
-            getattr(fs, method)(path1, path2, **kwargs, **COPY_PARAMS)
+            stub_move_with_source_params(stubber)
+            fs.mv(
+                ["s3://bucket/a", "s3://bucket/a/x"],
+                ["s3://bucket/c", "s3://bucket/c"],
+                **MOVE_SOURCE_PARAMS,
+            )
             stubber.assert_no_pending_responses()
 
     def test_setxattr_source_lookup_params(self):

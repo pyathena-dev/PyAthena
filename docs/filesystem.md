@@ -206,14 +206,12 @@ with fs.open("s3://YOUR_S3_BUCKET/path/to/data.csv", "wb", ContentType="text/csv
     f.write(b"col1\n1\n")
 ```
 
-`info`, `exists`, `find`, `glob`, and `expand_path` accept `ExpectedBucketOwner`,
-`RequestPayer`, and the `SSECustomer*` parameters of an object encrypted with a
-customer-provided key (SSE-C) as keyword arguments, and ignore other request
-parameters; each request receives those that its operation accepts. The lookups of the
-object by `open`, and the existence check of `pipe` with `mode="create"`, send these
+`info` and `exists` accept `ExpectedBucketOwner`, `RequestPayer`, and the
+`SSECustomer*` parameters of an object encrypted with a customer-provided key (SSE-C)
+as keyword arguments, and ignore other request parameters. The lookups of the object
+by `open`, and the existence check of `pipe` with `mode="create"`, send these
 parameters of the file or the write. A lookup with them uses only the cached results of
-lookups with the same values, not cached listings, and a listing with them is not
-cached.
+lookups with the same values, not cached listings.
 
 ```python
 sse_c = {"SSECustomerAlgorithm": "AES256", "SSECustomerKey": YOUR_32_BYTE_KEY}
@@ -221,14 +219,14 @@ with fs.open("s3://YOUR_S3_BUCKET/path/to/encrypted.csv", "rb", **sse_c) as f:
     data = f.read()
 ```
 
-`cp_file`, `copy`, `mv`, and `setxattr` read their sources with the source's
-parameters of the copy: `RequestPayer`, `ExpectedSourceBucketOwner` as
-`ExpectedBucketOwner`, and the `CopySourceSSECustomer*` parameters as `SSECustomer*`.
-The expansion of the source paths of `copy` and `mv`, and the lookups of the sources,
-send them, and the lookup of a destination directory sends the lookup parameters of the
-copy (`RequestPayer`, `ExpectedBucketOwner`, and the `SSECustomer*` parameters of the
-destination). `mv` deletes the copied sources with `RequestPayer` and the source's
-expected bucket owner.
+The lookups of the sources of `cp_file`, `copy`, and `mv`, and of the object of
+`setxattr`, send the source's parameters of the copy: `RequestPayer`,
+`ExpectedSourceBucketOwner` as `ExpectedBucketOwner`, and the `CopySourceSSECustomer*`
+parameters as `SSECustomer*`. `mv` deletes the copied sources with `RequestPayer` and
+that expected bucket owner. The requests that `copy` and `mv` send to expand and pair
+their paths, such as the listings and the directory checks of the sources and of the
+destination, do not send these parameters. `copy` and `mv` with lists of both sources
+and destinations pair the paths as given, without these requests.
 
 ```python
 fs.cp_file(

@@ -426,7 +426,6 @@ class AioS3FileSystem(AsyncFileSystem):
             recursive=recursive,
             maxdepth=maxdepth,
             source_params=source_params,
-            destination_params=kwargs,
         )
         # Every copy finishes before a failure is raised, as in fsspec's
         # _copy(), and nothing is deleted after a failure.
@@ -487,18 +486,10 @@ class AioS3FileSystem(AsyncFileSystem):
             **kwargs: Additional S3 copy parameters passed to ``_cp_file()``.
         """
         sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
-        source_params = self.core.copy_source_params(kwargs)
-        if isinstance(path2, str) and (
-            any(S3Path.has_version_id(p) for p in sources)
-            or source_params
-            or self._sync_fs._get_lookup_kwargs(kwargs)
-        ):
-            # See S3FileSystem.copy.
+        if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
             pairs = await self._thread_pool.run(
                 self._sync_fs._copy_pairs,
                 S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth),
-                source_params=source_params,
-                destination_params=kwargs,
             )
             if not pairs:
                 return
