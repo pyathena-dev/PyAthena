@@ -63,7 +63,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 # The message of the TypeError that a filesystem with an injected client, and
-# its open files, raise when they are pickled.
+# the files that it opens for reading, raise when they are pickled.
 _UNPICKLABLE_CLIENT_MESSAGE = (
     "{cls} built with client= or connection= cannot be pickled, as its boto3 client "
     "cannot be. To pickle it, for example to send it to Dask, Ray, or multiprocessing "

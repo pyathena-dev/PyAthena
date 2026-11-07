@@ -195,8 +195,8 @@ are idle, and the filesystem stays usable.
 A filesystem created with s3fs-compatible arguments can be pickled, as for Dask, Ray, or
 `multiprocessing` workers: the unpickled filesystem builds its own client from the same
 arguments. A filesystem created with `client`, `connection`, or `s3_filesystem()`, and
-the files that it opens, raise `TypeError` when they are pickled, as a boto3 client
-cannot be pickled. To use a filesystem in such workers, create it with s3fs-compatible
+the files that it opens for reading, raise `TypeError` when they are pickled, as a boto3
+client cannot be pickled; as in fsspec, a file opened for writing cannot be pickled. To use a filesystem in such workers, create it with s3fs-compatible
 arguments, such as `profile` or `region_name`, or create a filesystem in each worker.
 
 In a forked child process, create a new filesystem. A file that the parent opened raises
