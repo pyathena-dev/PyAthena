@@ -247,8 +247,7 @@ unpickled file, keeps the request parameters of the file, including the
 also under the names of the copy source. In an append, the existing object is read or
 copied as parts on the condition of the ETag looked up when the file was opened, so an
 append to an object replaced since raises `OSError`, and its multipart upload, if any,
-is aborted. A
-key that is only a prefix of other keys has no object: reading it raises
+is aborted. A key that is only a prefix of other keys has no object: reading it raises
 `FileNotFoundError`, and appending, exclusive creation (`"xb"`), and `pipe`/`put` with
 `mode="create"` write a new object.
 
