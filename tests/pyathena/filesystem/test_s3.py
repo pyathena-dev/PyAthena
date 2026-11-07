@@ -2671,7 +2671,9 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.cp_file = mock.MagicMock()
         fs._head_object = mock.MagicMock(
-            side_effect=lambda path: None if path.endswith("dir") else self._file_object("x")
+            side_effect=lambda path, **kwargs: (
+                None if path.endswith("dir") else self._file_object("x")
+            )
         )
         fs.copy(["s3://bucket/dir", "s3://bucket/x"], ["s3://bucket/x", "s3://bucket/y"])
         assert fs.cp_file.call_count == 2
