@@ -606,14 +606,15 @@ class AthenaPolarsResultSet(AthenaResultSet):
         }
 
     @property
-    def _csv_storage_options(self) -> dict[str, Any]:
-        """Get storage options for reading a CSV result file via fsspec.
+    def _filesystem_kwargs(self) -> dict[str, Any]:
+        """Get the arguments of the S3FileSystem that reads the result files.
 
-        ``_read_csv()`` opens the file with ``fsspec.open()``, which uses
-        PyAthena's registered S3FileSystem, and passes the open file to Polars.
+        ``_read_csv()`` opens a CSV result file with an ``S3FileSystem`` built from
+        them and passes the open file to Polars; the chunked read of UNLOAD results
+        with pyarrow reads its files with one.
 
         Returns:
-            Dictionary with fsspec-compatible options for S3 access.
+            The ``S3FileSystem`` arguments.
         """
         return {
             "connection": self.connection,
@@ -846,7 +847,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         separator, has_header, new_columns = self._get_csv_params()
         kwargs = self._read_kwargs(
-            lambda: self._csv_storage_options,
+            lambda: self._filesystem_kwargs,
             separator=separator,
             has_header=has_header,
             schema_overrides=self._csv_dtypes,
@@ -855,8 +856,10 @@ class AthenaPolarsResultSet(AthenaResultSet):
             # Renamed after reading, so that Polars matches the types to the header.
             kwargs.pop("new_columns", None)
         # Polars 2.0 reads a path with its native object store, which does not take
-        # fsspec options, so the result file is opened through fsspec here and given
-        # to Polars as a file, which Polars 1.x does not copy as it does bytes.
+        # fsspec options, so the result file is opened here and given to Polars as a
+        # file, which Polars 1.x does not copy as it does bytes. PyAthena's filesystem
+        # opens it, or with storage_options given to execute(), fsspec's registered
+        # "s3" filesystem.
         storage_options = kwargs.pop("storage_options")
         if self.output_location:
             location = self.output_location
@@ -866,16 +869,23 @@ class AthenaPolarsResultSet(AthenaResultSet):
                 return pl.DataFrame()
             location = "the GetQueryResults rows"
 
+        # Closed after the read, which releases the threads of its request pool.
+        filesystem: S3FileSystem | None = None
         try:
             # Each read calls open_csv() to open the file again and closes it after
             # reading; reading the same file again after seek(0) makes fsspec's cache
             # hold a second copy. It is created and called inside the try, so that
             # errors such as invalid storage options raise OperationalError.
-            open_csv: Callable[[], AbstractContextManager[Any]] = (
-                partial(fsspec.open, self.output_location, "rb", **(storage_options or {}))
-                if self.output_location
-                else partial(nullcontext, source)
-            )
+            open_csv: Callable[[], AbstractContextManager[Any]]
+            if not self.output_location:
+                open_csv = partial(nullcontext, source)
+            elif "storage_options" in self._kwargs:
+                open_csv = partial(
+                    fsspec.open, self.output_location, "rb", **(storage_options or {})
+                )
+            else:
+                filesystem = S3FileSystem(**storage_options)
+                open_csv = partial(filesystem.open, self.output_location, "rb")
             schema_overrides, timestamp_dtypes = self._get_csv_schema_overrides(has_header)
             strict = not kwargs.get("ignore_errors", False)
             df: pl.DataFrame | None = None
@@ -900,6 +910,9 @@ class AthenaPolarsResultSet(AthenaResultSet):
         except Exception as e:
             _logger.exception(f"Failed to read {location}.")
             raise OperationalError(*e.args) from e
+        finally:
+            if filesystem is not None:
+                filesystem.close()
 
     def _read_parquet(self, schema: pl.Schema) -> pl.DataFrame:
         """Read query results from Parquet files in S3.
@@ -1237,7 +1250,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         if not self._kwargs and importlib.util.find_spec("pyarrow") is not None:
             return self._read_parquet_chunks(
-                S3FileSystem(**self._csv_storage_options), self._data_manifest
+                S3FileSystem(**self._filesystem_kwargs), self._data_manifest
             )
         return self._scan_parquet_chunks(self._unload_location, self.connection, schema)
 

@@ -28,6 +28,7 @@ from zlib import crc32
 
 import boto3
 import botocore.exceptions
+import fsspec
 import pytest
 from botocore.stub import Stubber
 from fsspec import Callback
@@ -1207,6 +1208,22 @@ class TestS3FileSystem:
             ServerSideEncryption="AES256",
             ContentType="text/plain",
         )
+
+    def test_asynchronous_ignored(self):
+        # GH-1339: like fsspec's other synchronous filesystems, the registered "s3"
+        # filesystem accepts asynchronous=True and stays synchronous, so that callers
+        # such as zarr, which ask for it and wrap a filesystem whose async_impl is
+        # False, keep working.
+        fs = fsspec.filesystem(
+            "s3",
+            asynchronous=True,
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            skip_instance_cache=True,
+        )
+        assert isinstance(fs, S3FileSystem)
+        assert not fs.async_impl
 
     def test_requester_pays(self):
         # GH-969: RequestPayer is sent only with the operations that accept

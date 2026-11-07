@@ -34,6 +34,13 @@ _TRUNCATED_TIMESTAMPS = pl.Series(
 )
 
 
+class _LocalS3FileSystem(LocalFileSystem):
+    """A filesystem of local files that stands in for PyAthena's S3FileSystem."""
+
+    def close(self) -> None:
+        """Release nothing: reading local files uses no threads."""
+
+
 def _local_result_set(
     column_types: list[tuple[str, str]],
     output_location: str = "s3://bucket/result.csv",
@@ -96,7 +103,7 @@ def _local_result_set(
         patch.object(AthenaPolarsResultSet, "_get_content_length", return_value=1),
         patch(
             "pyathena.polars.result_set.S3FileSystem",
-            file_system or (lambda **_: LocalFileSystem()),
+            file_system or (lambda **_: _LocalS3FileSystem()),
         ),
     ):
         return AthenaPolarsResultSet(

@@ -24,7 +24,10 @@ def register_s3_filesystem() -> None:
     registration replaces fsspec's default lazy mapping of the "s3" protocol
     to s3fs, which means ``fsspec.filesystem("s3")`` returns PyAthena's
     implementation and s3fs-specific settings (e.g., the ``S3FS_LOGGING_LEVEL``
-    environment variable) have no effect.
+    environment variable) have no effect. The registered class is synchronous
+    (``async_impl`` is False): like fsspec's other synchronous filesystems, it
+    accepts and ignores ``asynchronous=True``. ``AioS3FileSystem`` is the
+    asynchronous filesystem.
 
     A filesystem class that has already been registered explicitly is also
     overwritten, with a warning log. To restore another implementation,

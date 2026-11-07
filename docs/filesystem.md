@@ -18,6 +18,8 @@ surface compatible with [s3fs](https://github.com/fsspec/s3fs) for users migrati
 The filesystem is used internally by the pandas, Polars, and S3FS result sets to read query results
 from S3, and can also be used independently for S3 file operations.
 
+(filesystem-fsspec-registration)=
+
 ## fsspec registration
 
 Importing `pyathena.pandas` or `pyathena.polars` registers `S3FileSystem` as the fsspec
@@ -25,6 +27,11 @@ Importing `pyathena.pandas` or `pyathena.polars` registers `S3FileSystem` as the
 fsspec's default lazy mapping of the `s3` protocol to s3fs, which means
 `fsspec.filesystem("s3")` returns PyAthena's implementation and s3fs-specific settings
 (such as the `S3FS_LOGGING_LEVEL` environment variable) have no effect.
+The registered class is the synchronous `S3FileSystem`, whose `async_impl` is `False`.
+Like fsspec's other synchronous filesystems, it accepts and ignores `asynchronous=True`,
+so `fsspec.filesystem("s3", asynchronous=True)` returns a synchronous filesystem; libraries
+such as zarr check `async_impl` and wrap it. For a native asynchronous filesystem, use
+{ref}`AioS3FileSystem <aio-s3-filesystem>`.
 
 A filesystem class that has already been registered explicitly is also overwritten,
 with a warning log, so that the replacement is diagnosable. To restore another
