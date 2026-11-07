@@ -1306,6 +1306,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             block_size=block_size,
             cache_type="none",
             size=target.size,
+            # Kept as ``self.kwargs``, which fsspec passes to open() when it
+            # reopens the file (e.g., when it is unpickled), as for S3File.
+            **(target.request_kwargs if mode == "rb" else {}),
         )
 
         self.append_block = False

@@ -2,10 +2,12 @@ import array
 import asyncio
 import bz2
 import contextlib
+import errno
 import functools
 import gc
 import gzip
 import io
+import itertools
 import lzma
 import os
 import re
@@ -1532,7 +1534,7 @@ class TestS3FileSystem:
         # requests that accept it.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs.exists = mock.MagicMock(return_value=False)
+        fs._object_exists = mock.MagicMock(return_value=False)
         requests = self._record_requests(fs)
 
         with fs.open(
@@ -1540,7 +1542,7 @@ class TestS3FileSystem:
         ) as f:
             f.write(b"a" * size)
 
-        fs.exists.assert_called_once()
+        fs._object_exists.assert_called_once()
         assert [name for name, _ in requests] == expected
         for name, request in requests:
             conditional = name in {"put_object", "complete_multipart_upload"}
@@ -1551,7 +1553,7 @@ class TestS3FileSystem:
         # any data is uploaded.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs.exists = mock.MagicMock(return_value=True)
+        fs._object_exists = mock.MagicMock(return_value=True)
 
         with pytest.raises(FileExistsError):
             fs.open("s3://bucket/key", "xb")
@@ -1578,7 +1580,7 @@ class TestS3FileSystem:
         # FileExistsError, and the multipart upload is aborted.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs.exists = mock.MagicMock(return_value=False)
+        fs._object_exists = mock.MagicMock(return_value=False)
         requests = self._record_requests(fs, precondition_failed=True)
 
         with (
@@ -1597,7 +1599,7 @@ class TestS3FileSystem:
         # selects the mode of the remote file instead.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs.exists = mock.MagicMock(return_value=False)
+        fs._object_exists = mock.MagicMock(return_value=False)
         requests = self._record_requests(fs)
         lpath = tmp_path / "data"
         lpath.write_bytes(b"a")
@@ -1614,7 +1616,7 @@ class TestS3FileSystem:
     def test_put_file_create_existing(self, tmp_path):
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs.exists = mock.MagicMock(return_value=True)
+        fs._object_exists = mock.MagicMock(return_value=True)
         lpath = tmp_path / "data"
         lpath.write_bytes(b"a")
 
@@ -1636,13 +1638,13 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
         fs.default_block_size = fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE
-        fs.exists = mock.MagicMock(return_value=False)
+        fs._object_exists = mock.MagicMock(return_value=False)
         requests = self._record_requests(fs, precondition_failed=True)
 
         with pytest.raises(FileExistsError):
             fs.pipe_file("s3://bucket/key", b"a" * size, mode="create")
 
-        fs.exists.assert_called_once()
+        fs._object_exists.assert_called_once()
         assert [name for name, request in requests if request.get("IfNoneMatch") == "*"] == [
             conditional
         ]
@@ -3094,6 +3096,161 @@ class TestS3FileSystem:
         assert requests[3]["Params"] == {"Bucket": "bucket", "Key": "key", "VersionId": "v1"}
         # A reopened (e.g., unpickled) file reads the same version.
         assert f.__reduce__()[1][1] == "bucket/key?versionId=v1"
+
+    def test_open_read_keeps_caller_if_match(self):
+        # GH-1334: the caller's condition is sent as given, not replaced by
+        # the ETag of the lookup, so that S3 rejects a read of another object.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        requests = self._record_requests(fs)
+
+        with fs.open("s3://bucket/key", "rb", IfMatch='"stale"') as f:
+            f.read()
+        reads = [request for name, request in requests if name == "get_object"]
+        assert [request["IfMatch"] for request in reads] == ['"stale"']
+
+    def test_open_read_reopen_keeps_parameters_and_pin(self):
+        # GH-1334: fsspec reopens an unpickled file with its kwargs, which
+        # carry the parameters of the requests, including the SSE-C key, and
+        # the ETag and size looked up when it was opened, so that a reopened
+        # file reads the same object, or fails, instead of reading another
+        # object with the old size.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        etag = ['"e"']
+        requests = self._record_requests(
+            fs,
+            responses={
+                "head_object": lambda request: {"ContentLength": 2, "ETag": etag[0]},
+            },
+        )
+        f = fs.open("s3://bucket/key", "rb", **self.LOOKUP_KWARGS)
+        reopen, args = f.__reduce__()
+        f.close()
+        assert args[-1] == {**self.LOOKUP_KWARGS, "IfMatch": '"e"'}
+
+        # The object is replaced by a larger one before the file is reopened.
+        etag[0] = '"new"'
+        requests.clear()
+        with reopen(*args) as g:
+            assert g.size == 2
+            g.read()
+        reads = [request for name, request in requests if name == "get_object"]
+        assert reads == [
+            {
+                "Bucket": "bucket",
+                "Key": "key",
+                "Range": "bytes=0-1",
+                "IfMatch": '"e"',
+                **self.LOOKUP_KWARGS,
+            }
+        ]
+
+    def test_file_metadata_methods_send_lookup_parameters(self):
+        # GH-1334: the metadata methods of a file send its lookup parameters,
+        # and setxattr() sends them for both the source and the destination
+        # of the copy, so that an SSE-C object keeps its key.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        requests = self._record_requests(
+            fs, responses={"generate_presigned_url": lambda request: "https://signed"}
+        )
+
+        with fs.open("s3://bucket/key", "rb", ContentType="text/plain", **self.LOOKUP_KWARGS) as f:
+            requests.clear()
+            f.metadata()
+            f.getxattr("a")
+            f.url()
+            # Only the parameters that the signed operation accepts.
+            f.url(client_method="delete_object")
+            f.setxattr(a="1")
+            # Another encryption replaces the key of the destination.
+            f.setxattr(copy_kwargs={"ServerSideEncryption": "AES256"}, a="2")
+        assert [request for name, request in requests if name == "head_object"] == [
+            {"Bucket": "bucket", "Key": "key", **self.LOOKUP_KWARGS}
+        ] * 4
+        urls = [request["Params"] for name, request in requests if name == "generate_presigned_url"]
+        assert urls == [
+            {"Bucket": "bucket", "Key": "key", **self.LOOKUP_KWARGS},
+            {
+                "Bucket": "bucket",
+                "Key": "key",
+                "ExpectedBucketOwner": "111122223333",
+                "RequestPayer": "requester",
+            },
+        ]
+        copies = [
+            {
+                k: v
+                for k, v in request.items()
+                if k not in {"Metadata", "MetadataDirective", "StorageClass"}
+            }
+            for name, request in requests
+            if name == "copy_object"
+        ]
+        source = {
+            "CopySource": {"Bucket": "bucket", "Key": "key"},
+            "Bucket": "bucket",
+            "Key": "key",
+            "ExpectedBucketOwner": "111122223333",
+            "RequestPayer": "requester",
+            "ExpectedSourceBucketOwner": "111122223333",
+            "CopySourceSSECustomerAlgorithm": "AES256",
+            "CopySourceSSECustomerKey": "k" * 32,
+        }
+        assert copies == [
+            {
+                **source,
+                "SSECustomerAlgorithm": "AES256",
+                "SSECustomerKey": "k" * 32,
+            },
+            {**source, "ServerSideEncryption": "AES256"},
+        ]
+
+    def test_open_append_pins_read_object(self):
+        # GH-1334: an existing object read into the buffer is read on the
+        # condition of the ETag looked up, so that an object replaced since
+        # is not combined with the metadata of the one looked up.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        requests = self._record_requests(fs)
+
+        with fs.open("s3://bucket/key", "ab") as f:
+            f.write(b"bb")
+        (read,) = [request for name, request in requests if name == "get_object"]
+        assert read == {"Bucket": "bucket", "Key": "key", "IfMatch": '"e"'}
+
+    @pytest.mark.parametrize("mode", ["wb", "ab", "xb", "pipe-create"])
+    def test_write_prefix_key(self, mode):
+        # GH-1334: a key that is only a prefix of other keys has no object,
+        # as when reading, so an append writes a new object, and an
+        # exclusive create, by open() or pipe_file(), creates it.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        requests = self._record_requests(
+            fs,
+            exists=False,
+            responses={
+                "list_objects_v2": lambda request: {
+                    "KeyCount": 1,
+                    "Contents": [{"Key": "dir/x"}],
+                }
+            },
+        )
+
+        if mode == "pipe-create":
+            fs.pipe_file("s3://bucket/dir", b"bb", mode="create")
+        else:
+            with fs.open("s3://bucket/dir", mode) as f:
+                f.write(b"bb")
+        names = [name for name, _ in requests]
+        assert "get_object" not in names
+        (put,) = [request for name, request in requests if name == "put_object"]
+        assert (put["Key"], put["Body"], put.get("IfNoneMatch")) == (
+            "dir",
+            b"bb",
+            None if mode in {"wb", "ab"} else "*",
+        )
 
     @pytest.mark.parametrize("mode", ["wb", "ab", "xb"])
     @pytest.mark.parametrize(
@@ -5342,6 +5499,25 @@ class TestS3FileSystem:
             assert len(actual) == len(data + extra)
             assert actual == data + extra
 
+    def test_reopen_replaced_object(self, fs):
+        # GH-1334: fsspec reopens an unpickled file with its __reduce__()
+        # arguments. The reopened file reads on the condition of the ETag
+        # looked up when the file was opened, so S3 rejects the read of an
+        # object replaced since (412), instead of the file reading the
+        # replacement with the size of the replaced object.
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_reopen_replaced_object/{uuid.uuid4()}"
+        )
+        fs.pipe(path, b"abcd")
+        with fs.open(path, "rb", cache_type="none") as f:
+            reopen, args = f.__reduce__()
+        fs.pipe(path, b"efghijkl")
+
+        with reopen(*args) as g, pytest.raises(OSError, match="pre-conditions") as e:
+            g.read()
+        assert e.value.errno == errno.EINVAL
+
     @pytest.mark.parametrize(
         ("size", "extra_size", "block_size"),
         [
@@ -7057,6 +7233,74 @@ class TestS3File:
         sizes = [len(body) for _, body in self._parts(fs, existing)]
         assert all(size >= fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE for size in sizes[:-1])
         assert all(size <= fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE for size in sizes)
+
+    @pytest.mark.parametrize(
+        "existing",
+        [
+            # Copied whole with one part copy.
+            b"a" * 6,
+            # Larger than the maximum part size: copied in ranges.
+            b"a" * 129,
+        ],
+    )
+    def test_append_part_copies_pin_object(self, existing):
+        # GH-1334: the part copies read the object looked up when the file
+        # was opened, on the condition of its ETag and with the parameters
+        # that authorize the access to it under the names of the copy
+        # source, and their ranges come from its size looked up then, not
+        # from another lookup that could see a replaced object.
+        fs = self._make_append_fs(existing)
+        fs.info.return_value = S3Object(
+            init={"ContentLength": len(existing), "ETag": '"e"'},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="key.txt",
+        )
+        lookup_kwargs = {
+            "ExpectedBucketOwner": "111122223333",
+            "SSECustomerAlgorithm": "AES256",
+            "SSECustomerKey": "k" * 32,
+        }
+
+        with S3File(fs, "s3://bucket/key.txt", mode="ab", block_size=16, **lookup_kwargs) as f:
+            f.write(b"b")
+
+        assert self._uploaded_object(fs, existing) == existing + b"b"
+        fs.info.assert_called_once()
+        copies = fs.core.upload_part_copy.call_args_list
+        assert copies
+        # The ranges cover the object looked up, and nothing beyond it.
+        ranges = [
+            c.kwargs.get("range_") for c in sorted(copies, key=lambda c: c.kwargs["part_number"])
+        ]
+        if ranges != [None]:
+            assert ranges[0][0] == 0
+            assert ranges[-1][1] == len(existing)
+            assert all(a[1] == b[0] for a, b in itertools.pairwise(ranges))
+        for c in copies:
+            assert {
+                k: c.kwargs[k]
+                for k in (
+                    "CopySourceIfMatch",
+                    "ExpectedSourceBucketOwner",
+                    "CopySourceSSECustomerAlgorithm",
+                    "CopySourceSSECustomerKey",
+                )
+            } == {
+                "CopySourceIfMatch": '"e"',
+                "ExpectedSourceBucketOwner": "111122223333",
+                "CopySourceSSECustomerAlgorithm": "AES256",
+                "CopySourceSSECustomerKey": "k" * 32,
+            }
+
+    def test_commit_read_mode(self):
+        # GH-1334: as discard() does, commit() does nothing for a file opened
+        # for reading; it raised AttributeError.
+        fs = self._make_append_fs(b"aa")
+        fs.version_aware = False
+        with S3File(fs, "s3://bucket/key.txt", mode="rb") as f:
+            f.commit()
+        fs._call.assert_not_called()
 
     @pytest.mark.parametrize(
         ("writes", "block_size"),
