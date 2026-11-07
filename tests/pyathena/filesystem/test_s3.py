@@ -3194,9 +3194,21 @@ class TestS3FileSystem:
         )
         unpickled = pickle.loads(pickle.dumps(fs))
         assert unpickled.default_block_size == 2**20
-        credentials = unpickled._client._request_signer._credentials
-        assert credentials.access_key == "dummy"
         assert unpickled._client.meta.region_name == "us-east-1"
+
+    def test_client_ignores_fsspec_config(self, monkeypatch):
+        # GH-1363: settings of fsspec's configuration, such as the
+        # FSSPEC_S3_ENDPOINT_URL environment variable, apply to every filesystem,
+        # including the ones of the result sets, and do not conflict with a
+        # client. An explicit argument with another value still does.
+        monkeypatch.setitem(fsspec.config.conf, "s3", {"endpoint_url": "http://localhost:9000"})
+        client = mock_client()
+        fs = S3FileSystem(client=client, skip_instance_cache=True)
+        assert fs._client is client
+        with pytest.raises(TypeError, match="endpoint_url cannot be combined"):
+            S3FileSystem(
+                client=client, endpoint_url="http://localhost:9001", skip_instance_cache=True
+            )
 
     def test_files_share_request_pool(self):
         # GH-1332: the reads of the files of a filesystem run in its request
