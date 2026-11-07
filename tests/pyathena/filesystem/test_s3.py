@@ -1417,6 +1417,15 @@ class TestS3FileSystem:
         # The expansion and pairing of the paths are sent with them too.
         fs.copy("s3://bucket/key", "s3://bucket/key2")
         fs.rm_file("s3://bucket/key", ExpectedBucketOwner="444455556666")
+        # Another encryption of a call replaces the customer-provided key of
+        # the written object, but not that of the source.
+        fs.cp_file("s3://bucket/key", "s3://bucket/key3", ServerSideEncryption="AES256")
+        (*_, (_, reencrypted)) = requests
+        assert {k: v for k, v in reencrypted.items() if "SSECustomer" in k} == {
+            "CopySourceSSECustomerAlgorithm": "AES256",
+            "CopySourceSSECustomerKey": "k" * 32,
+        }
+        del requests[-2:]
 
         owner = {"ExpectedBucketOwner": "111122223333", "RequestPayer": "requester"}
         sse_c = {"SSECustomerAlgorithm": "AES256", "SSECustomerKey": "k" * 32}

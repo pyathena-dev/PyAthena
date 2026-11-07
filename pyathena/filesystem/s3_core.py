@@ -634,8 +634,10 @@ class S3Core:
         """Send a request with the retry policy and translate its errors.
 
         ``request_kwargs`` that the operation accepts are added; a parameter
-        of the request takes precedence. The operation is identified by the
-        name of the method; a ``functools.partial`` is identified by the
+        of the request takes precedence, and a ``ServerSideEncryption`` of
+        the request also replaces their ``SSECustomer*`` parameters. The
+        operation is identified by the name of the method; a
+        ``functools.partial`` is identified by the
         method it wraps, and its bound keywords are parameters of the request.
         A callable whose ``__name__`` is not that of a client method is sent
         without them.
@@ -664,6 +666,10 @@ class S3Core:
                 bound.update(target.keywords)
                 target = target.func
             params = self.operation_params(getattr(target, "__name__", ""), self._request_kwargs)
+            if "ServerSideEncryption" in bound:
+                # Another encryption of the written object replaces a
+                # customer-provided key.
+                params = {k: v for k, v in params.items() if not k.startswith("SSECustomer")}
             request.update({k: v for k, v in params.items() if k not in bound})
         try:
             response = retry_api_call(func, config=self._retry_config, logger=_logger, **request)
