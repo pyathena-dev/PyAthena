@@ -2,7 +2,7 @@ import contextlib
 import textwrap
 import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from multiprocessing import get_context
 from unittest.mock import patch
@@ -14,6 +14,7 @@ from boto3.session import Session
 from botocore.config import Config
 
 from pyathena import OperationalError
+from pyathena.connection import Connection
 from pyathena.pandas import util
 from pyathena.pandas.util import (
     as_pandas,
@@ -534,6 +535,9 @@ class SpawnProcessPoolExecutor(ProcessPoolExecutor):
         (SpawnProcessPoolExecutor, {}),
         # As SQLAlchemy passes them without credentials in the URL.
         (ThreadPoolExecutor, {"aws_access_key_id": None, "aws_secret_access_key": None}),
+        # GH-1343: the refreshed STS credentials of role_arn, which the arguments do
+        # not reproduce, instead of a given session.
+        (ThreadPoolExecutor, {"role_arn": "arn:aws:iam::123456789012:role/unused"}),
     ],
 )
 def test_to_sql_session_credentials_and_s3_config(monkeypatch, executor_class, connect_kwargs):
@@ -555,11 +559,19 @@ def test_to_sql_session_credentials_and_s3_config(monkeypatch, executor_class, c
     table_name = f"""to_sql_{str(uuid.uuid4()).replace("-", "")}"""
     location = f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/"
     resource = Session.resource
+    # The role's credentials, as AssumeRole would return them.
+    sts_credentials = {
+        "AccessKeyId": credentials.access_key,
+        "SecretAccessKey": credentials.secret_key,
+        "SessionToken": credentials.token,
+        "Expiration": datetime.now(UTC) + timedelta(hours=1),
+    }
     with (
+        patch.object(Connection, "_assume_role", return_value=sts_credentials),
         contextlib.closing(
             connect(
                 schema_name=ENV.schema,
-                session=session,
+                session=None if "role_arn" in connect_kwargs else session,
                 s3_config=Config(max_pool_connections=37),
                 **connect_kwargs,
             )

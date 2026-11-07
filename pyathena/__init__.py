@@ -108,7 +108,8 @@ def connect(**kwargs) -> Connection[Any]:
             "SSE_S3", "SSE_KMS", or "CSE_KMS".
         kms_key: KMS key ID for encryption when using SSE_KMS or CSE_KMS.
         profile_name: AWS profile name to use for authentication.
-        role_arn: ARN of IAM role to assume for authentication.
+        role_arn: ARN of IAM role to assume for authentication; its credentials
+            are requested again before they expire.
         role_session_name: Session name when assuming a role.
         cursor_class: Custom cursor class to use. If not specified, uses
             the default Cursor class.

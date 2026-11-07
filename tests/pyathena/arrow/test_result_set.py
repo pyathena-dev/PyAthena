@@ -6,6 +6,7 @@
 # SPDX-License-Identifier: MIT
 import os
 import sys
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
@@ -193,6 +194,7 @@ class TestAthenaArrowResultSetMetadataReader:
             "AccessKeyId": "ROLEKEY",
             "SecretAccessKey": "secret",
             "SessionToken": "token",
+            "Expiration": datetime.now(UTC) + timedelta(hours=1),
         }
         with patch.object(Connection, "_assume_role", return_value=role_credentials):
             connection = Connection(

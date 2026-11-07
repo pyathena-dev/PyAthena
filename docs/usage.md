@@ -830,6 +830,7 @@ cursor = connect(aws_access_key_id="YOUR_ACCESS_KEY_ID",
 
 You will be prompted to enter the MFA code.
 The program execution will be blocked until the MFA code is entered.
+The credentials last `duration_seconds`; before they expire, the connection requests new ones and prompts for an MFA code again, in the thread that then calls AWS.
 
 ```python
 from pyathena import connect
@@ -867,6 +868,9 @@ cursor = connect(profile_name="YOUR_PROFILE_NAME",
 
 #### Assume role provider
 
+The connection requests the role's credentials when it is created and again before they expire, so a long-lived connection keeps working past `duration_seconds`.
+The profile and credential arguments sign the AssumeRole requests.
+
 ```python
 from pyathena import connect
 
@@ -881,6 +885,7 @@ cursor = connect(role_arn="YOUR_ASSUME_ROLE_ARN",
 
 You will be prompted to enter the MFA code.
 The program execution will be blocked until the MFA code is entered.
+Each request for the role's credentials, before the previous ones expire, prompts for an MFA code again.
 
 ```python
 from pyathena import connect
