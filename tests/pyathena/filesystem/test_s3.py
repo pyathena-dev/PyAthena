@@ -10,6 +10,7 @@ import io
 import itertools
 import lzma
 import os
+import pickle
 import re
 import sys
 import tempfile
@@ -18,6 +19,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+import warnings
 import weakref
 from base64 import b64encode
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -40,7 +42,7 @@ from fsspec.implementations.dirfs import DirFileSystem
 from fsspec.implementations.memory import MemoryFileSystem
 
 import pyathena
-from pyathena.filesystem import register_s3_filesystem
+from pyathena.filesystem import register_s3_filesystem, s3_filesystem
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3MultipartCopyPlan
 from pyathena.filesystem.s3_errors import S3ClientError
@@ -60,7 +62,7 @@ from tests.pyathena.util import (
     ThrottledOperation,
     forking,
     interrupt_each_opcode,
-    mock_connection,
+    mock_client,
     overlapping_calls,
     poll_until,
     retried,
@@ -3071,11 +3073,153 @@ class TestS3FileSystem:
         assert fs._request_pool.max_workers == pool_size
         assert fs._client.meta.config.max_pool_connections == pool_connections
 
-    def test_request_pool_size_of_connection(self):
-        # GH-1332: with a connection, the request pool takes the connection
-        # pool of its S3 client.
-        fs = S3FileSystem(connection=mock_connection(7), skip_instance_cache=True)
+    def test_request_pool_size_of_client(self):
+        # GH-1332: with a given client, the request pool takes the connection
+        # pool of the client.
+        fs = S3FileSystem(client=mock_client(7), skip_instance_cache=True)
         assert fs.max_workers == 7
+
+    def test_client(self):
+        # GH-1363: the filesystem sends its requests with the given client and
+        # retry policy, which retries SlowDown, unlike the default one, and
+        # borrows the client: close() does not close it.
+        client = boto3.client(
+            "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
+        )
+        retry_config = RetryConfig(exceptions=["SlowDown"], attempt=2, multiplier=0)
+        fs = S3FileSystem(client=client, retry_config=retry_config, skip_instance_cache=True)
+        with Stubber(client) as stubber:
+            for _ in range(2):
+                stubber.add_client_error(
+                    "head_object", service_error_code="SlowDown", http_status_code=503
+                )
+            with pytest.raises(OSError, match="Errno 16"):
+                fs.info("bucket/key")
+            stubber.assert_no_pending_responses()
+        with mock.patch.object(client, "close") as close:
+            fs.close()
+        close.assert_not_called()
+
+    def test_s3_filesystem(self):
+        # GH-1363: s3_filesystem() creates a filesystem with the S3 client and
+        # retry policy of a connection, without the deprecated argument.
+        connection = mock.MagicMock()
+        connection.s3_client = mock_client(7)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            fs = s3_filesystem(connection, skip_instance_cache=True)
+        assert type(fs) is S3FileSystem
+        assert fs._client is connection.s3_client
+        assert fs.core.retry_config is connection.retry_config
+        assert fs.max_workers == 7
+
+    def test_connection_deprecated(self):
+        # GH-1363: connection= still uses the S3 client and retry policy of the
+        # connection, with a DeprecationWarning that points at the caller.
+        connection = mock.MagicMock()
+        connection.s3_client = mock_client()
+        with pytest.warns(DeprecationWarning, match="s3_filesystem") as record:
+            fs = S3FileSystem(connection=connection, skip_instance_cache=True)
+        assert record[0].filename == __file__
+        assert fs._client is connection.s3_client
+        assert fs.core.retry_config is connection.retry_config
+
+    @pytest.mark.skipif(sys.version_info < (3, 12), reason="skip_file_prefixes of Python 3.12")
+    def test_connection_deprecated_through_fsspec(self):
+        # GH-1363: a filesystem created through fsspec.filesystem() attributes the
+        # warning to its caller, not to fsspec.
+        connection = mock.MagicMock()
+        connection.s3_client = mock_client()
+        with pytest.warns(DeprecationWarning, match="s3_filesystem") as record:
+            fsspec.filesystem("s3", connection=connection, skip_instance_cache=True)
+        assert record[0].filename == __file__
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"key": "dummy"},
+            {"username": "dummy"},
+            {"secret": "dummy"},
+            {"password": "dummy"},
+            {"token": "dummy"},
+            {"profile": "dummy"},
+            {"profile_name": "dummy"},
+            {"anon": True},
+            {"use_ssl": False},
+            {"endpoint_url": "http://localhost:4566"},
+            {"connect_timeout": 1},
+            {"read_timeout": 1},
+            {"client_kwargs": {}},
+            {"config_kwargs": {}},
+            {"region_name": "us-east-1"},
+            {"aws_access_key_id": "dummy"},
+            {"aws_secret_access_key": "dummy"},
+            {"aws_session_token": "dummy"},
+            {"botocore_session": mock.sentinel.botocore_session},
+        ],
+        ids=lambda kwargs: next(iter(kwargs)),
+    )
+    @pytest.mark.parametrize("injected", ["client", "connection"])
+    def test_client_building_args_rejected(self, injected, kwargs):
+        # GH-1339: a client-building argument given with a client used to be
+        # ignored silently.
+        client = mock_client()
+        connection = mock.MagicMock()
+        s3_client = mock.PropertyMock(return_value=client)
+        type(connection).s3_client = s3_client
+        injected_kwargs = {injected: client if injected == "client" else connection}
+        with (
+            warnings.catch_warnings(action="ignore", category=DeprecationWarning),
+            pytest.raises(TypeError, match=f"{next(iter(kwargs))} cannot be combined"),
+        ):
+            S3FileSystem(**injected_kwargs, **kwargs)
+        # Checked before the client of the connection is used.
+        s3_client.assert_not_called()
+
+    @pytest.mark.parametrize("kwargs", [{"client": mock_client()}, {"retry_config": RetryConfig()}])
+    def test_connection_with_client_rejected(self, kwargs):
+        with (
+            pytest.warns(DeprecationWarning, match="connection argument"),
+            pytest.raises(TypeError, match="connection cannot be combined"),
+        ):
+            S3FileSystem(connection=mock.MagicMock(), **kwargs)
+
+    def test_pickle_client_rejected(self):
+        # GH-1339: a boto3 client cannot be pickled; the filesystem names the
+        # arguments that can.
+        fs = S3FileSystem(client=S3_CLIENT, default_cache_type="none", skip_instance_cache=True)
+        with pytest.raises(TypeError, match=r"cannot be pickled.*profile="):
+            pickle.dumps(fs)
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = 4
+        with fs.open("s3://bucket/key", "rb") as f, pytest.raises(TypeError, match="profile="):
+            pickle.dumps(f)
+
+    def test_pickle_s3fs_args(self):
+        fs = S3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            default_block_size=2**20,
+            skip_instance_cache=True,
+        )
+        unpickled = pickle.loads(pickle.dumps(fs))
+        assert unpickled.default_block_size == 2**20
+        assert unpickled._client.meta.region_name == "us-east-1"
+
+    def test_client_ignores_fsspec_config(self, monkeypatch):
+        # GH-1363: settings of fsspec's configuration, such as the
+        # FSSPEC_S3_ENDPOINT_URL environment variable, apply to every filesystem,
+        # including the ones of the result sets, and do not conflict with a
+        # client. An explicit argument with another value still does.
+        monkeypatch.setitem(fsspec.config.conf, "s3", {"endpoint_url": "http://localhost:9000"})
+        client = mock_client()
+        fs = S3FileSystem(client=client, skip_instance_cache=True)
+        assert fs._client is client
+        with pytest.raises(TypeError, match="endpoint_url cannot be combined"):
+            S3FileSystem(
+                client=client, endpoint_url="http://localhost:9001", skip_instance_cache=True
+            )
 
     def test_files_share_request_pool(self):
         # GH-1332: the reads of the files of a filesystem run in its request
@@ -5352,7 +5496,7 @@ class TestS3FileSystem:
     def fs(self, request):
         if not hasattr(request, "param"):
             request.param = {}
-        return S3FileSystem(connect(), **request.param)
+        return s3_filesystem(connect(), **request.param)
 
     @pytest.mark.parametrize(
         ("algorithm", "checksum_type"),

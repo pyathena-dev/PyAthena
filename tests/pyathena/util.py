@@ -500,8 +500,8 @@ def interrupt_each_opcode(target, case, limit=2000):
             return n - 1
 
 
-def mock_connection(max_pool_connections=10):
-    """Return a mock connection whose S3 client has a connection pool of the given size.
+def mock_client(max_pool_connections=10):
+    """Return a mock S3 client with a connection pool of the given size.
 
     The filesystems size their request pool from the ``max_pool_connections``
     of the S3 client when ``max_workers`` is not given.
@@ -510,10 +510,24 @@ def mock_connection(max_pool_connections=10):
         max_pool_connections: The connection pool size of the S3 client.
 
     Returns:
+        The mock S3 client.
+    """
+    client = MagicMock()
+    client.meta.config.max_pool_connections = max_pool_connections
+    return client
+
+
+def mock_connection(max_pool_connections=10):
+    """Return a mock connection whose S3 client has a connection pool of the given size.
+
+    Args:
+        max_pool_connections: The connection pool size of the S3 client.
+
+    Returns:
         The mock connection.
     """
     connection = MagicMock()
-    connection.s3_client.meta.config.max_pool_connections = max_pool_connections
+    connection.s3_client = mock_client(max_pool_connections)
     return connection
 
 

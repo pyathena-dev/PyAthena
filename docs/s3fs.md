@@ -255,6 +255,8 @@ The reader is used only for result files; managed query results are read through
 S3FSCursor reads a CSV result file in 32 MiB blocks with the `"background"` {ref}`fsspec cache <filesystem-read-caching>`, which reads the next block while rows are converted and keeps two blocks.
 With `block_size` given to `execute()`, the file is read in blocks of that size with the `"bytes"` cache.
 A `filesystem_class` other than PyAthena's `S3FileSystem` and `AioS3FileSystem`, including a subclass, reads the file with its own default cache type.
+PyAthena's filesystems are created with the S3 client of the connection; another `filesystem_class` is created with the `connection`, `default_block_size`, and `skip_instance_cache=True` arguments.
+In the next major version, it will be created with `client` and `retry_config` in place of `connection`.
 
 ### Limitations
 

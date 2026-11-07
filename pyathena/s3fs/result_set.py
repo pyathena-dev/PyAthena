@@ -18,6 +18,7 @@ from fsspec import AbstractFileSystem
 
 from pyathena.converter import Converter
 from pyathena.error import OperationalError, ProgrammingError
+from pyathena.filesystem import s3_filesystem
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.model import AthenaQueryExecution
@@ -139,14 +140,24 @@ class AthenaS3FSResultSet(AthenaResultSet):
             self._rows.extend(pre_fetched_rows)
 
     def _create_s3_file_system(self) -> AbstractFileSystem:
-        """Create S3FileSystem using connection settings."""
+        """Create the filesystem that reads the results with the connection's S3 client.
+
+        PyAthena's ``S3FileSystem`` and ``AioS3FileSystem`` are created with
+        ``s3_filesystem()``. Another ``filesystem_class``, including a subclass,
+        still receives ``connection`` until the next major version.
+
+        Returns:
+            The filesystem.
+        """
         # Not cached by fsspec so that the connection and the dircache are
         # released with the result set.
-        return self._filesystem_class(
-            connection=self.connection,
-            default_block_size=self._block_size or self.DEFAULT_BLOCK_SIZE,
-            skip_instance_cache=True,
-        )
+        kwargs: dict[str, Any] = {
+            "default_block_size": self._block_size or self.DEFAULT_BLOCK_SIZE,
+            "skip_instance_cache": True,
+        }
+        if self._filesystem_class in (S3FileSystem, AioS3FileSystem):
+            return s3_filesystem(self.connection, self._filesystem_class, **kwargs)
+        return self._filesystem_class(connection=self.connection, **kwargs)
 
     def _get_csv_open_options(self) -> dict[str, Any]:
         """Get the options to open the CSV result file with the filesystem.

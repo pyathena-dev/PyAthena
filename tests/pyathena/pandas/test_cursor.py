@@ -89,7 +89,7 @@ def _offline_cursor(tmp_path, columns, rows, **cursor_kwargs):
     connection.client.get_query_results.return_value = query_results_response(columns)
     connection.s3_client.head_object.return_value = {"ContentLength": len(data)}
     with (
-        patch("pyathena.pandas.result_set.S3FileSystem", lambda **_: fs),
+        patch("pyathena.pandas.result_set.s3_filesystem", lambda *_, **__: fs),
         PandasCursor(
             connection=connection,
             converter=DefaultPandasTypeConverter(),
@@ -367,7 +367,11 @@ class TestPandasCursor:
         """
         pandas_cursor.execute(
             query,
-            storage_options={"connection": pandas_cursor.connection, "skip_instance_cache": True},
+            storage_options={
+                "client": pandas_cursor.connection.s3_client,
+                "retry_config": pandas_cursor.connection.retry_config,
+                "skip_instance_cache": True,
+            },
         )
         assert pandas_cursor.fetchall() == expected
         with pytest.raises(OperationalError):
@@ -1522,7 +1526,11 @@ class TestPandasCursor:
     @pytest.mark.parametrize("option", ["filesystem", "storage_options"])
     def test_unload_with_filesystem_options(self, pandas_cursor, option):
         """filesystem or storage_options given to execute() read the UNLOAD result."""
-        fs_kwargs = {"connection": pandas_cursor.connection, "skip_instance_cache": True}
+        fs_kwargs = {
+            "client": pandas_cursor.connection.s3_client,
+            "retry_config": pandas_cursor.connection.retry_config,
+            "skip_instance_cache": True,
+        }
         kwargs = (
             {"filesystem": S3FileSystem(**fs_kwargs)}
             if option == "filesystem"

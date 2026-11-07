@@ -48,16 +48,23 @@ fsspec.register_implementation("s3", s3fs.S3FileSystem, clobber=True)
 
 ## Basic usage
 
-The filesystem can be constructed from a PyAthena connection, whose S3 client it
-then uses (see "S3 client" in [Usage](usage.md)), or directly with
-s3fs-compatible credential arguments:
+The filesystem can be created from a PyAthena connection with `s3_filesystem()`, which
+gives it the S3 client and the retry policy of the connection (see "S3 client" in
+[Usage](usage.md)), with a boto3 S3 client, or with s3fs-compatible credential
+arguments:
 
 ```python
+import boto3
+
 from pyathena import connect
+from pyathena.filesystem import s3_filesystem
 from pyathena.filesystem.s3 import S3FileSystem
 
-fs = S3FileSystem(connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+fs = s3_filesystem(connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                            region_name="us-west-2"))
+
+# Or with a boto3 S3 client, and optionally a pyathena.util.RetryConfig.
+fs = S3FileSystem(client=boto3.client("s3", region_name="us-west-2"))
 
 # Or with direct credentials (s3fs-compatible arguments).
 fs = S3FileSystem(key="YOUR_ACCESS_KEY", secret="YOUR_SECRET_KEY")
@@ -68,6 +75,18 @@ fs = S3FileSystem(profile="YOUR_PROFILE")
 # Or anonymously for public buckets.
 fs = S3FileSystem(anon=True)
 ```
+
+The filesystem uses a given client as it is and does not close it. Combining `client`
+with an argument from which the filesystem builds a client, such as `key`, `secret`,
+`token`, `profile`, `anon`, `endpoint_url`, `client_kwargs`, `config_kwargs`, or
+`region_name`, raises `TypeError`; such settings from fsspec's configuration, such as
+the `FSSPEC_S3_ENDPOINT_URL` environment variable, are ignored. `requester_pays`, `max_workers`, the cache options,
+and the arguments of fsspec can be combined with it. `s3_filesystem()` takes the other
+arguments of the filesystem, and `AioS3FileSystem` as its second argument.
+
+The `connection` argument of `S3FileSystem` and `AioS3FileSystem` is deprecated and
+emits a `DeprecationWarning`; it will be removed in the next major version. It is
+subject to the same restrictions as `client`.
 
 Standard fsspec operations work as expected:
 
@@ -113,11 +132,23 @@ reads, parts, part copies, the ACLs of a recursive `chmod`, the DeleteObjects ba
 filesystem, with `max_workers` threads. Each file or operation runs at most its own
 `max_workers` requests at once in that pool. The `max_workers` of the filesystem
 defaults to the `max_pool_connections` of its S3 client: 10 unless configured, or that
-of the client of the connection given with `connection`. A client that the filesystem
-builds takes its `max_pool_connections` from `max_workers` unless `config_kwargs` sets
-it. For more parallel requests, raise `max_workers`, and with `connection`, also the
-`max_pool_connections` of its S3 client, such as with its `s3_config`. `close()`, or the end of a `with` block, releases the threads of the pool once they
+of the given `client`, such as the client of the connection. A client that the
+filesystem builds takes its `max_pool_connections` from `max_workers` unless
+`config_kwargs` sets it; `max_workers` does not change the connection pool of a given
+client. For more parallel requests, raise `max_workers`, and with a given client, also
+its `max_pool_connections`, such as with the `s3_config` of the connection. `close()`, or the end of a `with` block, releases the threads of the pool once they
 are idle, and the filesystem stays usable.
+
+(filesystem-pickling)=
+
+### Pickling and processes
+
+A filesystem created with s3fs-compatible arguments can be pickled, as for Dask, Ray, or
+`multiprocessing` workers: the unpickled filesystem builds its own client from the same
+arguments. A filesystem created with `client`, `connection`, or `s3_filesystem()`, and
+the files that it opens for reading, raise `TypeError` when they are pickled, as a boto3
+client cannot be pickled; as in fsspec, a file opened for writing cannot be pickled. To use a filesystem in such workers, create it with s3fs-compatible
+arguments, such as `profile` or `region_name`, or create a filesystem in each worker.
 
 In a forked child process, create a new filesystem. A file that the parent opened raises
 `RuntimeError` there from its reads, writes, and flushes, `commit()`, and `discard()`,

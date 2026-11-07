@@ -5,6 +5,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import warnings
 from collections.abc import Iterator
 from io import BytesIO
 from typing import Any
@@ -124,6 +125,8 @@ class TestAthenaS3FSResultSet:
         ],
         ids=["default", "aio", "block_size", "subclass"],
     )
+    # The subclass receives the deprecated connection argument (see test_filesystem_client).
+    @pytest.mark.filterwarnings("ignore:The connection argument:DeprecationWarning")
     def test_csv_open_options(self, block_size, filesystem_class, prefetch):
         """PyAthena's filesystems read the CSV result in 32 MiB blocks with the background
         cache, which keeps two blocks, unless block_size is given.
@@ -148,6 +151,31 @@ class TestAthenaS3FSResultSet:
         else:
             assert "cache_type" not in options
             assert "block_size" not in options
+
+    @pytest.mark.parametrize(
+        ("filesystem_class", "deprecated"),
+        [(S3FileSystem, False), (AioS3FileSystem, False), (_UserS3FileSystem, True)],
+        ids=["default", "aio", "subclass"],
+    )
+    def test_filesystem_client(self, filesystem_class, deprecated):
+        """PyAthena's filesystems read the results with the connection's S3 client,
+        without the deprecated connection argument.
+
+        Another filesystem_class still receives the connection until the next
+        major version.
+        """
+        data = "null_col,empty_col,value_col\n,,a\n"
+        with (
+            patch.object(
+                filesystem_class, "_open", autospec=True, return_value=BytesIO(data.encode())
+            ),
+            warnings.catch_warnings(record=True) as record,
+        ):
+            warnings.simplefilter("always", DeprecationWarning)
+            result_set, _ = _result_set(data, None, filesystem_class=filesystem_class)
+        with result_set:
+            assert result_set._fs.core.client is result_set.connection.s3_client
+        assert any(issubclass(w.category, DeprecationWarning) for w in record) is deprecated
 
     def test_reader_closes_at_end_of_results(self):
         """The reader is closed once every row has been read, before close().

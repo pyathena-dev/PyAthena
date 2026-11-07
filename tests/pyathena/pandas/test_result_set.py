@@ -1662,7 +1662,7 @@ def _local_result_set(
     connection.s3_client.meta.config.max_pool_connections = 2
     connection.s3_client.head_object.return_value = {"ContentLength": length}
     connection.client.get_query_results.return_value = query_results_response(types)
-    with patch("pyathena.pandas.result_set.S3FileSystem", return_value=fs):
+    with patch("pyathena.pandas.result_set.s3_filesystem", return_value=fs):
         if describe:
             return AthenaPandasResultSetMetadataReader(
                 connection, query_execution, RetryConfig(), unload=unload, **kwargs
@@ -2006,7 +2006,7 @@ def _fetching_result_set(result, arraysize):
     )
     with (
         patch.object(AthenaPandasResultSet, "_load_metadata"),
-        patch("pyathena.pandas.result_set.S3FileSystem"),
+        patch("pyathena.pandas.result_set.s3_filesystem"),
         patch.object(AthenaPandasResultSet, "_as_pandas", return_value=result),
         patch.object(
             AthenaPandasResultSet, "is_unload", new_callable=PropertyMock, return_value=True
