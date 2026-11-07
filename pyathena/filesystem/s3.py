@@ -134,11 +134,14 @@ class _S3LockedCallback(Callback):
         """Enter the callback.
 
         Returns:
-            This callback.
+            This callback, or a proxy of the callback that the wrapped one
+            returned from ``__enter__()``, if that is another one.
         """
         with self._lock:
-            self._callback.__enter__()
-        return self
+            entered = self._callback.__enter__()
+        if entered is self._callback:
+            return self
+        return _S3LockedCallback(entered, self._lock)
 
     def __exit__(self, *exc_args: Any) -> Any:
         """Exit the callback.

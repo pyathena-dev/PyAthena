@@ -2609,8 +2609,10 @@ class TestS3FileSystem:
             if path1 == "s3://bucket/src/0":
                 failed.set()
                 raise PermissionError(path1)
-            # Succeeds after the failure.
+            # Succeeds once the failure has stopped the batch.
             assert failed.wait(EVENT_TIMEOUT)
+            with pytest.raises(CancelledError):
+                poll_until(lambda: raise_if_stopped("end") or False, "the batch did not stop")
             return True
 
         fs._copy_file = copy_file
@@ -2747,14 +2749,22 @@ class TestS3FileSystem:
         busy = threading.Lock()
         overlaps = []
 
+        exited = []
+
         class Child(Callback):
-            # A branch that needs its context: fsspec enters it with "with".
+            # A branch that needs its context: fsspec enters it with "with",
+            # and passes on the callback that __enter__() returns.
             entered = False
 
             def __enter__(self):
                 SharedCallback._use(self)
-                self.entered = True
-                return self
+                entered = Child()
+                entered.entered = True
+                return entered
+
+            def __exit__(self, *exc_args):
+                SharedCallback._use(self)
+                exited.append(self.entered)
 
             def set_size(self, size):
                 assert self.entered
@@ -2796,6 +2806,8 @@ class TestS3FileSystem:
         fs.put_file = put_file
         self._batch(fs, "put", 4, batch_size=4, callback=SharedCallback())
         assert overlaps == []
+        # The branches that branched() returned are exited.
+        assert exited == [False] * 4
 
     @pytest.mark.parametrize("kwargs", [{"batch_size": 2}, {"max_workers": 2}])
     def test_rm_batch_size(self, kwargs):
