@@ -14,9 +14,7 @@ requires-python = ">=3.11"
 classifiers = ["Private :: Do Not Upload"]
 dependencies = [
     "PyAthena[pandas,arrow,polars,sqlalchemy]",
-    # Released awswrangler caps pyarrow below 26.0.0, the first release with
-    # Python 3.15 wheels; the marker keeps the workspace lock installable on 3.15.
-    "awswrangler>=3.17,<4; python_version < '3.15'",
+    "awswrangler>=3.18,<4",
     "polars",
     "psutil>=7,<8",
 ]
