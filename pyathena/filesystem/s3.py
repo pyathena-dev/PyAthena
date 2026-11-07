@@ -209,9 +209,14 @@ class S3FileSystem(AbstractFileSystem):
                 ``max_pool_connections`` from ``max_workers`` unless
                 ``config_kwargs`` sets it.
             s3_additional_kwargs: Extra arguments for the object requests of
-                ``open()`` and ``pipe_file()``; listings and other requests do
-                not use them. Each request receives those that its operation
-                accepts, and the parameters of a call take precedence.
+                ``open()``, ``pipe_file()`` and ``put_file()``. Their
+                authorization parameters (``RequestPayer``,
+                ``ExpectedBucketOwner`` and ``SSECustomer*``) are sent with
+                every request, listings and copies included; a copy also
+                sends them for its source (``ExpectedSourceBucketOwner`` and
+                ``CopySourceSSECustomer*``). Each request receives those that
+                its operation accepts, and the parameters of a call take
+                precedence.
             allow_bucket_creation: Whether ``mkdir``/``makedirs`` may create a
                 bucket.
             allow_bucket_deletion: Whether ``rmdir`` may delete a bucket.
@@ -246,10 +251,15 @@ class S3FileSystem(AbstractFileSystem):
         self.version_aware = version_aware
 
         requester_pays = kwargs.pop("requester_pays", False)
+        # The parameters that authorize the access to the objects, sent with
+        # every request that accepts them, and with a copy for its source.
+        request_kwargs = self._get_lookup_kwargs(self.s3_additional_kwargs)
+        if requester_pays:
+            request_kwargs.setdefault("RequestPayer", "requester")
         self._core = S3Core(
             client,
             retry_config=retry_config,
-            request_kwargs={"RequestPayer": "requester"} if requester_pays else None,
+            request_kwargs={**request_kwargs, **S3Core.copy_from_source_params(request_kwargs)},
         )
 
     @property
@@ -271,8 +281,9 @@ class S3FileSystem(AbstractFileSystem):
     def request_kwargs(self) -> dict[str, Any]:
         """The parameters sent with every operation that accepts them.
 
-        ``{"RequestPayer": "requester"}`` with ``requester_pays=True``; see
-        ``core.request_kwargs``.
+        ``{"RequestPayer": "requester"}`` with ``requester_pays=True``, and
+        the authorization parameters of ``s3_additional_kwargs``, also under
+        the names of a copy source; see ``core.request_kwargs``.
         """
         return self._core.request_kwargs
 
@@ -1119,8 +1130,9 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             path: S3 path (s3://bucket/key) of the object to delete.
-            **kwargs: Accepted for fsspec compatibility; not used in the
-                request.
+            **kwargs: Additional parameters passed to the DeleteObject API,
+                such as ``RequestPayer``. Those that it does not accept are
+                ignored, for fsspec compatibility.
 
         Raises:
             TypeError: If kwargs has ``bucket``, ``key`` or ``version_id``,
@@ -1133,7 +1145,7 @@ class S3FileSystem(AbstractFileSystem):
             if name in kwargs:
                 raise TypeError(f"rm_file() got multiple values for keyword argument '{name}'")
         _logger.debug(f"Delete object: {s3_path.uri}")
-        self.core.delete_object(s3_path)
+        self.core.delete_object(s3_path, **self.core.operation_params("delete_object", kwargs))
         self.invalidate_cache(path)
 
     def rm(self, path, recursive=False, maxdepth=None, **kwargs) -> None:
@@ -1354,6 +1366,9 @@ class S3FileSystem(AbstractFileSystem):
                 acl: Canned ACL to apply to the bucket.
                 region_name: Region to create the bucket in. Defaults to the
                     client's region.
+                Other parameters that the CreateBucket API accepts, such as
+                ``ObjectLockEnabledForBucket``, are passed to it; the others
+                are ignored, for fsspec compatibility.
 
         Raises:
             FileExistsError: If the path is a bucket that already exists.
@@ -1383,6 +1398,7 @@ class S3FileSystem(AbstractFileSystem):
                     s3_path.bucket,
                     acl=kwargs.pop("acl", None),
                     region_name=kwargs.pop("region_name", None),
+                    **self.core.operation_params("create_bucket", kwargs),
                 )
             except botocore.exceptions.ParamValidationError as e:
                 raise ValueError(f"Bucket create failed {s3_path.bucket!r}: {e}") from e
@@ -1465,21 +1481,26 @@ class S3FileSystem(AbstractFileSystem):
         Args:
             path: S3 path (s3://bucket/key) of the object.
             truncate: If True, replace an existing object with an empty one;
-                if False, raise if the object exists.
-            **kwargs: Additional parameters passed to the PutObject API.
+                if False, raise if the object exists. A key that is only a
+                prefix of other keys has no object.
+            **kwargs: Additional parameters passed to the PutObject API,
+                except ``Body``: the object is empty.
 
         Returns:
             The PutObject response as a dictionary (see
             :meth:`S3PutObject.to_dict`).
 
         Raises:
+            TypeError: If kwargs has ``Body``.
             ValueError: If the path has a version ID, is a bucket, or exists
                 while ``truncate`` is False.
         """
         s3_path = S3Path.parse(path)
         if s3_path.version_id:
             raise ValueError("Cannot touch the file with the version specified.")
-        if not truncate and self.exists(path):
+        if "Body" in kwargs:
+            raise TypeError("touch() creates an empty object; use pipe_file() to write data.")
+        if not truncate and self._object_exists(path, self._get_lookup_kwargs(kwargs)):
             raise ValueError("Cannot touch the existing file without specifying truncate.")
         if not s3_path.key:
             raise ValueError("Cannot touch the bucket.")

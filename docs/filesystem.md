@@ -216,6 +216,20 @@ accepts, so, for example, `ServerSideEncryption` for writes is not sent with rea
 request as given. `put` sets `ContentType` from the file extension unless the call or
 the filesystem gives one.
 
+The parameters in the `s3_additional_kwargs` argument of `S3FileSystem` that authorize
+the access to the objects, `RequestPayer`, `ExpectedBucketOwner`, and the `SSECustomer*`
+parameters, are sent with every request of the filesystem whose operation accepts them,
+listings and copies included. A copy also sends them for its source, as
+`ExpectedSourceBucketOwner` and the `CopySourceSSECustomer*` parameters. The parameters
+of a call take precedence. With an `SSECustomerKey` there, every object that the
+filesystem reads or copies must be encrypted with that key. `sign` signs only the
+parameters given to it.
+
+```python
+fs = S3FileSystem(s3_additional_kwargs={"RequestPayer": "requester", **sse_c})
+data = fs.cat_file("s3://YOUR_S3_BUCKET/path/to/encrypted.csv")
+```
+
 ```python
 fs = S3FileSystem(s3_additional_kwargs={"ServerSideEncryption": "AES256"})
 with fs.open("s3://YOUR_S3_BUCKET/path/to/data.csv", "wb", ContentType="text/csv") as f:
@@ -241,8 +255,9 @@ The lookups of the sources of `cp_file`, `copy`, and `mv`, and of the object of
 parameters as `SSECustomer*`. `mv` deletes the copied sources with `RequestPayer` and
 that expected bucket owner. The requests that `copy` and `mv` send to expand and pair
 their paths, such as the listings and the directory checks of the sources and of the
-destination, do not send these parameters. `copy` and `mv` with lists of both sources
-and destinations pair the paths as given, without these requests.
+destination, do not send these parameters of the call, but those of the filesystem
+described above. `copy` and `mv` with lists of both sources and destinations pair the
+paths as given, without these requests.
 
 ```python
 fs.cp_file(

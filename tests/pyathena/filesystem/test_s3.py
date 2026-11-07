@@ -1205,8 +1205,15 @@ class TestS3FileSystem:
                     "CreateBucketConfiguration": {"LocationConstraint": "eu-west-1"},
                 },
             ),
+            # GH-1372: the parameters of CreateBucket are passed, and the
+            # others ignored.
+            (
+                "us-east-1",
+                {"ObjectLockEnabledForBucket": True, "exist_ok": True},
+                {"Bucket": "new-bucket", "ObjectLockEnabledForBucket": True},
+            ),
         ],
-        ids=["client-region", "us-east-1", "acl", "region-name"],
+        ids=["client-region", "us-east-1", "acl", "region-name", "api-params"],
     )
     def test_mkdir_creates_bucket(self, client_region, kwargs, expected):
         fs = self._make_fs()
@@ -1281,7 +1288,35 @@ class TestS3FileSystem:
         fs._call.reset_mock()
         with pytest.raises(TypeError, match="body"):
             fs.touch("s3://bucket/key", body=b"data")
+        # GH-1372: also as the parameter of PutObject.
+        with pytest.raises(TypeError, match="empty object"):
+            fs.touch("s3://bucket/key", Body=b"data")
         fs._call.assert_not_called()
+
+    def test_touch_no_truncate_lookup(self):
+        # GH-1372: the existence check of touch(truncate=False) sends the
+        # lookup parameters of the call, and a key that is only a prefix of
+        # other keys has no object, so it is created.
+        fs = self._make_fs()
+        requests = self._record_requests(
+            fs,
+            exists=False,
+            responses={
+                "list_objects_v2": lambda request: {
+                    "KeyCount": 1,
+                    "Contents": [{"Key": "dir/x"}],
+                },
+                "put_object": lambda request: {"ETag": '"e"'},
+            },
+        )
+        sse_c = {"SSECustomerAlgorithm": "AES256", "SSECustomerKey": "k" * 32}
+
+        fs.touch("s3://bucket/dir", truncate=False, **sse_c)
+        heads = [request for name, request in requests if name == "head_object"]
+        assert heads
+        assert all(request.items() >= sse_c.items() for request in heads)
+        (put,) = [request for name, request in requests if name == "put_object"]
+        assert put == {"Bucket": "bucket", "Key": "dir", **sse_c}
 
     def test_pipe_file_small_uses_put_object(self):
         fs = self._make_fs()
@@ -1344,6 +1379,80 @@ class TestS3FileSystem:
             fs.metadata("s3://bucket/key2", RequestPayer="requester")
             stubber.assert_no_pending_responses()
         assert fs.sign("s3://bucket/key").startswith("https://")
+
+    def test_s3_additional_kwargs_authorization(self):
+        # GH-1372: the authorization parameters of s3_additional_kwargs are
+        # sent with every request that accepts them, listings and copies
+        # included, and with a copy also for its source; the others are not,
+        # and the parameters of a call take precedence.
+        fs = S3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            requester_pays=True,
+            s3_additional_kwargs={
+                "ExpectedBucketOwner": "111122223333",
+                "SSECustomerAlgorithm": "AES256",
+                "SSECustomerKey": "k" * 32,
+                "StorageClass": "STANDARD_IA",
+            },
+            skip_instance_cache=True,
+        )
+        responses = {
+            "HeadObject": {"ContentLength": 1, "ETag": '"e"'},
+            "GetObject": {"Body": io.BytesIO(b"a")},
+            "ListObjectsV2": {"KeyCount": 1, "Contents": [{"Key": "dir/x", "Size": 1}]},
+            "CopyObject": {"CopyObjectResult": {"ETag": '"c"'}},
+            "DeleteObject": {},
+        }
+        requests = []
+
+        def call(operation, params):
+            requests.append((operation, params))
+            return responses[operation]
+
+        fs._client._make_api_call = call
+        fs.cat_file("s3://bucket/key")
+        fs.ls("s3://bucket/dir")
+        # The expansion and pairing of the paths are sent with them too.
+        fs.copy("s3://bucket/key", "s3://bucket/key2")
+        fs.rm_file("s3://bucket/key", ExpectedBucketOwner="444455556666")
+
+        owner = {"ExpectedBucketOwner": "111122223333", "RequestPayer": "requester"}
+        sse_c = {"SSECustomerAlgorithm": "AES256", "SSECustomerKey": "k" * 32}
+        operations = [operation for operation, _ in requests]
+        assert {"GetObject", "ListObjectsV2", "HeadObject", "CopyObject"} <= set(operations)
+        assert operations[-1] == "DeleteObject"
+        for operation, params in requests[:-1]:
+            expected = {**owner, **(sse_c if operation in {"GetObject", "HeadObject"} else {})}
+            if operation == "CopyObject":
+                expected = {
+                    **owner,
+                    **sse_c,
+                    "ExpectedSourceBucketOwner": "111122223333",
+                    "CopySourceSSECustomerAlgorithm": "AES256",
+                    "CopySourceSSECustomerKey": "k" * 32,
+                }
+            assert {
+                k: v
+                for k, v in params.items()
+                if k
+                not in {
+                    "Bucket",
+                    "Key",
+                    "CopySource",
+                    "Prefix",
+                    "Delimiter",
+                    "MaxKeys",
+                    "ContinuationToken",
+                }
+            } == expected, operation
+        assert requests[-1][1] == {
+            "Bucket": "bucket",
+            "Key": "key",
+            "ExpectedBucketOwner": "444455556666",
+            "RequestPayer": "requester",
+        }
 
     def test_open_s3_additional_kwargs(self):
         # GH-969: the parameters of the call take precedence over those of
