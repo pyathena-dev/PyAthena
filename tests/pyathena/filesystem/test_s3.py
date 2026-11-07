@@ -4754,6 +4754,7 @@ class TestS3FileSystem:
             ({"a", "ab"}, "s3://bucket/a", [("a", None)]),
             ({"ab"}, "s3://bucket/a", []),
             ({"a", "a/x", "ab"}, "s3://bucket", [("a", None), ("a/x", None), ("ab", None)]),
+            ({"a", "a/x"}, "s3://bucket//", [("a", None), ("a/x", None)]),
             # A version path names one version, also the null version.
             ({"a", "a/x"}, "s3://bucket/a?versionId=v1", [("a", "v1")]),
             ({"a", "a/x"}, "s3://bucket/a?versionId=null", [("a", "null")]),
@@ -4772,7 +4773,7 @@ class TestS3FileSystem:
         ]
         assert sorted(updated) == expected
         assert all(
-            c.kwargs["ACL"] == "private"
+            (c.kwargs["Bucket"], c.kwargs["ACL"]) == ("bucket", "private")
             for c in fs._call.call_args_list
             if c.args[0] is fs._client.put_object_acl
         )

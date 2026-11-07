@@ -2340,7 +2340,8 @@ class S3FileSystem(AbstractFileSystem):
             found = self.find(path, withdirs=False)
             items = [(p, False) for p in found]
             name = self._strip_protocol(path)
-            if s3_path.key and found and name not in found:
+            # The key of the path as find() names it ("bucket//" is the bucket).
+            if S3Path.parse(name).key and found and name not in found:
                 # Objects lie below the key, so find() has not looked the key
                 # itself up; it may be an object too, which is skipped if missing.
                 items.append((name, True))
