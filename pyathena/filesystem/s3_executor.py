@@ -12,21 +12,24 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import os
+import sys
 import threading
 import traceback
 import warnings
 import weakref
 from abc import ABCMeta, abstractmethod
 from collections import deque
-from collections.abc import Callable
-from concurrent.futures import Future
+from collections.abc import Callable, Iterable
+from concurrent.futures import CancelledError, Future, wait
 from concurrent.futures.thread import ThreadPoolExecutor
+from dataclasses import dataclass
 from multiprocessing import cpu_count
 from typing import Any, ClassVar, Generic, TypeVar, cast
 
 from pyathena.util import override, stop_retries_on
 
 T = TypeVar("T")
+ItemT = TypeVar("ItemT")
 
 
 class _S3WorkItem(Generic[T]):
@@ -63,6 +66,36 @@ class _S3WorkItem(Generic[T]):
         self._args = args
         self._kwargs = kwargs
         self._claim = threading.Lock()
+        self._submitted: Future[Any] | None = None
+
+    def link(self, future: Future[T], submitted: Future[Any]) -> None:
+        """Link the future of the caller with the submission of :meth:`run`.
+
+        The submission settles the future if the executor drops the callable
+        (:meth:`settle`), and a cancellation of the future cancels the
+        submission, so that a scope drops a waiting call at once instead of
+        letting it pass through the pool without running.
+
+        Args:
+            future: The future of the caller.
+            submitted: The future of the submitted :meth:`run`.
+        """
+        submitted.add_done_callback(self.settle)
+        self._submitted = submitted
+        future.add_done_callback(self._cancel_submission)
+
+    def _cancel_submission(self, future: Future[T]) -> None:
+        """Cancel the submission if the future of the caller was cancelled.
+
+        The future keeps its callbacks after it has ended, so the reference
+        to the submission is dropped here.
+
+        Args:
+            future: The future of the caller, which has ended.
+        """
+        submitted, self._submitted = self._submitted, None
+        if submitted is not None and future.cancelled():
+            submitted.cancel()
 
     def run(self) -> None:
         """Run the callable and resolve the future unless it was cancelled."""
@@ -113,6 +146,326 @@ class _S3WorkItem(Generic[T]):
         self._future = self._fn = None
         self._args, self._kwargs = (), {}
         return future
+
+
+@dataclass(frozen=True)
+class S3MapResult(Generic[T]):
+    """The outcomes of :meth:`S3Executor.map` and :meth:`S3Executor.map_async`.
+
+    Attributes:
+        outcomes: The result of each item, or the exception that its call
+            raised, in the order of the items.
+        failure: The first failure that counted, in the order the calls
+            ended, or None.
+    """
+
+    outcomes: list[T | BaseException]
+    failure: BaseException | None
+
+
+class _S3Batch(Generic[ItemT, T]):
+    """The calls of one map of :class:`S3Executor`, and the state that they share.
+
+    A call checks the stop of the batch before it starts, and records the
+    first failure that counts in its own thread, before that thread can take
+    another call, so that no call starts after the failure that stops the
+    batch, and the failure recorded is the first in the order the calls
+    ended.
+
+    Args:
+        fn: The callable to run for each item.
+        stop_on_failure: Whether a failure that counts stops the batch.
+        counts: Whether a failure counts; every failure if None.
+    """
+
+    def __init__(
+        self,
+        fn: Callable[[ItemT], T],
+        stop_on_failure: bool,
+        counts: Callable[[BaseException], bool] | None,
+    ) -> None:
+        """Initialize the batch.
+
+        Args:
+            fn: The callable to run for each item.
+            stop_on_failure: Whether a failure that counts stops the batch.
+            counts: Whether a failure counts; every failure if None.
+        """
+        self._fn = fn
+        self._stop_on_failure = stop_on_failure
+        self._counts = counts
+        # Set when the batch stops, so that the calls that have not started
+        # make no request and the running ones make no further attempt.
+        self.stop = threading.Event()
+        self._failure: BaseException | None = None
+        self._lock = threading.Lock()
+        # Set when every call has settled, or when a failure stops the
+        # batch, so that the waiting thread waits for one future, which also
+        # wakes it for a failure that is a cancellation.
+        self._ended: Future[None] = Future()
+        self._remaining = 0
+        self._submitting = True
+        # The futures of the calls, each tracked before it is scheduled, so
+        # that an interrupt while it is being scheduled still lets it be
+        # cancelled.
+        self.futures: list[Future[T]] = []
+
+    def submit(self, executor: S3Executor, items: Iterable[ItemT]) -> None:
+        """Submit a call for each item.
+
+        Args:
+            executor: The executor that runs the calls.
+            items: The items.
+        """
+        with stop_retries_on(self.stop):
+            for item in items:
+                with self._lock:
+                    self._remaining += 1
+                self.futures.append(Future())
+                # Records the outcome when the future is set, before the
+                # thread that sets it takes another call, also of a call that
+                # the executor fails or cancels without running it.
+                self.futures[-1].add_done_callback(self._settled)
+                executor.submit_to(self.futures[-1], self._call, item)
+        with self._lock:
+            self._submitting = False
+            ended = self._remaining == 0
+        if ended:
+            self._end()
+
+    def wait(self) -> None:
+        """Wait until every call has ended or a failure has stopped the batch.
+
+        The states are also checked every second, since an interrupt of a
+        cancellation can skip the callbacks that end the wait.
+        """
+        while not self._ended_or_settled():
+            wait([self._ended], timeout=1.0)
+
+    async def wait_async(self) -> None:
+        """Await until every call has ended or a failure has stopped the batch."""
+        ended = S3Executor.waiter(self._ended)
+        while not self._ended_or_settled():
+            await asyncio.wait([ended], timeout=1.0)
+
+    def result(self) -> S3MapResult[T]:
+        """Return the outcomes of the calls, which have all ended, and drop their futures.
+
+        The futures are dropped here, not by the map, so that an interrupt
+        after this method returns finds no future kept by the batch; their
+        callbacks refer to the batch, which would otherwise form a reference
+        cycle with them that keeps the outcomes until the cyclic garbage
+        collector frees them.
+
+        Returns:
+            The outcomes.
+
+        Raises:
+            BaseException: The failure that stopped the batch.
+        """
+        for future in self.futures:
+            if future.done():
+                # Also here, since a future wakes its waiters before it runs
+                # the callback that records it; exception() would wait for a
+                # call that has not ended.
+                self._record(self._outcome(future))
+        if self._stopped_by_failure():
+            raise cast(BaseException, self._failure)
+        result = S3MapResult(
+            [e if (e := self._outcome(f)) is not None else f.result() for f in self.futures],
+            self._failure,
+        )
+        self.clear()
+        return result
+
+    @staticmethod
+    def _outcome(future: Future[Any]) -> BaseException | None:
+        """Return the failure of a call that has ended, or None if it succeeded.
+
+        Args:
+            future: The future of the call.
+
+        Returns:
+            Its exception, a ``CancelledError`` if the executor cancelled it,
+            or None.
+        """
+        return CancelledError() if future.cancelled() else future.exception()
+
+    def drain(self) -> None:
+        """Stop the batch, cancel the calls that have not started, and wait for the others.
+
+        The states are also checked every second, since an interrupt of a
+        cancellation can skip the notification that ``wait()`` relies on.
+        """
+        started = self._stop()
+        try:
+            while not all(future.done() for future in started):
+                wait(started, timeout=1.0)
+        finally:
+            started.clear()
+
+    async def drain_async(self) -> None:
+        """Stop the batch, cancel the calls that have not started, and await the others."""
+        started = self._stop()
+        try:
+            waiters = [S3Executor.waiter(future) for future in started]
+            while not all(future.done() for future in started):
+                await asyncio.wait(waiters, timeout=1.0)
+        finally:
+            started.clear()
+
+    def release(self, error: BaseException) -> None:
+        """Drop the futures of a batch that raises, and their outcomes, such as the bodies of reads.
+
+        The frames below the map, which the traceback of the error keeps, are
+        cleared; :func:`traceback.clear_frames` skips the frames that are
+        executing.
+
+        Args:
+            error: The error that the map raises.
+        """
+        try:
+            traceback.clear_frames(error.__traceback__)
+            # A further interrupt that stopped the drain propagates instead;
+            # the frames of the drain, which keep the futures, are in its
+            # traceback.
+            if (propagating := sys.exception()) is not None and propagating is not error:
+                traceback.clear_frames(propagating.__traceback__)
+        finally:
+            # Also if a further interrupt stopped the drain before its stop.
+            self.stop.set()
+            self.clear()
+
+    def clear(self) -> None:
+        """Drop the futures of the calls.
+
+        The done callback of each future refers to the batch, so a batch
+        that kept its futures would form a reference cycle with them, and
+        keep their outcomes until the cyclic garbage collector frees them.
+        """
+        self.futures.clear()
+
+    def _stop(self) -> list[Future[T]]:
+        """Stop the batch and cancel the calls that have not started.
+
+        The stop is set first, so that a further interrupt during the
+        cancellation still stops the retries of the running calls; a thread
+        that the cancellation frees finds the stop before it starts a call.
+        The futures are popped, so that no frame keeps them.
+
+        Returns:
+            The futures of the calls that have started.
+        """
+        self.stop.set()
+        started = []
+        while self.futures:
+            future = self.futures.pop()
+            if not future.cancel():
+                started.append(future)
+        return started
+
+    def _ended_or_settled(self) -> bool:
+        """Return whether the wait of the waiting thread can end.
+
+        Also checks the states that end it, in case an interrupt in a
+        callback stopped the signal.
+
+        Returns:
+            Whether the wait has been ended, a failure has stopped the batch,
+            or every call has settled.
+        """
+        return (
+            self._ended.done()
+            or self._stopped_by_failure()
+            or all(future.done() for future in self.futures)
+        )
+
+    def _stopped_by_failure(self) -> bool:
+        """Return whether a failure has stopped the batch.
+
+        Returns:
+            Whether a failure that counts has stopped the batch.
+        """
+        return self._stop_on_failure and self._failure is not None
+
+    def _call(self, item: ItemT) -> T:
+        """Run the callable for an item unless the batch has stopped.
+
+        Args:
+            item: The item.
+
+        Returns:
+            The return value of the callable.
+
+        Raises:
+            CancelledError: If the batch has stopped before the call started.
+        """
+        if self.stop.is_set():
+            raise CancelledError
+        try:
+            return self._fn(item)
+        except BaseException as e:
+            self._record(e)
+            raise
+
+    def _settled(self, future: Future[T]) -> None:
+        """Record the failure of a call whose future has been set, as its done callback.
+
+        A done callback must not raise, which would skip the callbacks after
+        it, such as the one that wakes an asyncio map, so an error of the
+        ``counts`` predicate is the failure.
+
+        Args:
+            future: The future of the call.
+        """
+        try:
+            self._record(self._outcome(future))
+        except BaseException as e:
+            self._latch(e)
+        finally:
+            with self._lock:
+                self._remaining -= 1
+                ended = not self._submitting and self._remaining == 0
+            if ended:
+                self._end()
+
+    def _record(self, error: BaseException | None) -> None:
+        """Record the first failure that counts, and stop the batch with it if requested.
+
+        A call records its own failure in its thread before its future is
+        set; the done callback of the future records those that the executor
+        reports without running the call.
+
+        Args:
+            error: The failure of a call, or None if it succeeded.
+        """
+        if error is None:
+            return
+        if isinstance(error, Exception) and self._counts is not None and not self._counts(error):
+            return
+        self._latch(error)
+
+    def _latch(self, error: BaseException) -> None:
+        """Record a failure unless one was recorded, and stop the batch with it if requested.
+
+        Args:
+            error: The failure.
+        """
+        with self._lock:
+            if self._failure is None:
+                self._failure = error
+        if self._stop_on_failure:
+            # Also for a later failure, which resumes a signal that an
+            # interrupt stopped.
+            self.stop.set()
+            self._end()
+
+    def _end(self) -> None:
+        """End the wait of the waiting thread, once."""
+        with self._lock:
+            if self._ended.done():
+                return
+            self._ended.set_result(None)
 
 
 class S3Executor(metaclass=ABCMeta):
@@ -221,13 +574,40 @@ class S3Executor(metaclass=ABCMeta):
         Returns:
             The return value of the call.
         """
-        waiter = asyncio.wrap_future(future)
-        waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
+        waiter = self.waiter(future)
         # Unlike shield(), which on Python 3.14 and later also logs the failure
         # of a future that ends after a cancellation, wait() leaves the future
         # alone when the waiting task is cancelled.
         await asyncio.wait([waiter])
         return waiter.result()
+
+    @staticmethod
+    def waiter(future: Future[T]) -> asyncio.Future[T]:
+        """Wrap a future of an executor for asyncio, retrieving its outcome.
+
+        The outcome belongs to the caller that awaits the wrapper; it is
+        retrieved, so that asyncio does not log a failure as never retrieved
+        when no one awaits it, such as after a cancellation.
+
+        Args:
+            future: The future.
+
+        Returns:
+            The asyncio future.
+        """
+        waiter = asyncio.wrap_future(future)
+        waiter.add_done_callback(S3Executor._retrieve)
+        return waiter
+
+    @staticmethod
+    def _retrieve(waiter: asyncio.Future[Any]) -> None:
+        """Retrieve the outcome of a waiter, so that asyncio does not log it.
+
+        Args:
+            waiter: The asyncio future, which has ended.
+        """
+        if not waiter.cancelled():
+            waiter.exception()
 
     def submit_to(self, future: Future[T], fn: Callable[..., T], *args: Any, **kwargs: Any) -> None:
         """Submit a callable whose outcome resolves a future of the caller.
@@ -255,7 +635,103 @@ class S3Executor(metaclass=ABCMeta):
             **kwargs: Keyword arguments passed to the callable.
         """
         item = _S3WorkItem(future, fn, args, kwargs)
-        self.submit(item.run).add_done_callback(item.settle)
+        item.link(future, self.submit(item.run))
+
+    def map(
+        self,
+        fn: Callable[[ItemT], T],
+        items: Iterable[ItemT],
+        *,
+        stop_on_failure: bool = True,
+        counts: Callable[[BaseException], bool] | None = None,
+    ) -> S3MapResult[T]:
+        """Run a callable for each item in the executor and wait for the calls.
+
+        Every item is submitted at once, and the executor applies its own
+        limit, such as the ``max_workers`` of a scope. Each call runs in a
+        scope of :func:`~pyathena.util.stop_retries_on` that the stop of the
+        batch ends.
+
+        With ``stop_on_failure``, the first failure that counts stops the
+        batch: the calls that have not started are cancelled, the running
+        ones make no further attempt, and the failure is raised once they
+        have ended. An interrupt of the waiting thread, such as
+        ``KeyboardInterrupt``, does the same whatever ``stop_on_failure`` is,
+        and is raised once the running calls have ended. A further interrupt
+        stops that wait; the running calls then end in the executor.
+
+        A thread of a scope's pool that maps on that scope runs the calls
+        itself. A thread of a bare :class:`S3ThreadPool` that maps on that
+        pool waits for threads that it may hold, so a pool must not map on
+        itself.
+
+        Args:
+            fn: The callable to run for each item.
+            items: The items.
+            stop_on_failure: Whether a failure that counts stops the batch.
+            counts: Whether a failure counts, by default every one. A failure
+                that does not count neither stops the batch nor becomes
+                :attr:`S3MapResult.failure`.
+
+        Returns:
+            The outcomes of the calls.
+
+        Raises:
+            BaseException: The failure that stopped the batch.
+            RuntimeError: If the executor has been shut down.
+        """
+        batch = _S3Batch(fn, stop_on_failure, counts)
+        try:
+            batch.submit(self, items)
+            batch.wait()
+            return batch.result()
+        except BaseException as e:
+            try:
+                batch.drain()
+            finally:
+                batch.release(e)
+            raise
+
+    async def map_async(
+        self,
+        fn: Callable[[ItemT], T],
+        items: Iterable[ItemT],
+        *,
+        stop_on_failure: bool = True,
+        counts: Callable[[BaseException], bool] | None = None,
+    ) -> S3MapResult[T]:
+        """Run a callable for each item in the executor and await the calls.
+
+        As :meth:`map`, with a cancellation of the waiting task in place of
+        an interrupt. The task waits for the running calls also when the
+        event loop shuts down with ``asyncio.run()``, which cancels it and
+        runs the loop until it ends; a loop that is closed without
+        cancelling it leaves the running calls to end in the executor.
+
+        Args:
+            fn: The callable to run for each item.
+            items: The items.
+            stop_on_failure: Whether a failure that counts stops the batch.
+            counts: Whether a failure counts, by default every one.
+
+        Returns:
+            The outcomes of the calls.
+
+        Raises:
+            BaseException: The failure that stopped the batch.
+            RuntimeError: If the executor has been shut down.
+        """
+        batch = _S3Batch(fn, stop_on_failure, counts)
+        try:
+            batch.submit(self, items)
+            await batch.wait_async()
+            return batch.result()
+        except BaseException as e:
+            try:
+                await batch.drain_async()
+            finally:
+                batch.release(e)
+            raise
 
     def __enter__(self) -> S3Executor:
         return self

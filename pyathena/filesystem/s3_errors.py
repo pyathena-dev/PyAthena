@@ -20,10 +20,9 @@ The mapping to Python exceptions is PyAthena's own.
 from __future__ import annotations
 
 import errno
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
-if TYPE_CHECKING:
-    import botocore.exceptions
+import botocore.exceptions
 
 
 class S3ClientError:
@@ -135,6 +134,22 @@ class S3ClientError:
             else:
                 errno_ = errno.EIO
         return OSError(errno_, self._message)
+
+    @classmethod
+    def code_of(cls, error: BaseException) -> str | None:
+        """Return the S3 error code of an error raised from a ``ClientError``.
+
+        Args:
+            error: An error, such as the ``OSError`` of a request.
+
+        Returns:
+            The code of the ``ClientError`` that the error was raised from,
+            or None if it was not raised from one.
+        """
+        cause = error.__cause__
+        if isinstance(cause, botocore.exceptions.ClientError):
+            return cls(cause).code
+        return None
 
     @property
     def code(self) -> str:

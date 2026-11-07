@@ -123,10 +123,14 @@ In a forked child process, create a new filesystem. A file that the parent opene
 `RuntimeError` there from its reads, writes, and flushes, `commit()`, and `discard()`,
 and closing it only marks it closed, without uploading or aborting anything.
 
-An interrupt, such as Ctrl+C, while a file reads ranges in parallel cancels the range
-reads that have not started. Those that are running finish, and their data is released
-once they end. Closing the file waits for its running requests; an interrupt of that
-wait stops it, and the requests still finish. An interrupt while a
+An interrupt, such as Ctrl+C, or a failure while a file reads ranges in parallel
+cancels the range reads that have not started, and the running ones make no further
+attempt. The interrupt or the error is raised once they have ended, and their data is
+released. A second interrupt stops that wait, and the reads still finish. `rm` and
+`clear_multipart_uploads` send every request also after one fails; an interrupt cancels
+those that have not started and is raised once the running ones have ended. Closing
+the file waits for its running requests; an interrupt of that wait stops it, and the
+requests still finish. An interrupt while a
 request is being submitted can let one more request than `max_workers` run at once
 until the request pool is idle. These guarantees hold for one interrupt at a time. If another interrupt arrives while the cleanup of an interrupt or
 an error runs, the call still does not wait forever, but the cleanup may stop early:
@@ -311,7 +315,7 @@ fs.chmod("s3://YOUR_S3_BUCKET/path/to/", "private", recursive=True)
 
 A recursive `chmod` updates the keys in parallel. Once an update fails, the updates
 that have not started are cancelled, the running ones make no further attempt, and the
-error is raised.
+error is raised once they have ended.
 
 Note that `setxattr` rewrites the object by copying it onto itself (S3 does not allow
 updating the metadata of an existing object in place), which updates its last-modified

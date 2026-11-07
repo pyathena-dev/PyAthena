@@ -42,7 +42,7 @@ from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3MultipartCopyPlan
 from pyathena.filesystem.s3_errors import S3ClientError
-from pyathena.filesystem.s3_executor import S3ThreadPool, _S3PoolScope
+from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool, _S3Batch, _S3PoolScope
 from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
@@ -62,6 +62,7 @@ from tests.pyathena.util import (
     poll_until,
     retried,
     run_in_forked_child,
+    shutdown_bounded,
     sigint_when,
     stub_multipart_copy,
 )
@@ -571,6 +572,85 @@ class TestS3FileSystem:
         assert exc_info.value.__notes__ == [
             "Failed to delete objects: b2/b (AccessDenied: Access Denied)"
         ]
+
+    @pytest.mark.skipif(
+        threading.current_thread() is not threading.main_thread(),
+        reason="SIGINT interrupts the main thread.",
+    )
+    @pytest.mark.parametrize("operation", ["rm", "clear_multipart_uploads"])
+    def test_interrupted_operation_cancels_queued_requests(self, operation):
+        # GH-1332 (B3): an interrupt of rm() or clear_multipart_uploads(),
+        # which run every request also after one failed, cancels the requests
+        # that have not started. The queued requests used to be sent after
+        # the interrupt.
+        fs = self._make_fs()
+        fs.max_workers = 1
+        started = threading.Event()
+        requested = []
+
+        def call(method, **request):
+            requested.append(request["Bucket"] if operation == "rm" else request["UploadId"])
+            started.set()
+            time.sleep(0.2)
+            return {}
+
+        fs._call.side_effect = call
+        if operation == "rm":
+            run = functools.partial(fs.rm, ["s3://b1/a", "s3://b2/b"])
+        else:
+            fs.list_multipart_uploads = mock.MagicMock(
+                return_value=[
+                    S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": u})
+                    for u in ("u1", "u2")
+                ]
+            )
+            run = functools.partial(fs.clear_multipart_uploads, "s3://bucket/")
+        try:
+            with sigint_when(started.is_set), pytest.raises(KeyboardInterrupt):
+                run()
+        finally:
+            shutdown_bounded(fs._request_pool)
+        assert len(requested) == 1
+
+    def test_clear_multipart_uploads_raises_first_failure(self):
+        # GH-1332: the error raised is the first abort failure, other than an
+        # upload that no longer exists, in the order the aborts ended.
+        fs = self._make_fs()
+        fs.max_workers = 3
+        recorded = {u: threading.Event() for u in ("gone", "late", "early")}
+        record = _S3Batch._record
+
+        def recording(batch, error):
+            record(batch, error)
+            if error is not None:
+                recorded[str(error)].set()
+
+        def abort_multipart_upload(upload):
+            # "gone" ends first, then "early", then "late".
+            name = upload.upload_id
+            if name == "early":
+                assert recorded["gone"].wait(EVENT_TIMEOUT)
+            if name == "late":
+                assert recorded["early"].wait(EVENT_TIMEOUT)
+            if name == "gone":
+                error = botocore.exceptions.ClientError(
+                    {"Error": {"Code": "NoSuchUpload", "Message": name}}, "AbortMultipartUpload"
+                )
+                raise FileNotFoundError(name) from error
+            raise PermissionError(name)
+
+        fs.core.abort_multipart_upload = abort_multipart_upload
+        fs.list_multipart_uploads = mock.MagicMock(
+            return_value=[
+                S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": u})
+                for u in ("gone", "late", "early")
+            ]
+        )
+        with (
+            mock.patch.object(_S3Batch, "_record", recording),
+            pytest.raises(PermissionError, match="early"),
+        ):
+            fs.clear_multipart_uploads("s3://bucket/")
 
     def test_rm_requests_invalidate_shared_parent(self):
         # The request threads invalidate the shared parent "bucket/dir" at
@@ -3729,6 +3809,30 @@ class TestS3FileSystem:
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1
 
+    def test_failed_read_waits_for_running_reads(self):
+        # GH-1332 (B6): a failed parallel read raises once its running reads
+        # have ended, which used to run on after it raised.
+        fs = self._make_fs()
+        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info.return_value.size = 32
+        ended = []
+        both_started = threading.Barrier(2, timeout=EVENT_TIMEOUT)
+
+        def get_object(path, range_, **kwargs):
+            both_started.wait()
+            if range_[0] == 0:
+                raise PermissionError("Access Denied")
+            time.sleep(0.2)
+            ended.append(range_)
+            return bytes(range_[1] - range_[0])
+
+        fs.core.get_object = get_object
+        f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=2)
+        with pytest.raises(PermissionError, match="Access Denied"):
+            f.read()
+        assert ended == [(16, 32)]
+        f.close()
+
     def test_read_interrupted_submission_stops_running_reads(self):
         # GH-1203: an interrupt while the reads are being submitted stops the
         # running ones, whose backoff wait would take at least EVENT_TIMEOUT
@@ -3820,8 +3924,11 @@ class TestS3FileSystem:
         # context, also frees the data of the ranges that were read. The
         # frame of the wait keeps the futures, as concurrent.futures.wait()
         # does.
+        entered = threading.Event()
+
         def interrupted_wait(futures, **kwargs):
             # A set of its own, as concurrent.futures.wait() makes.
+            entered.set()
             held = set(futures)
             wait(held)
             raise KeyboardInterrupt
@@ -3833,15 +3940,18 @@ class TestS3FileSystem:
             read = []
 
             def get_object(path, range_, **kwargs):
+                # Ends once the read waits, so that its wait is interrupted.
+                assert entered.wait(EVENT_TIMEOUT)
                 # Unlike bytes, an array can be weakly referenced.
                 data = array.array("B", bytes(range_[1] - range_[0]))
                 read.append(weakref.ref(data))
                 return data
 
+            entered.clear()
             fs.core.get_object = get_object
             f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4)
             try:
-                with mock.patch("pyathena.filesystem.s3.wait", interrupted_wait):
+                with mock.patch("pyathena.filesystem.s3_executor.wait", interrupted_wait):
                     try:
                         interrupt(f._fetch_range, 0, 64)
                         error = interrupt.error
@@ -3857,7 +3967,7 @@ class TestS3FileSystem:
                 f.close()
                 fs._request_pool.shutdown()
 
-        assert interrupt_each_opcode(S3File._fetch_range, case) > 0
+        assert interrupt_each_opcode(S3Executor.map, case) > 0
 
     @pytest.mark.skipif(
         threading.current_thread() is not threading.main_thread(),
@@ -3917,7 +4027,11 @@ class TestS3FileSystem:
         fs.info.return_value.size = 64
         read = []
 
+        entered = threading.Event()
+
         def get_object(path, range_, **kwargs):
+            # Ends once the read waits, so that its wait is interrupted.
+            assert entered.wait(EVENT_TIMEOUT)
             # Unlike bytes, an array can be weakly referenced.
             data = array.array("B", bytes(range_[1] - range_[0]))
             read.append(weakref.ref(data))
@@ -3928,13 +4042,14 @@ class TestS3FileSystem:
         def interrupted_wait(futures, **kwargs):
             # As the wait of concurrent.futures, whose frame keeps the futures
             # in a set, interrupted once the reads have finished.
+            entered.set()
             futures = set(futures)
             assert not wait(futures, timeout=EVENT_TIMEOUT).not_done
             raise KeyboardInterrupt
 
         f = fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4)
         with (
-            mock.patch("pyathena.filesystem.s3.wait", side_effect=interrupted_wait),
+            mock.patch("pyathena.filesystem.s3_executor.wait", interrupted_wait),
             pytest.raises(KeyboardInterrupt) as info,
         ):
             f.read()

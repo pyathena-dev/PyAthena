@@ -15,9 +15,8 @@ import functools
 import logging
 import mimetypes
 import os
-import threading
-import traceback
 import warnings
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future, wait
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, cast
@@ -31,7 +30,7 @@ from fsspec.utils import check_contained
 from pyathena.aio.util import create_in_thread
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem, S3FileTarget
 from pyathena.filesystem.s3_core import S3Core
-from pyathena.filesystem.s3_executor import S3ThreadPool
+from pyathena.filesystem.s3_executor import ItemT, S3Executor, S3MapResult, S3ThreadPool, T
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3Metadata,
@@ -43,7 +42,6 @@ from pyathena.filesystem.s3_object import (
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.filesystem.s3_writer import _S3WriteSession, _S3WriteState
-from pyathena.util import stop_retries_on
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -59,11 +57,13 @@ class AioS3FileSystem(AsyncFileSystem):
     This class wraps ``S3FileSystem`` to provide native asyncio support. Its
     coroutines run the blocking boto3 calls in an ``S3ThreadPool`` with
     ``max_workers`` threads that the filesystem owns, instead of the default
-    executor of the event loop, and run parallel requests with
-    ``asyncio.gather``. The single requests that these calls run in
-    parallel, such as the parts of a file or a copy and the DeleteObjects
-    batches of ``_rm()``, run in the request pool of the wrapped
-    ``S3FileSystem``, which its files share.
+    executor of the event loop, and run parallel per-object calls, such as
+    the copies of ``_mv()``, with ``asyncio.gather``. The single requests
+    that these calls run in parallel, such as the parts of a file or a copy,
+    and the DeleteObjects batches of ``_rm()``, run in the request pool of
+    the wrapped ``S3FileSystem``, which its files share, through
+    :meth:`~pyathena.filesystem.s3_executor.S3Executor.map_async` or a write
+    session.
 
     The implementation uses composition: an internal ``S3FileSystem`` instance handles
     all boto3 calls, while this class delegates to it in the threads of its pool.
@@ -350,8 +350,9 @@ class AioS3FileSystem(AsyncFileSystem):
         """Delete objects with DeleteObjects requests.
 
         See :meth:`S3FileSystem.rm`. The DeleteObjects requests run in
-        parallel with ``asyncio.gather``, at most ``max_workers`` at once, in
-        the request pool of the internal ``S3FileSystem``.
+        parallel, at most ``max_workers`` at once, in the request pool of the
+        internal ``S3FileSystem``. A cancellation cancels the requests that
+        have not started and waits for the others.
 
         Args:
             path: S3 path (s3://bucket/key) or list of paths to delete.
@@ -371,7 +372,7 @@ class AioS3FileSystem(AsyncFileSystem):
         await self._delete_objects(paths, **kwargs)
 
     async def _delete_objects(self, paths: list[str], **kwargs) -> None:
-        """Delete objects with DeleteObjects requests run with ``asyncio.gather``.
+        """Delete objects with parallel DeleteObjects requests.
 
         See :meth:`S3FileSystem._delete_objects`.
 
@@ -385,15 +386,47 @@ class AioS3FileSystem(AsyncFileSystem):
             OSError: If S3 could not delete some of the objects.
         """
         batches, params = self._sync_fs._delete_batches(paths, **kwargs)
+        if not batches:
+            return
         # At most max_workers requests at once, as S3FileSystem.rm() sends,
         # so that a large deletion does not queue ahead of the requests of
         # the files that share the request pool.
-        requests = self._sync_fs._create_executor(max_workers=self._sync_fs.max_workers)
-        results = await asyncio.gather(
-            *[requests.run(self._sync_fs._delete_batch, batch, **params) for batch in batches],
-            return_exceptions=True,
+        results = await self._map_async(
+            functools.partial(self._sync_fs._delete_batch, **params),
+            batches,
+            stop_on_failure=False,
         )
-        self._sync_fs._raise_delete_errors(results)
+        self._sync_fs._raise_delete_errors(results.outcomes)
+
+    async def _map_async(
+        self,
+        fn: Callable[[ItemT], T],
+        items: Iterable[ItemT],
+        max_workers: int | None = None,
+        **kwargs: Any,
+    ) -> S3MapResult[T]:
+        """Run the parallel requests of an operation in a scope of their own.
+
+        As :meth:`S3FileSystem._map`, with
+        :meth:`S3Executor.map_async() <pyathena.filesystem.s3_executor.S3Executor.map_async>`.
+
+        Args:
+            fn: The request to run for each item.
+            items: The items.
+            max_workers: Maximum number of parallel requests. Defaults to the
+                ``max_workers`` of the internal ``S3FileSystem``.
+            **kwargs: The options of ``S3Executor.map_async()``.
+
+        Returns:
+            The outcomes of the requests.
+        """
+        executor = self._sync_fs._create_executor(
+            max_workers=max_workers or self._sync_fs.max_workers
+        )
+        try:
+            return await executor.map_async(fn, items, **kwargs)
+        finally:
+            executor.shutdown(wait=False)
 
     async def _mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
         """Move files from one S3 location to another.
@@ -612,11 +645,12 @@ class AioS3FileSystem(AsyncFileSystem):
         bounds the requests of all its copies and files together, with at most
         ``max_workers`` of them in flight; each one is sent once an earlier
         one has finished, and the upload is completed once all of them have.
-        The annotation copies then run in parallel as asyncio tasks, at most
-        ``max_workers`` at once, in the same pool. On a cancellation, the
-        requests that have not started, including the completion, are
-        cancelled, the running ones are waited for in a thread of the
-        filesystem, the upload is aborted if it was created and has not
+        The annotation copies then run in parallel, at most ``max_workers``
+        at once, in the same pool, and a failure or a cancellation stops them
+        as :meth:`~pyathena.filesystem.s3_executor.S3Executor.map_async` does.
+        On a cancellation, the requests that have not started, including the
+        completion, are cancelled, the running ones are waited for in a thread
+        of the filesystem, the upload is aborted if it was created and has not
         completed, and the cancellation is re-raised. On a failure or
         cancellation, the running part copies make no further attempt. This
         also holds when the shutdown of the event loop, such as at the end of
@@ -721,63 +755,18 @@ class AioS3FileSystem(AsyncFileSystem):
             raise
 
         # At most max_workers copies at once in the request pool.
-        requests = self._sync_fs._create_executor(max_workers=max_workers)
-        # Set when an annotation copy fails, so that the running ones make no
-        # further attempt, and the waiting ones do not start.
-        stop = threading.Event()
-        # The index of the copy that failed first, whose error is raised
-        # instead of those of the copies that its failure stopped. Recorded
-        # with the stop, in the thread of the failed copy.
-        first_failure: int | None = None
-        failure_lock = threading.Lock()
-
-        def _copy_annotation_in_thread(i: int, name: str) -> None:
-            """Copy an annotation in a scope that a failed copy stops.
-
-            Args:
-                i: The index of the annotation.
-                name: The name of the annotation.
-            """
-            nonlocal first_failure
-            if stop.is_set():
-                # Waited for a thread of the request pool until a copy failed.
-                return
-            try:
-                with stop_retries_on(stop):
-                    self.core.copy_object_annotation(
-                        name,
-                        plan.source,
-                        plan.destination,
-                        completed.version_id,
-                        completed.etag,
-                        **kwargs,
-                    )
-            except Exception:
-                with failure_lock:
-                    if not stop.is_set():
-                        first_failure = i
-                        # Set in this thread, before it takes a waiting copy.
-                        stop.set()
-                raise
-
-        async def _copy_annotation(i: int, name: str) -> None:
-            try:
-                await requests.run(_copy_annotation_in_thread, i, name)
-            except Exception:
-                # The running copies make no further attempt, and the waiting
-                # ones do not start, as in S3FileSystem.
-                stop.set()
-                raise
-
-        results = await asyncio.gather(
-            *[_copy_annotation(i, name) for i, name in enumerate(plan.annotations)],
-            return_exceptions=True,
+        await self._map_async(
+            lambda name: self.core.copy_object_annotation(
+                name,
+                plan.source,
+                plan.destination,
+                completed.version_id,
+                completed.etag,
+                **kwargs,
+            ),
+            plan.annotations,
+            max_workers=max_workers,
         )
-        if first_failure is not None:
-            raise cast(BaseException, results[first_failure])
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
 
     async def _find(
         self,
@@ -1522,11 +1511,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
                 pending.append(future)
         if not pending:
             return
-        waiters = [asyncio.wrap_future(future) for future in pending]
-        for waiter in waiters:
-            # The outcomes belong to the reads, the commit, and the abort that
-            # awaited them; retrieved here, so that asyncio does not log them.
-            waiter.add_done_callback(lambda f: f.cancelled() or f.exception())
+        # The outcomes belong to the reads, the commit, and the abort that
+        # awaited them; retrieved, so that asyncio does not log them.
+        waiters = [S3Executor.waiter(future) for future in pending]
         cancelled = False
         # The states are also checked every second, since an interrupt of a
         # cancellation can skip the callbacks that the waiters rely on.
@@ -1770,8 +1757,9 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         The range is clamped to the size of the object, and split into ranges
         of the block size, read at most ``max_workers`` at once in the
         request pool of the filesystem. When a read fails, the reads that have
-        not finished are cancelled, which stops the retries of the running
-        ones, and its error is raised, as :meth:`S3File._fetch_range` does.
+        not started are cancelled, the running ones make no further attempt,
+        and its error is raised once they have ended, as
+        :meth:`S3File._fetch_range` does; a cancellation does the same.
 
         Args:
             start: The offset of the first byte to read.
@@ -1793,32 +1781,16 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         )
         path = S3Path(self.bucket, self.key, self.version_id)
         request_kwargs = self._get_request_kwargs("get_object")
-        reads = [
-            asyncio.ensure_future(
-                self._requests.run(self.fs.core.get_object, path, r, **request_kwargs)
+        # Not kept by a variable of this frame, which the traceback of a
+        # cancellation keeps (F5).
+        return b"".join(
+            cast(
+                list[bytes],
+                (
+                    await self._requests.map_async(
+                        functools.partial(self.fs.core.get_object, path, **request_kwargs),
+                        ranges,
+                    )
+                ).outcomes,
             )
-            for r in ranges
-        ]
-        try:
-            done = (await asyncio.wait(reads, return_when=asyncio.FIRST_EXCEPTION))[0]
-        except BaseException as e:
-            # The reads are cancelled with the read of the range, and the
-            # frames of the wait, which keep their tasks, are cleared;
-            # clear_frames() skips this frame, which is executing. Cancelling a
-            # failed read also keeps asyncio from logging its error.
-            traceback.clear_frames(e.__traceback__)
-            while reads:
-                reads.pop().cancel()
-            raise
-        # A comprehension, whose variable does not keep a read in this frame.
-        failures = [read for read in done if not read.cancelled() and read.exception() is not None]
-        if failures:
-            # The reads that have not finished are cancelled, and the tasks of
-            # the others are dropped, so that this frame, which the traceback
-            # of the error keeps, does not keep their data. Cancelling a failed
-            # read also keeps asyncio from logging its error.
-            while reads:
-                reads.pop().cancel()
-            done.clear()
-            failures[0].result()
-        return b"".join(read.result() for read in reads)
+        )

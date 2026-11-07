@@ -517,6 +517,40 @@ def mock_connection(max_pool_connections=10):
     return connection
 
 
+def call_bounded(fn, *args, timeout=EVENT_TIMEOUT, **kwargs):
+    """Call a function in a daemon thread, failing if it does not return within the timeout.
+
+    A regression that blocks the call fails the test instead of hanging it.
+
+    Args:
+        fn: The function.
+        *args: Positional arguments passed to the function.
+        timeout: The longest call, in seconds.
+        **kwargs: Keyword arguments passed to the function.
+
+    Returns:
+        The return value of the function.
+
+    Raises:
+        BaseException: The error that the function raised.
+    """
+    outcome = {}
+
+    def run():
+        try:
+            outcome["result"] = fn(*args, **kwargs)
+        except BaseException as e:
+            outcome["error"] = e
+
+    runner = threading.Thread(target=run, daemon=True)
+    runner.start()
+    runner.join(timeout)
+    assert not runner.is_alive(), f"{fn!r} did not return within {timeout} s"
+    if "error" in outcome:
+        raise outcome.pop("error")
+    return outcome.get("result")
+
+
 def run_bounded(main, timeout=EVENT_TIMEOUT):
     """Run a coroutine with ``asyncio.run()``, failing if it does not end within the timeout.
 

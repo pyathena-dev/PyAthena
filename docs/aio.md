@@ -281,10 +281,10 @@ its coroutines run the blocking boto3 calls in threads that PyAthena owns, sized
 | | S3FileSystem | AioS3FileSystem |
 |---|---|---|
 | **Blocking calls** | Caller's thread | Thread pool of the filesystem |
-| **Parallelism** | `ThreadPoolExecutor` | `asyncio.gather` on a thread pool |
+| **Parallelism** | Request pool of the filesystem | `asyncio.gather` on a thread pool; requests in the request pool |
 | **File handles** | `S3File` with thread pool | `AioS3File` with thread pool; `AioS3StreamedFile` from `open_async()` |
-| **Bulk delete** | Thread pool per batch | `asyncio.gather` per batch |
-| **Multipart copy** | Thread pool per copy | Thread pool of the filesystem |
+| **Bulk delete** | Request pool, `max_workers` requests at once | Request pool, `max_workers` requests at once |
+| **Multipart copy** | Request pool, `max_workers` requests per copy | Request pool, `max_workers` requests per copy |
 | **Best for** | Synchronous applications | Async frameworks (FastAPI, aiohttp, etc.) |
 
 ### Threads
@@ -334,6 +334,10 @@ ends. A request that has already been sent still runs to its end in its thread. 
 requests that run to their end after a cancellation keep their retries: the commit of a
 file, the CompleteMultipartUpload request of a multipart copy, and the aborts of
 multipart uploads.
+The range reads of a file from `open_async()`, the DeleteObjects requests of `_rm()`, and the annotation
+copies of a multipart copy are waited for before the cancellation is raised, also when
+the shutdown of the event loop at the end of `asyncio.run()` cancels the coroutine; a
+second cancellation stops that wait.
 
 ### Executor strategy
 
@@ -343,6 +347,12 @@ and runs them in a pool of `max_workers` threads; in a forked child process, the
 creates new threads. `S3ThreadPoolExecutor` and `S3AioThreadPool` are aliases of `S3ThreadPool`.
 `S3AioExecutor` is kept for compatibility: it is an `S3ThreadPool` that ignores its
 `loop` argument, with a `DeprecationWarning` if one is given.
+`S3Executor.map()` and `S3Executor.map_async()` run a callable for each item in the
+executor and return the outcomes in the order of the items. With `stop_on_failure`,
+the default, the first failure cancels the calls that have not started, stops the
+retries of the running ones, and is raised once they have ended. A call that runs in an
+`S3ThreadPool` must not map on that pool, which would wait for the threads that the
+call holds; a scope of the filesystem runs such calls in the calling thread.
 
 The file handles of `AioS3FileSystem.open()` run their multipart uploads and parallel
 range reads in the request pool of the filesystem, at most the `max_workers` of the
