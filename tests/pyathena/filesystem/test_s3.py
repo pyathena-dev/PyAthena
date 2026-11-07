@@ -3446,6 +3446,66 @@ class TestS3FileSystem:
             {"k": "v"},
         )
 
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [
+            # The attributes of the existing object, without its object lock.
+            (
+                {},
+                {
+                    "ContentType": "text/plain",
+                    "Metadata": {"k": "v"},
+                    "StorageClass": "STANDARD_IA",
+                    "ServerSideEncryption": "aws:kms",
+                    "SSEKMSKeyId": "key-1",
+                },
+            ),
+            # Those that the caller gives take precedence; the encryption is
+            # kept or replaced as a whole.
+            (
+                {
+                    "ContentType": "text/csv",
+                    "Metadata": {"a": "b"},
+                    "StorageClass": "STANDARD",
+                    "ServerSideEncryption": "AES256",
+                    "ObjectLockMode": "GOVERNANCE",
+                },
+                {
+                    "ContentType": "text/csv",
+                    "Metadata": {"a": "b"},
+                    "StorageClass": "STANDARD",
+                    "ServerSideEncryption": "AES256",
+                    "ObjectLockMode": "GOVERNANCE",
+                },
+            ),
+        ],
+        ids=["inherited", "caller"],
+    )
+    def test_open_append_caller_parameters_take_precedence(self, kwargs, expected):
+        # GH-1373: the rewritten object keeps the attributes of the existing
+        # object that the caller does not give, but not its object lock.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs._call.return_value = {
+            "ContentLength": 2,
+            "ContentType": "text/plain",
+            "Metadata": {"k": "v"},
+            "StorageClass": "STANDARD_IA",
+            "ServerSideEncryption": "aws:kms",
+            "SSEKMSKeyId": "key-1",
+            "ObjectLockMode": "COMPLIANCE",
+            "ObjectLockRetainUntilDate": datetime(2030, 1, 1, tzinfo=UTC),
+            "ObjectLockLegalHoldStatus": "ON",
+        }
+        fs.cat_file = mock.MagicMock(return_value=b"aa")
+        fs.core.put_object = mock.MagicMock()
+
+        with fs.open("s3://bucket/key", "ab", **kwargs) as f:
+            f.write(b"bb")
+        (_, body), request = fs.core.put_object.call_args
+        assert body == b"aabb"
+        assert {k: v for k, v in request.items() if k != "IfMatch"} == expected
+
     def test_open_append_lookup_failure(self, monkeypatch):
         # GH-976: an append whose lookup of the existing object fails leaves
         # no half-initialized file, whose garbage collection would close it.
