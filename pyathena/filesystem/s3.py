@@ -2935,10 +2935,11 @@ class S3FileTarget:
         version_id: The version that is read, if any.
         request_kwargs: The parameters of the S3 requests of the file, with
             the conditions above and, in append mode, the attributes of the
-            existing object that the caller does not give, which the
-            rewritten object keeps: its system-defined and user-defined
-            metadata, storage class, and encryption, unless the caller gives
-            any encryption parameter. Its object lock is not kept.
+            existing object that the request parameters (those of the call
+            and of the filesystem) do not give, which the rewritten object
+            keeps: its system-defined and user-defined metadata, storage
+            class, and encryption, unless they give any encryption
+            parameter. Its object lock is not kept.
         details: The object that is read or appended, or an empty dictionary.
         size: The size of the object that is read, if known.
         appended: The existing object in append mode, if any.
