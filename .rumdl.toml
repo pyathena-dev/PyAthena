@@ -85,7 +85,8 @@ ignored-definitions = ["//"]
 
 # Spell project and library names consistently in prose; code is exempt.
 # rumdl also checks MyST `(label)=` targets, so the labels that contain one of
-# these names disable MD044 for their line.
+# these names disable MD044 for their line; remove those comments once the
+# pinned rumdl skips targets (https://github.com/rvben/rumdl/issues/983).
 [MD044]
 names = ["PyAthena", "Athena", "SQLAlchemy", "fsspec", "Polars", "PyArrow", "pandas"]
 code-blocks = false
