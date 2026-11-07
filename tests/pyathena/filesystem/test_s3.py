@@ -3639,23 +3639,24 @@ class TestS3FileSystem:
 
     def test_client(self):
         # GH-1363: the filesystem sends its requests with the given client and
-        # retry policy, and borrows the client: close() does not close it.
-        client = mock_client()
-        retry_config = RetryConfig(attempt=2)
-        fs = S3FileSystem(
-            client=client,
-            retry_config=retry_config,
-            requester_pays=True,
-            max_workers=3,
-            default_cache_type="none",
-            skip_instance_cache=True,
+        # retry policy, which retries SlowDown, unlike the default one, and
+        # borrows the client: close() does not close it.
+        client = boto3.client(
+            "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
         )
-        assert fs._client is client
-        assert fs.core.retry_config is retry_config
-        assert fs.request_kwargs == {"RequestPayer": "requester"}
-        assert fs.max_workers == 3
-        fs.close()
-        client.close.assert_not_called()
+        retry_config = RetryConfig(exceptions=["SlowDown"], attempt=2, multiplier=0)
+        fs = S3FileSystem(client=client, retry_config=retry_config, skip_instance_cache=True)
+        with Stubber(client) as stubber:
+            for _ in range(2):
+                stubber.add_client_error(
+                    "head_object", service_error_code="SlowDown", http_status_code=503
+                )
+            with pytest.raises(OSError):
+                fs.info("bucket/key")
+            stubber.assert_no_pending_responses()
+        with mock.patch.object(client, "close") as close:
+            fs.close()
+        close.assert_not_called()
 
     def test_s3_filesystem(self):
         # GH-1363: s3_filesystem() creates a filesystem with the S3 client and
@@ -3680,6 +3681,16 @@ class TestS3FileSystem:
         assert record[0].filename == __file__
         assert fs._client is connection.s3_client
         assert fs.core.retry_config is connection.retry_config
+
+    @pytest.mark.skipif(sys.version_info < (3, 12), reason="skip_file_prefixes of Python 3.12")
+    def test_connection_deprecated_through_fsspec(self):
+        # GH-1363: a filesystem created through fsspec.filesystem() attributes the
+        # warning to its caller, not to fsspec.
+        connection = mock.MagicMock()
+        connection.s3_client = mock_client()
+        with pytest.warns(DeprecationWarning, match="s3_filesystem") as record:
+            fsspec.filesystem("s3", connection=connection, skip_instance_cache=True)
+        assert record[0].filename == __file__
 
     @pytest.mark.parametrize(
         "kwargs",

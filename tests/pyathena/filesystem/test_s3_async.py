@@ -19,6 +19,7 @@ from pathlib import PurePosixPath
 from types import SimpleNamespace
 from unittest import mock
 
+import boto3
 import pytest
 from botocore.stub import Stubber
 from fsspec.callbacks import Callback
@@ -2602,14 +2603,21 @@ class TestAioS3FileSystem:
             )
 
     def test_client(self):
-        # GH-1363: the internal S3FileSystem sends the requests with the given
-        # client and retry policy.
-        client = mock_client(7)
-        retry_config = RetryConfig(attempt=2)
+        # GH-1363: the requests go through the given client with the given retry
+        # policy, which retries SlowDown, unlike the default one.
+        client = boto3.client(
+            "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
+        )
+        retry_config = RetryConfig(exceptions=["SlowDown"], attempt=2, multiplier=0)
         fs = AioS3FileSystem(client=client, retry_config=retry_config, skip_instance_cache=True)
-        assert fs._sync_fs._client is client
-        assert fs.core.retry_config is retry_config
-        assert fs._sync_fs.max_workers == 7
+        with Stubber(client) as stubber:
+            for _ in range(2):
+                stubber.add_client_error(
+                    "head_object", service_error_code="SlowDown", http_status_code=503
+                )
+            with pytest.raises(OSError):
+                fs.info("bucket/key")
+            stubber.assert_no_pending_responses()
 
     def test_s3_filesystem(self):
         connection = mock.MagicMock()
@@ -2642,11 +2650,16 @@ class TestAioS3FileSystem:
         ids=["client", "retry_config", "profile"],
     )
     def test_connection_conflicts_rejected(self, kwargs, match):
+        connection = mock.MagicMock()
+        s3_client = mock.PropertyMock(return_value=mock_client())
+        type(connection).s3_client = s3_client
         with (
             pytest.warns(DeprecationWarning, match="connection argument"),
             pytest.raises(TypeError, match=match),
         ):
-            AioS3FileSystem(connection=mock.MagicMock(), skip_instance_cache=True, **kwargs)
+            AioS3FileSystem(connection=connection, skip_instance_cache=True, **kwargs)
+        # Checked before the client of the connection is used.
+        s3_client.assert_not_called()
 
     def test_pickle(self):
         # GH-1339: a filesystem with a given client raises TypeError, which names

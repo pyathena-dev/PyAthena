@@ -8,6 +8,7 @@ import hashlib
 import logging
 import mimetypes
 import os.path
+import sys
 import threading
 import time
 import warnings
@@ -20,6 +21,7 @@ from io import BytesIO
 from typing import TYPE_CHECKING, Any, BinaryIO, ClassVar, cast
 from urllib.parse import unquote_plus
 
+import fsspec
 from boto3 import Session
 from botocore import UNSIGNED
 from botocore.client import BaseClient, Config
@@ -423,35 +425,11 @@ class S3FileSystem(AbstractFileSystem):
         """
         super().__init__(*args, **kwargs)
         self.batch_size = self._check_batch_size(batch_size)
-        if connection is not None:
-            warnings.warn(
-                _CONNECTION_DEPRECATION_MESSAGE.format(cls=type(self).__name__),
-                DeprecationWarning,
-                # Past fsspec's metaclass, which calls __init__.
-                stacklevel=3,
-            )
-            if client is not None or retry_config is not None:
-                raise TypeError("connection cannot be combined with client or retry_config.")
         self._client_injected = client is not None or connection is not None
-        if self._client_injected:
-            # The settings of fsspec's configuration for the protocol, such as
-            # the FSSPEC_S3_* environment variables, apply to every filesystem
-            # and are ignored instead.
-            configured = apply_config(type(self), {})
-            building_args = sorted(
-                k
-                for k in self._CLIENT_BUILDING_ARGS
-                if kwargs.get(k) is not None and (k not in configured or kwargs[k] != configured[k])
-            )
-            if building_args:
-                raise TypeError(
-                    f"{', '.join(building_args)} cannot be combined with client or "
-                    "connection, whose client the filesystem uses as it is."
-                )
-        if connection is not None:
-            client = connection.s3_client
-            retry_config = connection.retry_config
-        elif client is None:
+        client, retry_config = self._resolve_injected_client(
+            type(self), connection, client, retry_config, kwargs
+        )
+        if client is None:
             client = self._get_client_compatible_with_s3fs(max_workers=max_workers, **kwargs)
         self.default_block_size = (
             default_block_size if default_block_size else self.DEFAULT_BLOCK_SIZE
@@ -479,6 +457,74 @@ class S3FileSystem(AbstractFileSystem):
             retry_config=retry_config if retry_config is not None else RetryConfig(),
             request_kwargs={**request_kwargs, **S3Core.copy_from_source_params(request_kwargs)},
         )
+
+    @classmethod
+    def _resolve_injected_client(
+        cls,
+        filesystem_class: type[AbstractFileSystem],
+        connection: Connection[Any] | None,
+        client: BaseClient | None,
+        retry_config: RetryConfig | None,
+        kwargs: Mapping[str, Any],
+    ) -> tuple[BaseClient | None, RetryConfig | None]:
+        """Check the injected client of a filesystem and resolve it from a connection.
+
+        Warns that ``connection`` is deprecated, and rejects the arguments that
+        conflict with an injected client before the client of the connection is
+        used. ``AioS3FileSystem`` resolves its arguments with it too.
+
+        Args:
+            filesystem_class: The class of the filesystem being created, whose
+                name the warning shows and whose fsspec configuration applies.
+            connection: The deprecated ``connection`` argument.
+            client: The ``client`` argument.
+            retry_config: The ``retry_config`` argument.
+            kwargs: The other keyword arguments of the filesystem, merged with
+                fsspec's configuration for the protocol.
+
+        Returns:
+            The injected client and retry policy, or the given ones if
+            ``connection`` is None.
+
+        Raises:
+            TypeError: If the arguments conflict with an injected client.
+        """
+        if connection is not None:
+            message = _CONNECTION_DEPRECATION_MESSAGE.format(cls=filesystem_class.__name__)
+            if sys.version_info >= (3, 12):
+                # Attributed to the first caller outside fsspec and the filesystems,
+                # such as through fsspec.filesystem() or a subclass.
+                warnings.warn(
+                    message,
+                    DeprecationWarning,
+                    skip_file_prefixes=(
+                        os.path.dirname(fsspec.__file__) + os.sep,
+                        os.path.dirname(__file__) + os.sep,
+                    ),
+                )
+            else:
+                # Past this method, __init__, and fsspec's metaclass.
+                warnings.warn(message, DeprecationWarning, stacklevel=4)
+            if client is not None or retry_config is not None:
+                raise TypeError("connection cannot be combined with client or retry_config.")
+        if client is not None or connection is not None:
+            # The settings of fsspec's configuration for the protocol, such as
+            # the FSSPEC_S3_* environment variables, apply to every filesystem
+            # and are ignored instead.
+            configured = apply_config(filesystem_class, {})
+            building_args = sorted(
+                k
+                for k in cls._CLIENT_BUILDING_ARGS
+                if kwargs.get(k) is not None and (k not in configured or kwargs[k] != configured[k])
+            )
+            if building_args:
+                raise TypeError(
+                    f"{', '.join(building_args)} cannot be combined with client or "
+                    "connection, whose client the filesystem uses as it is."
+                )
+        if connection is not None:
+            return connection.s3_client, connection.retry_config
+        return client, retry_config
 
     @override
     def __reduce__(self) -> tuple[Any, ...]:
