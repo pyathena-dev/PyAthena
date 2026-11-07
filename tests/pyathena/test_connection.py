@@ -38,7 +38,7 @@ from pyathena.connection import Connection
 from pyathena.converter import DefaultTypeConverter
 from pyathena.cursor import Cursor, DictCursor
 from pyathena.error import OperationalError, ProgrammingError
-from pyathena.filesystem.s3 import S3FileSystem
+from pyathena.filesystem import s3_filesystem
 from pyathena.pandas.async_cursor import AsyncPandasCursor
 from pyathena.pandas.cursor import PandasCursor
 from pyathena.polars.async_cursor import AsyncPolarsCursor
@@ -530,9 +530,10 @@ class TestConnection:
     def test_s3_filesystem_uses_connection_s3_client(self):
         conn = _connection()
 
-        fs = S3FileSystem(connection=conn, skip_instance_cache=True)
+        fs = s3_filesystem(conn, skip_instance_cache=True)
 
         assert fs._client is conn.s3_client
+        assert fs.core.retry_config is conn.retry_config
 
     def test_s3_config_defaults_to_config(self):
         conn = _connection(config=Config(max_pool_connections=20))

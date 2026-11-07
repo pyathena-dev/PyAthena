@@ -761,7 +761,7 @@ The Glue request does not carry the connection's workgroup; turn the fallback of
 
 ## S3 client
 
-A connection builds one S3 client on first use and shares it with the result sets of its cursors, the `S3FileSystem` instances created with `connection=`, and the Spark cursors.
+A connection builds one S3 client on first use and shares it with the result sets of its cursors, the filesystems created with `pyathena.filesystem.s3_filesystem()`, and the Spark cursors.
 The result sets of `Cursor`, `DictCursor`, and their asynchronous versions do not use it, so these cursors build no S3 client.
 `ArrowCursor`, and `PolarsCursor` for Parquet (`unload=True`) and chunked results, read the query results through their libraries' own S3 clients and use the shared client for their other S3 requests.
 

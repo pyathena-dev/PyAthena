@@ -14,7 +14,7 @@ import uuid
 import fsspec.tests.abstract as abstract
 import pytest
 
-from pyathena.filesystem.s3 import S3FileSystem
+from pyathena.filesystem import s3_filesystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
 from tests import ENV
 from tests.pyathena.conftest import connect
@@ -23,7 +23,7 @@ from tests.pyathena.conftest import connect
 class S3Fixtures(abstract.AbstractFixtures):
     @pytest.fixture(scope="class")
     def fs(self):
-        return S3FileSystem(connect())
+        return s3_filesystem(connect())
 
     @pytest.fixture
     def fs_join(self):
@@ -54,7 +54,7 @@ class S3Fixtures(abstract.AbstractFixtures):
 class AioS3Fixtures(S3Fixtures):
     @pytest.fixture(scope="class")
     def fs(self):
-        fs = AioS3FileSystem(connection=connect())
+        fs = s3_filesystem(connect(), AioS3FileSystem)
         yield fs
         fs.close()
 
