@@ -29,7 +29,6 @@ from fsspec.utils import check_contained
 
 from pyathena.aio.util import create_in_thread
 from pyathena.filesystem.s3 import (
-    _CONNECTION_DEPRECATION_MESSAGE,
     _UNPICKLABLE_CLIENT_MESSAGE,
     CompressedBuffer,
     S3File,
@@ -164,17 +163,10 @@ class AioS3FileSystem(AsyncFileSystem):
             batch_size=batch_size,
             **kwargs,
         )
-        if connection is not None:
-            warnings.warn(
-                _CONNECTION_DEPRECATION_MESSAGE.format(cls=type(self).__name__),
-                DeprecationWarning,
-                # Past fsspec's metaclass, which calls __init__.
-                stacklevel=3,
-            )
-            if client is not None or retry_config is not None:
-                raise TypeError("connection cannot be combined with client or retry_config.")
-            client = connection.s3_client
-            retry_config = connection.retry_config
+        # Checked before the client of the connection is used.
+        client, retry_config = S3FileSystem._resolve_injected_client(
+            type(self), connection, client, retry_config, kwargs
+        )
         self._sync_fs = S3FileSystem(
             client=client,
             retry_config=retry_config,
