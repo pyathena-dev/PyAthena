@@ -96,18 +96,21 @@ fs.get("s3://YOUR_S3_BUCKET/path/to/", "local/dir/", recursive=True, batch_size=
 `batch_size` is an argument of these methods, of `rm`, and of `S3FileSystem`. By default,
 and with `-1`, it is the filesystem's `max_workers`. The transfers of a batch run in
 threads of their own. With several transfers at once, each object sends at most
-`max_workers // n` range reads, parts, or part copies at once, `n` being the number of
-transfers that run at once, so that a batch keeps about `max_workers` requests in the
-request pool and as many parts in memory; a smaller `max_workers` given to the method is
-kept. `cat`, `cat_ranges`, and a small `pipe` send their single request from the
+`max(1, max_workers // n)` range reads, parts, or part copies at once, `n` being the
+smaller of `batch_size` and the number of objects, so that a batch keeps about
+`max_workers` requests in the request pool and as many parts in memory; a smaller
+`max_workers` given to the method is kept. A single object keeps the filesystem's
+`max_workers`. `cat`, `cat_ranges`, and a small `pipe` send their single request from the
 transfer's thread, so a `batch_size` larger than `max_workers` sends that many requests
 at once.
 
 When a transfer fails, no further transfer starts, the retries of the running ones stop,
-and the error is raised once they have ended. A running upload or multipart copy sends
-no further part and is aborted instead of being committed, and a running download reads
-and writes no further block; a multipart copy that has been committed still copies its
-annotations. The transfers that ended before the failure stay done, and their number is
+and the error is raised once they have ended. A running multipart upload or copy sends
+no further part and is aborted instead of being completed, and a running download reads
+and writes no further block. A request already sent, such as the PutObject of a small
+object, runs to its end; a multipart copy that has been completed still copies its
+annotations. With `cache_type="background"`, a block that fsspec's cache prefetches in
+its own thread may still be read after the stop. The transfers that ended before the failure stay done, and their number is
 not bounded by `batch_size`. `mv` deletes the sources only once every copy has
 succeeded. `on_error` of `cat`, `cat_ranges`, and `cp` keeps its fsspec meaning; with
 `on_error="omit"` or `"return"` of `cat`, `"return"` of `cat_ranges`, or `"ignore"` of

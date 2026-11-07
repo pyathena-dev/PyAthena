@@ -38,6 +38,7 @@ from fsspec import Callback
 from fsspec.compression import compr
 from fsspec.dircache import DirCache
 from fsspec.implementations.dirfs import DirFileSystem
+from fsspec.implementations.local import LocalFileSystem
 from fsspec.implementations.memory import MemoryFileSystem
 
 import pyathena
@@ -49,7 +50,7 @@ from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool, _S3Batch, 
 from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
-from pyathena.util import RetryConfig, stop_retries_on
+from pyathena.util import RetryConfig, raise_if_stopped, stop_retries_on
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
@@ -2502,7 +2503,9 @@ class TestS3FileSystem:
         def get_file(rpath, lpath, **kwargs):
             with lock:
                 started.append(rpath)
-            time.sleep(0.3)
+            # Runs until the interrupt stops the batch.
+            with pytest.raises(CancelledError):
+                poll_until(lambda: raise_if_stopped("end") or False, "the batch did not stop")
             with lock:
                 ended.append(rpath)
 
@@ -2598,12 +2601,15 @@ class TestS3FileSystem:
         # when another copy ends after the failure.
         fs = self._make_fs()
         fs._delete_objects = mock.MagicMock()
+        both = threading.Barrier(2, timeout=EVENT_TIMEOUT)
         failed = threading.Event()
 
         def copy_file(path1, path2, **kwargs):
+            both.wait()
             if path1 == "s3://bucket/src/0":
                 failed.set()
                 raise PermissionError(path1)
+            # Succeeds after the failure.
             assert failed.wait(EVENT_TIMEOUT)
             return True
 
@@ -2652,6 +2658,60 @@ class TestS3FileSystem:
             fs.get(["s3://bucket/a", "s3://bucket/b"], [str(tmp_path / "a"), str(tmp_path / "b")])
         fs.get_file.assert_not_called()
 
+    def test_copy_skipped_directory_does_not_conflict(self):
+        # GH-1322: a listed source without an object at its key, a prefix
+        # that cp_file() skips, writes no destination, so its destination
+        # being another source is no conflict.
+        fs = self._make_fs()
+        fs.cp_file = mock.MagicMock()
+        fs._head_object = mock.MagicMock(
+            side_effect=lambda path: None if path.endswith("dir") else self._file_object("x")
+        )
+        fs.copy(["s3://bucket/dir", "s3://bucket/x"], ["s3://bucket/x", "s3://bucket/y"])
+        assert fs.cp_file.call_count == 2
+
+    def test_get_put_pass_kwargs_to_expansion(self, tmp_path):
+        # GH-1322: as in fsspec, get() and put() pass their keyword arguments
+        # to the expansion of the sources, such as prefix or assume_literal.
+        fs = self._make_fs()
+        fs.put_file = mock.MagicMock()
+        (tmp_path / "a").write_bytes(b"")
+        with mock.patch.object(
+            LocalFileSystem, "expand_path", autospec=True, return_value=[str(tmp_path / "a")]
+        ) as expand_path:
+            fs.put(str(tmp_path / "a"), "s3://bucket/dst/", assume_literal=True)
+        assert expand_path.call_args.kwargs["assume_literal"] is True
+        fs.expand_path = mock.MagicMock(return_value=["bucket/root/a"])
+        fs.get_file = mock.MagicMock()
+        fs.isdir = mock.MagicMock(return_value=False)
+        fs.get("s3://bucket/root/", str(tmp_path / "out") + "/", recursive=True, prefix="a")
+        assert fs.expand_path.call_args.kwargs["prefix"] == "a"
+
+    @pytest.mark.parametrize("on_error", ["return", "raise"])
+    def test_cat_ranges_on_error(self, on_error):
+        # GH-1322 (B5): with on_error="return", a failed range returns its
+        # error in place; otherwise it is raised.
+        fs = self._make_fs()
+        error = PermissionError("bucket/src/0")
+        fs.cat_file = lambda path, start, end, **kwargs: (
+            (_ for _ in ()).throw(error) if path == "s3://bucket/src/0" else b"x"
+        )
+        if on_error == "return":
+            assert self._batch(fs, "cat_ranges", 2, on_error=on_error) == [error, b"x"]
+        else:
+            with pytest.raises(PermissionError):
+                self._batch(fs, "cat_ranges", 2, on_error=on_error)
+
+    def test_range_read_stopped_sends_no_request(self):
+        # GH-1322 (B2): a range read whose scope has stopped, such as one that
+        # waited behind other requests of a stopped batch, sends no GetObject.
+        file = mock.MagicMock()
+        stop = threading.Event()
+        stop.set()
+        with stop_retries_on(stop), pytest.raises(CancelledError):
+            S3File._get_range(file, S3Path("bucket", "key"), (0, 1))
+        file.fs.core.get_object.assert_not_called()
+
     def test_copy_in_place_does_not_conflict(self):
         # GH-1322: a pair whose destination is its own source rewrites the
         # object in place, such as with MetadataDirective="REPLACE".
@@ -2662,19 +2722,22 @@ class TestS3FileSystem:
 
     def test_get_outfile_runs_in_order(self):
         # GH-1322: downloads into one output stream run one after another, in
-        # the order of the sources.
+        # the order of the sources, in the calling thread, which may own the
+        # stream; get_file() ignores the local paths then, so they do not
+        # conflict.
         fs = self._make_fs()
-        calls = []
+        threads = set()
 
-        def get_file(rpath, lpath, **kwargs):
-            calls.append(("start", rpath))
-            time.sleep(0.05)
-            calls.append(("end", rpath))
+        def get_file(rpath, lpath, outfile, **kwargs):
+            threads.add(threading.current_thread())
+            outfile.write(rpath.encode() + b";")
 
         fs.get_file = get_file
         sources = [f"s3://bucket/src/{i}" for i in range(3)]
-        fs.get(sources, [f"local/{i}" for i in range(3)], outfile=io.BytesIO())
-        assert calls == [(event, p) for p in sources for event in ("start", "end")]
+        outfile = io.BytesIO()
+        fs.get(sources, ["unused"] * 3, outfile=outfile)
+        assert outfile.getvalue() == b"".join(p.encode() + b";" for p in sources)
+        assert threads == {threading.current_thread()}
 
     def test_batch_callback_is_used_one_thread_at_a_time(self):
         # GH-1322: the callback of a batch and its branches are used from the
@@ -2683,6 +2746,26 @@ class TestS3FileSystem:
         fs = self._make_fs()
         busy = threading.Lock()
         overlaps = []
+
+        class Child(Callback):
+            # A branch that needs its context: fsspec enters it with "with".
+            entered = False
+
+            def __enter__(self):
+                SharedCallback._use(self)
+                self.entered = True
+                return self
+
+            def set_size(self, size):
+                assert self.entered
+                SharedCallback._use(self)
+
+            def relative_update(self, inc=1):
+                assert self.entered
+                SharedCallback._use(self)
+
+            def close(self):
+                SharedCallback._use(self)
 
         class SharedCallback(Callback):
             def _use(self):
@@ -2696,8 +2779,8 @@ class TestS3FileSystem:
 
             def branched(self, path_1, path_2, **kwargs):
                 self._use()
-                # A branch that shares the state of its parent.
-                return self
+                # A branch that shares the lock of its parent.
+                return Child()
 
             def set_size(self, size):
                 self._use()
@@ -2706,6 +2789,7 @@ class TestS3FileSystem:
                 self._use()
 
         def put_file(lpath, rpath, callback, **kwargs):
+            callback.set_size(5)
             for _ in range(5):
                 callback.relative_update(1)
 

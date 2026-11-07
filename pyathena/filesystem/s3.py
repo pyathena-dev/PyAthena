@@ -130,6 +130,28 @@ class _S3LockedCallback(Callback):
         self._callback = callback
         self._lock = lock
 
+    def __enter__(self) -> _S3LockedCallback:
+        """Enter the callback.
+
+        Returns:
+            This callback.
+        """
+        with self._lock:
+            self._callback.__enter__()
+        return self
+
+    def __exit__(self, *exc_args: Any) -> Any:
+        """Exit the callback.
+
+        Args:
+            *exc_args: The exception of the block, if any.
+
+        Returns:
+            What the callback's ``__exit__()`` returns.
+        """
+        with self._lock:
+            return self._callback.__exit__(*exc_args)
+
     def close(self) -> None:
         """Close the callback."""
         with self._lock:
@@ -1835,6 +1857,7 @@ class S3FileSystem(AbstractFileSystem):
         pairing: S3PathPairing,
         pairs: list[tuple[str, str]],
         source_params: Mapping[str, Any] | None = None,
+        copy: bool = False,
     ) -> tuple[set[str], set[str]]:
         """Look up what the conflict checks of a move or a copy need.
 
@@ -1846,6 +1869,7 @@ class S3FileSystem(AbstractFileSystem):
             source_params: The parameters of the requests that read the
                 sources (see :meth:`S3Core.copy_source_params`), sent with
                 the lookups of the sources.
+            copy: Whether the pairs are those of a copy.
 
         Returns:
             The conflict candidates with no object at their key, and the
@@ -1869,14 +1893,17 @@ class S3FileSystem(AbstractFileSystem):
         missing = {
             source
             for source in pairing.conflict_candidates(
-                pairs, versioning_enabled_buckets=versioned_buckets
+                pairs, versioning_enabled_buckets=versioned_buckets, copy=copy
             )
             if self._head_object(source, lookup_kwargs=lookup_kwargs) is None
         }
         return missing, versioned_buckets
 
     def _copy_pairs(
-        self, pairing: S3PathPairing, isdir: Callable[[str], bool] | None = None
+        self,
+        pairing: S3PathPairing,
+        isdir: Callable[[str], bool] | None = None,
+        **kwargs: Any,
     ) -> list[tuple[str, str]]:
         """Expand and pair the paths of a copy (see :meth:`S3PathPairing.copy_pairs`).
 
@@ -1886,6 +1913,8 @@ class S3FileSystem(AbstractFileSystem):
             pairing: The paths of the copy.
             isdir: Whether the destination is a directory, by default
                 ``self.isdir``; ``get()`` passes the local filesystem's.
+            **kwargs: Passed to ``expand_path()``, as fsspec's ``get()`` passes
+                its keyword arguments.
 
         Returns:
             The sources and their destinations.
@@ -1893,7 +1922,7 @@ class S3FileSystem(AbstractFileSystem):
         if not pairing.expands:
             return pairing.copy_pairs()
         sources = self.expand_path(
-            pairing.path1, recursive=pairing.recursive, maxdepth=pairing.maxdepth
+            pairing.path1, recursive=pairing.recursive, maxdepth=pairing.maxdepth, **kwargs
         )
         if pairing.skips_directories:
             sources = [p for p in sources if not (trailing_sep(p) or self.isdir(p))]
@@ -1941,8 +1970,9 @@ class S3FileSystem(AbstractFileSystem):
                 otherwise.
             batch_size: Number of copies to run at the same time. By default
                 the ``batch_size`` of the filesystem; None or -1 there is
-                ``max_workers``. With several copies at once, each multipart
-                copy sends at most ``max_workers // batch_size`` parts at once.
+                ``max_workers``. With ``n`` copies at once, the smaller of
+                ``batch_size`` and the number of pairs, each multipart copy
+                sends at most ``max(1, max_workers // n)`` parts at once.
             **kwargs: Additional S3 copy parameters passed to ``cp_file()``.
 
         Raises:
@@ -1960,7 +1990,7 @@ class S3FileSystem(AbstractFileSystem):
         if not pairs:
             return
         missing, versioned_buckets = self._conflict_lookups(
-            pairing, pairs, self.core.copy_source_params(kwargs)
+            pairing, pairs, self.core.copy_source_params(kwargs), copy=True
         )
         pairing.check_copy_pairs(
             pairs, missing=missing, versioning_enabled_buckets=versioned_buckets
@@ -2028,14 +2058,17 @@ class S3FileSystem(AbstractFileSystem):
         pairs = self._copy_pairs(
             S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
             isdir=LocalFileSystem().isdir,
+            **kwargs,
         )
         if isinstance(root, str):
             check_contained(root, [lp for _, lp in pairs])
         if not pairs:
             return
-        self._check_local_destinations([lp for _, lp in pairs])
-        # Writes to one output stream keep their order.
-        concurrency = 1 if kwargs.get("outfile") is not None else min(limit, len(pairs))
+        # get_file() writes to an outfile instead of the local paths.
+        outfile = kwargs.get("outfile") is not None
+        if not outfile:
+            self._check_local_destinations([lp for _, lp in pairs])
+        concurrency = 1 if outfile else min(limit, len(pairs))
         call_kwargs = self._batch_kwargs(concurrency, kwargs)
         locked = _S3LockedCallback(callback, threading.Lock())
 
@@ -2051,6 +2084,12 @@ class S3FileSystem(AbstractFileSystem):
             locked.relative_update(1)
 
         locked.set_size(len(pairs))
+        if outfile:
+            # One after another, in order, in the calling thread, which may
+            # own the stream.
+            for pair in pairs:
+                get_pair(pair)
+            return
         self._run_batch(get_pair, pairs, concurrency)
 
     @staticmethod
@@ -2077,7 +2116,7 @@ class S3FileSystem(AbstractFileSystem):
                 try:
                     stat = os.stat(path)
                 except OSError:
-                    key = ("path", os.path.realpath(path))
+                    key = ("path", os.path.normcase(os.path.realpath(path)))
                 else:
                     if os.path.isdir(path):
                         # Directories are created, not written.
@@ -2436,24 +2475,25 @@ class S3FileSystem(AbstractFileSystem):
         paths = self.expand_path(path, recursive=recursive, **kwargs)
         if not (len(paths) > 1 or isinstance(path, list) or paths[0] != self._strip_protocol(path)):
             return self.cat_file(paths[0], **kwargs)
-        outcomes = self._run_batch(
-            functools.partial(self.cat_file, **kwargs),
-            paths,
-            min(limit, len(paths)),
-            counts=None if on_error == "raise" else lambda e: False,
-        ).outcomes
-        contents: dict[str, Any] | None = {}
+        outcomes: list[Any] | None = None
+        contents: dict[str, Any] | None = None
         outcome = None
         try:
-            for p, outcome in zip(paths, cast(list[Any], outcomes), strict=True):
+            outcomes = self._run_batch(
+                functools.partial(self.cat_file, **kwargs),
+                paths,
+                min(limit, len(paths)),
+                counts=None if on_error == "raise" else lambda e: False,
+            ).outcomes
+            contents = {}
+            for p, outcome in zip(paths, outcomes, strict=True):
                 if on_error != "omit" or not isinstance(outcome, Exception):
-                    cast(dict[str, Any], contents)[p] = outcome
+                    contents[p] = outcome
             return contents
         except BaseException:
             # Not kept by this frame, which the traceback of an interrupt
             # keeps (F5).
-            contents = outcome = None
-            del outcomes
+            contents = outcomes = outcome = None
             raise
 
     def cat_ranges(
@@ -2636,7 +2676,7 @@ class S3FileSystem(AbstractFileSystem):
             if source_is_str:
                 lpath = make_path_posix(lpath)
             local = LocalFileSystem()
-            lpaths = local.expand_path(lpath, recursive=recursive, maxdepth=maxdepth)
+            lpaths = local.expand_path(lpath, recursive=recursive, maxdepth=maxdepth, **kwargs)
             if source_is_str and (not recursive or maxdepth is not None):
                 # A string source without recursion does not copy directories.
                 lpaths = [p for p in lpaths if not (trailing_sep(p) or local.isdir(p))]

@@ -145,13 +145,16 @@ class S3PathPairing:
         pairs: Sequence[tuple[str, str]],
         *,
         versioning_enabled_buckets: Collection[str] = (),
+        copy: bool = False,
     ) -> list[str]:
         """Return the sources of a move whose conflicts depend on an object at their key.
 
         A source with another source below it may be a directory. If no object
         exists at its key, it is not copied, so it writes no destination and
         is left out of the conflict checks of :meth:`move_pairs`. A path with
-        a version always names an object.
+        a version always names an object. For a copy, any source may be a
+        directory, such as a prefix given in a list, which the copy skips
+        (see :meth:`check_copy_pairs`).
 
         Args:
             pairs: The sources and destinations of the move, as
@@ -159,6 +162,9 @@ class S3PathPairing:
             versioning_enabled_buckets: Buckets whose versioning is enabled.
                 Their ``null`` versions are distinct from their unversioned
                 keys. Use the same collection for :meth:`move_pairs`.
+            copy: Whether the pairs are those of a copy, whose candidates
+                include every source without a version whose destination
+                conflicts.
 
         Returns:
             The sources, in ``bucket/key`` form (their
@@ -170,7 +176,7 @@ class S3PathPairing:
         Raises:
             TypeError: If ``versioning_enabled_buckets`` is a string.
         """
-        return self._moves(pairs, versioning_enabled_buckets)[2]
+        return self._moves(pairs, versioning_enabled_buckets, copy)[2]
 
     def move_pairs(
         self,
@@ -267,7 +273,9 @@ class S3PathPairing:
         """
         if isinstance(missing, str):
             raise TypeError("missing is a collection of paths, not a path.")
-        named, sources, candidates = self._moves(pairs, versioning_enabled_buckets)
+        named, sources, candidates = self._moves(
+            pairs, versioning_enabled_buckets, operation == "copy"
+        )
         if missing is None and candidates:
             raise ValueError("missing is needed to check the pairs.")
         # A directory without an object at its key writes no destination.
@@ -346,12 +354,14 @@ class S3PathPairing:
     def _moves(
         pairs: Sequence[tuple[str, str]],
         versioning_enabled_buckets: Collection[str] = (),
+        copy: bool = False,
     ) -> tuple[list[tuple[str, str, bool, str, str]], set[str], list[str]]:
         """Compare the paths of a move by what they name.
 
         Args:
             pairs: The sources and destinations of the move.
             versioning_enabled_buckets: Buckets whose versioning is enabled.
+            copy: Whether every conflicting source is a candidate.
 
         Returns:
             Each pair with whether its source has a version and the targets
@@ -393,7 +403,7 @@ class S3PathPairing:
             for _, _, versioned, source, dest in named
             if source != dest
             and (counts[dest] > 1 or dest in sources)
-            and source in directories
+            and (copy or source in directories)
             and not versioned
         ]
         return named, sources, candidates
