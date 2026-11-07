@@ -2603,6 +2603,7 @@ class TestS3FileSystem:
         fs._delete_objects = mock.MagicMock()
         both = threading.Barrier(2, timeout=EVENT_TIMEOUT)
         failed = threading.Event()
+        succeeded = []
 
         def copy_file(path1, path2, **kwargs):
             both.wait()
@@ -2613,11 +2614,14 @@ class TestS3FileSystem:
             assert failed.wait(EVENT_TIMEOUT)
             with pytest.raises(CancelledError):
                 poll_until(lambda: raise_if_stopped("end") or False, "the batch did not stop")
+            succeeded.append(path1)
             return True
 
         fs._copy_file = copy_file
         with pytest.raises(PermissionError):
             self._batch(fs, "mv", 2, batch_size=2)
+        # The other copy succeeded after the failure, and nothing was deleted.
+        assert succeeded == ["s3://bucket/src/1"]
         fs._delete_objects.assert_not_called()
 
     @pytest.mark.parametrize(
