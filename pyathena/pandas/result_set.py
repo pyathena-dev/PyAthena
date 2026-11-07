@@ -31,6 +31,7 @@ from pyathena.arrow.reader import ParquetChunkReader
 from pyathena.arrow.util import to_column_info
 from pyathena.converter import Converter, _parse_time_zone, _to_datetime_with_tz, _to_time
 from pyathena.error import DataError, ProgrammingError
+from pyathena.filesystem import s3_filesystem
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.reader import _BINARY_NULL, BinaryCSVReader
@@ -919,8 +920,8 @@ class AthenaPandasResultSetMetadataReader(AthenaUnloadResultSetMetadataReader):
         if self._filesystem is None:
             # Not cached by fsspec so that the connection and the dircache are released
             # with the result set.
-            self._filesystem = S3FileSystem(
-                connection=self._connection,
+            self._filesystem = s3_filesystem(
+                self._connection,
                 default_block_size=self._block_size,
                 default_cache_type=self._cache_type,
                 max_workers=self._max_workers,

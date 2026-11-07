@@ -16,6 +16,8 @@ This section covers S3 filesystem integration and object management.
 S3 FileSystem
 -------------
 
+.. autofunction:: pyathena.filesystem.s3_filesystem
+
 .. autoclass:: pyathena.filesystem.s3.S3FileSystem
    :members:
 

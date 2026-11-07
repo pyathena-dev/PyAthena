@@ -34,6 +34,7 @@ from pyathena import OperationalError
 from pyathena.arrow.reader import ParquetChunkReader
 from pyathena.converter import Converter, _to_default
 from pyathena.error import DataError, ProgrammingError
+from pyathena.filesystem import s3_filesystem
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.polars.converter import _to_datetimes
@@ -609,15 +610,15 @@ class AthenaPolarsResultSet(AthenaResultSet):
     def _filesystem_kwargs(self) -> dict[str, Any]:
         """Get the arguments of the S3FileSystem that reads the result files.
 
-        ``_read_csv()`` opens a CSV result file with an ``S3FileSystem`` built from
-        them and passes the open file to Polars; the chunked read of UNLOAD results
-        with pyarrow reads its files with one.
+        ``_read_csv()`` opens a CSV result file with an ``S3FileSystem`` that
+        ``s3_filesystem()`` creates from the connection and them, and passes the
+        open file to Polars; the chunked read of UNLOAD results with pyarrow reads
+        its files with one.
 
         Returns:
-            The ``S3FileSystem`` arguments.
+            The ``S3FileSystem`` arguments other than the client of the connection.
         """
         return {
-            "connection": self.connection,
             "default_block_size": self._block_size,
             "default_cache_type": self._cache_type,
             "max_workers": self._max_workers,
@@ -884,7 +885,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
                     fsspec.open, self.output_location, "rb", **(storage_options or {})
                 )
             else:
-                filesystem = S3FileSystem(**storage_options)
+                filesystem = s3_filesystem(self.connection, S3FileSystem, **storage_options)
                 open_csv = partial(filesystem.open, self.output_location, "rb")
             schema_overrides, timestamp_dtypes = self._get_csv_schema_overrides(has_header)
             strict = not kwargs.get("ignore_errors", False)
@@ -1250,7 +1251,7 @@ class AthenaPolarsResultSet(AthenaResultSet):
 
         if not self._kwargs and importlib.util.find_spec("pyarrow") is not None:
             return self._read_parquet_chunks(
-                S3FileSystem(**self._filesystem_kwargs), self._data_manifest
+                s3_filesystem(self.connection, **self._filesystem_kwargs), self._data_manifest
             )
         return self._scan_parquet_chunks(self._unload_location, self.connection, schema)
 

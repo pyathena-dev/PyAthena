@@ -95,7 +95,8 @@ class TestPolarsCursor:
             "SELECT * FROM one_row",
             schema_overrides={"number_of_rows": pl.Utf8},
             storage_options={
-                "connection": polars_cursor.connection,
+                "client": polars_cursor.connection.s3_client,
+                "retry_config": polars_cursor.connection.retry_config,
                 "skip_instance_cache": True,
             },
         ).as_polars()

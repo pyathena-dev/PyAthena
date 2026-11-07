@@ -28,7 +28,14 @@ from fsspec.implementations.local import LocalFileSystem, make_path_posix
 from fsspec.utils import check_contained
 
 from pyathena.aio.util import create_in_thread
-from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem, S3FileTarget
+from pyathena.filesystem.s3 import (
+    _CONNECTION_DEPRECATION_MESSAGE,
+    _UNPICKLABLE_CLIENT_MESSAGE,
+    CompressedBuffer,
+    S3File,
+    S3FileSystem,
+    S3FileTarget,
+)
 from pyathena.filesystem.s3_core import S3Core
 from pyathena.filesystem.s3_executor import ItemT, S3Executor, S3MapResult, S3ThreadPool, T
 from pyathena.filesystem.s3_object import (
@@ -42,11 +49,15 @@ from pyathena.filesystem.s3_object import (
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.filesystem.s3_writer import _S3WriteSession, _S3WriteState
+from pyathena.util import override
 
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from botocore.client import BaseClient
+
     from pyathena.connection import Connection
+    from pyathena.util import RetryConfig
 
 _logger = logging.getLogger(__name__)
 
@@ -109,12 +120,18 @@ class AioS3FileSystem(AsyncFileSystem):
         asynchronous: bool = False,
         loop: Any | None = None,
         batch_size: int | None = None,
+        *,
+        client: BaseClient | None = None,
+        retry_config: RetryConfig | None = None,
         **kwargs,
     ) -> None:
         """Initialize the filesystem and its internal ``S3FileSystem``.
 
         Args:
-            connection: Passed to the internal ``S3FileSystem``.
+            connection: Deprecated; use ``client`` and ``retry_config``, or
+                :func:`pyathena.filesystem.s3_filesystem` with
+                ``AioS3FileSystem``. A PyAthena connection whose S3 client and
+                retry policy the filesystem uses, with a ``DeprecationWarning``.
             default_block_size: Passed to the internal ``S3FileSystem``.
             default_cache_type: Passed to the internal ``S3FileSystem``.
             max_workers: The number of threads that run the blocking calls of
@@ -130,8 +147,16 @@ class AioS3FileSystem(AsyncFileSystem):
             asynchronous: Passed to ``fsspec.asyn.AsyncFileSystem``.
             loop: Passed to ``fsspec.asyn.AsyncFileSystem``.
             batch_size: Passed to ``fsspec.asyn.AsyncFileSystem``.
+            client: Passed to the internal ``S3FileSystem``. A filesystem with
+                a given client cannot be pickled.
+            retry_config: Passed to the internal ``S3FileSystem``.
             **kwargs: Passed to both ``fsspec.asyn.AsyncFileSystem`` and the
                 internal ``S3FileSystem``.
+
+        Raises:
+            TypeError: If ``connection`` is given with ``client`` or
+                ``retry_config``, or the internal ``S3FileSystem`` rejects
+                the arguments.
         """
         super().__init__(
             asynchronous=asynchronous,
@@ -139,8 +164,20 @@ class AioS3FileSystem(AsyncFileSystem):
             batch_size=batch_size,
             **kwargs,
         )
+        if connection is not None:
+            warnings.warn(
+                _CONNECTION_DEPRECATION_MESSAGE.format(cls=type(self).__name__),
+                DeprecationWarning,
+                # Past fsspec's metaclass, which calls __init__.
+                stacklevel=3,
+            )
+            if client is not None or retry_config is not None:
+                raise TypeError("connection cannot be combined with client or retry_config.")
+            client = connection.s3_client
+            retry_config = connection.retry_config
         self._sync_fs = S3FileSystem(
-            connection=connection,
+            client=client,
+            retry_config=retry_config,
             default_block_size=default_block_size,
             default_cache_type=default_cache_type,
             max_workers=max_workers,
@@ -159,6 +196,22 @@ class AioS3FileSystem(AsyncFileSystem):
         self._thread_pool = S3ThreadPool(self._sync_fs.max_workers)
         # Share dircache for cache coherence between async and sync instances
         self.dircache = self._sync_fs.dircache
+
+    @override
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Reduce the filesystem for pickling, as fsspec does.
+
+        Returns:
+            The reduction of ``fsspec.AbstractFileSystem``, which creates the
+            filesystem again from its arguments.
+
+        Raises:
+            TypeError: If the filesystem was built with ``client`` or
+                ``connection``, whose boto3 client cannot be pickled.
+        """
+        if self._sync_fs._client_injected:
+            raise TypeError(_UNPICKLABLE_CLIENT_MESSAGE.format(cls=type(self).__name__))
+        return cast(tuple[Any, ...], super().__reduce__())
 
     @property
     def core(self) -> S3Core:

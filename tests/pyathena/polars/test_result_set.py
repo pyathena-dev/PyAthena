@@ -102,8 +102,8 @@ def _local_result_set(
         # The HEAD request parses the output location, which is a local path here.
         patch.object(AthenaPolarsResultSet, "_get_content_length", return_value=1),
         patch(
-            "pyathena.polars.result_set.S3FileSystem",
-            file_system or (lambda **_: _LocalS3FileSystem()),
+            "pyathena.polars.result_set.s3_filesystem",
+            file_system or (lambda *_, **__: _LocalS3FileSystem()),
         ),
     ):
         return AthenaPolarsResultSet(
