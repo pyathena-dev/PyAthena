@@ -1,6 +1,6 @@
 (pandas)=
 
-# Pandas
+# pandas
 
 (as-dataframe)=
 
@@ -109,11 +109,11 @@ cursor.execute("SHOW PARTITIONS YOUR_TABLE")
 print(cursor.fetchall())
 ```
 
-`to_sql` writes the data as Parquet with pyarrow, so it requires `pip install PyAthena[Pandas,Arrow]`.
+`to_sql` writes the data as Parquet with PyArrow, so it requires `pip install PyAthena[Pandas,Arrow]`.
 With the default `flavor="spark"`, timestamps are written as INT96.
 Athena reads them correctly.
-pyarrow, of any version, reads the timestamps before 1970 in files that pyarrow 22 wrote as wrong values.
-pyarrow 23.0.0 and later write them correctly and are recommended.
+PyArrow, of any version, reads the timestamps before 1970 in files that PyArrow 22 wrote as wrong values.
+PyArrow 23.0.0 and later write them correctly and are recommended.
 The Spark flavor also replaces spaces, tabs, newlines, and the characters `,;{}()=` in column names with `_`, and the table declares the replaced names.
 The partition keys keep their names.
 Conversion to Parquet and upload to S3 use [ThreadPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#threadpoolexecutor) by default.
@@ -344,7 +344,7 @@ NOTE: PandasCursor handles the CSV file on memory. Pay attention to the memory c
 
 ### Chunksize options
 
-The Pandas cursor can read the CSV file for each specified number of rows by using the chunksize option.
+The pandas cursor can read the CSV file for each specified number of rows by using the chunksize option.
 This option should reduce memory usage.
 With the unload option, the cursor reads the Parquet files of the result in chunks of the specified number of rows,
 unless `execute()` is given `pandas.read_parquet()` options other than `columns` and `dtype_backend`, in which case the whole result is read.
@@ -566,7 +566,7 @@ cursor.execute("SELECT * FROM typed_table",
 
 Common performance options:
 
-- `engine`: CSV parsing engine ('auto', 'c', 'python', 'pyarrow'); 'auto' uses the C engine
+- `engine`: CSV parsing engine (`'auto'`, `'c'`, `'python'`, `'pyarrow'`); `'auto'` uses the C engine
 - `low_memory`: Parse the file in internal chunks to reduce memory use (C engine only)
 - `dtype`: Explicit column data types
 - `parse_dates`: Columns to parse as dates
@@ -575,11 +575,11 @@ PandasCursor reads a `json` column as text and applies the converter mapping's `
 A `json` column with NULL in the result or chunk holds objects, with `None` for NULL; otherwise it has the dtype that pandas infers from the converted values.
 Converters passed to `execute()` replace the converter mapping and are applied by pandas.
 
-With `engine="pyarrow"`, PandasCursor uses the PyArrow engine only when the result is not a tab-separated `.txt` file, pyarrow is installed, no chunksize is set (explicitly or by `auto_optimize_chunksize`), `quoting` is the default, the result has no columns that need a converter (`boolean`, `decimal`, `varbinary`, `json`, `time with time zone`, columns of a type that the converter maps to a conversion function, and `timestamp with time zone` columns that PyAthena does not convert after reading), no `converters` are given to `execute()`, and the result file is at least `AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES` bytes.
+With `engine="pyarrow"`, PandasCursor uses the PyArrow engine only when the result is not a tab-separated `.txt` file, PyArrow is installed, no chunksize is set (explicitly or by `auto_optimize_chunksize`), `quoting` is the default, the result has no columns that need a converter (`boolean`, `decimal`, `varbinary`, `json`, `time with time zone`, columns of a type that the converter maps to a conversion function, and `timestamp with time zone` columns that PyAthena does not convert after reading), no `converters` are given to `execute()`, and the result file is at least `AthenaPandasResultSet.PYARROW_MIN_FILE_SIZE_BYTES` bytes.
 Otherwise, it falls back to the C engine.
 With `engine="pyarrow"`, tab-separated `.txt` results from DDL statements such as `SHOW TABLES`, `SHOW COLUMNS`, and `DESCRIBE` use the C engine to preserve leading zeros, exponent notation, and padding in string values.
 With the PyArrow engine, when `keep_default_na` and `na_values` are the defaults and the only pandas.read_csv() options passed to `execute()` are `dtype` as a mapping and `parse_dates` as a list, PyAthena reads the file with `pyarrow.csv`, allowing newlines in quoted values, and converts it to a DataFrame as `pandas.read_csv(engine="pyarrow")` does, except that columns with a string dtype are read as text, and without `future.infer_string`, a column with dtype `str` keeps NULL as a missing value.
-Otherwise, pandas reads the file, and its PyArrow engine raises an error or returns wrong values when a quoted value containing a newline crosses one of pyarrow's read blocks.
+Otherwise, pandas reads the file, and its PyArrow engine raises an error or returns wrong values when a quoted value containing a newline crosses one of PyArrow's read blocks.
 It also changes the values of a column with a string dtype whose values all look like numbers, such as `"007"` to `"7.0"`, and without `future.infer_string`, turns NULL in a column with dtype `str` into the string `"nan"`.
 
 Apart from PandasCursor's own options such as `engine` and `chunksize`, an option passed here replaces the value PyAthena sets for the same pandas.read_csv() argument.
@@ -607,13 +607,13 @@ df = cursor.execute("SELECT * FROM many_rows").as_pandas()
 
 Without `block_size` or `cache_type`, a CSV result file is read in 32 MiB blocks with the `"background"` cache, which reads the next block while pandas parses the current one and keeps two blocks.
 With either option, the file is read with the given values and the filesystem's defaults for the other, `"bytes"` and 5 MiB blocks.
-When an UNLOAD result is read in chunks of `chunksize` rows, a Parquet file of up to 32 MiB is read at once, and a larger one is read with the given `cache_type`, or without it with the `"none"` cache, which requests only the ranges that pyarrow reads.
+When an UNLOAD result is read in chunks of `chunksize` rows, a Parquet file of up to 32 MiB is read at once, and a larger one is read with the given `cache_type`, or without it with the `"none"` cache, which requests only the ranges that PyArrow reads.
 With `storage_options` given to `execute()`, or `filesystem` for an UNLOAD result, pandas reads the result files with those options instead of these.
 
 ### Unload options
 
 PandasCursor also supports the unload option, as does {ref}`arrow-cursor`.
-Reading the unloaded Parquet files requires pyarrow (`pip install PyAthena[Pandas,Arrow]`), and `engine` must be `auto` or `pyarrow`.
+Reading the unloaded Parquet files requires PyArrow (`pip install PyAthena[Pandas,Arrow]`), and `engine` must be `auto` or `pyarrow`.
 Timestamps are read at microseconds, as `datetime64[us]`, and dates as `datetime64[us]`, as from CSV results.
 With `coerce_int96_timestamp_unit` or `dtype_backend` given to `execute()`, the columns have the dtypes that these options give, and the fetch methods return their values as pandas holds them.
 `coerce_int96_timestamp_unit=None` is the same as no `coerce_int96_timestamp_unit`.

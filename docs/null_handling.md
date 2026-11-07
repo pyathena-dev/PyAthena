@@ -38,7 +38,7 @@ id,name,description
 
 Most CSV parsers handle these differently:
 
-- **Pandas** (used by `PandasCursor`): By default, treats both unquoted empty and quoted empty as missing values
+- **pandas** (used by `PandasCursor`): By default, treats both unquoted empty and quoted empty as missing values
 - **PyArrow** (used by `ArrowCursor`): With `quoted_strings_can_be_null=False`, treats both as empty strings
 - **Polars** (used by `PolarsCursor`): Correctly distinguishes quoted empty strings from unquoted NULL values
 - **AthenaCSVReader** (used by `S3FSCursor`): Correctly distinguishes NULL (returns `None`) from empty strings
@@ -76,7 +76,7 @@ With the default CSV settings and converters, pandas and Arrow cursors distingui
 values when reading CSV results: `fetchone()`, `fetchmany()`, and `fetchall()` return `None`
 for NULL and `b''` for an empty binary value.
 This also applies to their asynchronous variants and pandas chunked reads.
-Pandas DataFrames preserve the same values.
+pandas DataFrames preserve the same values.
 Arrow Tables retain the CSV hexadecimal strings, with NULL represented as an Arrow null;
 fetch methods convert the hexadecimal strings to Python bytes.
 

@@ -239,7 +239,7 @@ You can find more information about the [considerations and limitations of param
 ## Execution options
 
 The `execute()` method of every SQL cursor (`Cursor`, `AsyncCursor`, the aio cursors, and their
-pandas/arrow/polars/s3fs variants) accepts the same set of shared keyword arguments, such as
+pandas, Arrow, Polars, and S3FS variants) accepts the same set of shared keyword arguments, such as
 `work_group`, `s3_staging_dir`, `cache_size`, `cache_expiration_time`, `result_reuse_enable`,
 `result_reuse_minutes`, `paramstyle`, and `result_set_type_hints`.
 The synchronous and aio cursors also accept `on_start_query_execution`.
@@ -717,7 +717,7 @@ column. You can mix both styles in the same dictionary.
   does not clearly delimit nested arrays. If your query returns nested arrays
   (e.g. `array(array(integer))`), use `CAST(... AS JSON)` in your query to get
   JSON-formatted output, which is parsed reliably.
-- **Arrow, Pandas, and Polars cursors** — These cursors accept `result_set_type_hints`
+- **Arrow, pandas, and Polars cursors** — These cursors accept `result_set_type_hints`
   but their converters do not currently use the hints because they rely on their own
   type systems. The parameter is passed through for forward compatibility.
 

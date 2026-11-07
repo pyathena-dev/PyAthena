@@ -102,7 +102,7 @@ uv run --env-file .env pytest -n 1 tests/pyathena/test_cursor.py -v
 
 ### Markdown Lint
 
-`docs/**/*.md`, `benchmarks/*.md`, `scripts/**/*.md`, `cloudformation/**/*.md`, and project-root `*.md` files are linted with [rumdl](https://github.com/rvben/rumdl). The config lives at `.rumdl.toml`. CI runs lint + Sphinx build on PRs that touch docs (`.github/workflows/docs-lint.yaml`).
+`docs/**/*.md`, `benchmarks/*.md`, `scripts/**/*.md`, `cloudformation/**/*.md`, `.agents/skills/**/*.md`, and project-root `*.md` files are linted with [rumdl](https://github.com/rvben/rumdl). The config lives at `.rumdl.toml`. CI runs lint + Sphinx build on PRs that touch docs (`.github/workflows/docs-lint.yaml`).
 
 `rumdl` is pinned in `.mise.toml`, so [`mise`](https://mise.jdx.dev/) installs the exact version used in CI. Run locally:
 

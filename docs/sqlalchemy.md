@@ -1,3 +1,4 @@
+<!-- rumdl-disable-next-line MD044 -->
 (sqlalchemy)=
 
 # SQLAlchemy
@@ -160,7 +161,7 @@ awsathena+aiorest://:@athena.{region_name}.amazonaws.com:443/{schema_name}?s3_st
 
 `Date` and `DateTime` values render as `DATE` and `TIMESTAMP` literals, both as bound parameters and as inline literals, and `TIMESTAMP` literals keep microseconds as described in {ref}`usage-query-with-parameters`.
 A `cast()` to `DateTime`, and the casts that ARRAY, MAP and ROW values use, render `TIMESTAMP(6)`, because a bare `TIMESTAMP` is `timestamp(3)` in Athena.
-Their results are `timestamp(6)` whatever the value, so `CREATE TABLE AS SELECT` into a Hive table and `UNLOAD`, including the `unload=True` option of the arrow, pandas and polars drivers, reject them as output columns.
+Their results are `timestamp(6)` whatever the value, so `CREATE TABLE AS SELECT` into a Hive table and `UNLOAD`, including the `unload=True` option of the `arrow`, `pandas` and `polars` drivers, reject them as output columns.
 `AthenaTimestamp(precision=p)`, with `p` from 0 to 6, casts to `TIMESTAMP(p)` and truncates its bound values and literals, including values compared with a column of that type, to `p` fractional digits:
 
 ```python
@@ -178,26 +179,26 @@ Column definitions in `CREATE TABLE` render `TIMESTAMP` for `DateTime` and for `
 
 ### Sync
 
-| Dialect   | Driver | Schema           | Cursor                 |
-|-----------|--------|------------------|------------------------|
-| awsathena | rest   | awsathena        | DefaultCursor          |
-| awsathena | rest   | awsathena+rest   | DefaultCursor          |
-| awsathena | pandas | awsathena+pandas | {ref}`pandas-cursor`   |
-| awsathena | arrow  | awsathena+arrow  | {ref}`arrow-cursor`    |
-| awsathena | polars | awsathena+polars | {ref}`polars-cursor`   |
-| awsathena | s3fs   | awsathena+s3fs   | {ref}`s3fs-cursor`     |
+| Dialect     | Driver   | Schema             | Cursor               |
+|-------------|----------|--------------------|----------------------|
+| `awsathena` | `rest`   | `awsathena`        | DefaultCursor        |
+| `awsathena` | `rest`   | `awsathena+rest`   | DefaultCursor        |
+| `awsathena` | `pandas` | `awsathena+pandas` | {ref}`pandas-cursor` |
+| `awsathena` | `arrow`  | `awsathena+arrow`  | {ref}`arrow-cursor`  |
+| `awsathena` | `polars` | `awsathena+polars` | {ref}`polars-cursor` |
+| `awsathena` | `s3fs`   | `awsathena+s3fs`   | {ref}`s3fs-cursor`   |
 
 ### Async
 
 Requires `pip install PyAthena[aiosqlalchemy]`.
 
-| Dialect   | Driver    | Schema              | Cursor                       |
-|-----------|-----------|---------------------|------------------------------|
-| awsathena | aiorest   | awsathena+aiorest   | DefaultCursor (async)        |
-| awsathena | aiopandas | awsathena+aiopandas | {ref}`pandas-cursor` (async) |
-| awsathena | aioarrow  | awsathena+aioarrow  | {ref}`arrow-cursor` (async)  |
-| awsathena | aiopolars | awsathena+aiopolars | {ref}`polars-cursor` (async) |
-| awsathena | aios3fs   | awsathena+aios3fs   | {ref}`s3fs-cursor` (async)   |
+| Dialect     | Driver      | Schema                | Cursor                       |
+|-------------|-------------|-----------------------|------------------------------|
+| `awsathena` | `aiorest`   | `awsathena+aiorest`   | DefaultCursor (async)        |
+| `awsathena` | `aiopandas` | `awsathena+aiopandas` | {ref}`pandas-cursor` (async) |
+| `awsathena` | `aioarrow`  | `awsathena+aioarrow`  | {ref}`arrow-cursor` (async)  |
+| `awsathena` | `aiopolars` | `awsathena+aiopolars` | {ref}`polars-cursor` (async) |
+| `awsathena` | `aios3fs`   | `awsathena+aios3fs`   | {ref}`s3fs-cursor` (async)   |
 
 ## Dialect options
 
@@ -716,8 +717,8 @@ The `on_start_query_execution` callback is supported by all PyAthena SQLAlchemy 
 
 - `awsathena` and `awsathena+rest` (default cursor)
 - `awsathena+pandas` (pandas cursor)
-- `awsathena+arrow` (arrow cursor)
-- `awsathena+polars` (polars cursor)
+- `awsathena+arrow` (Arrow cursor)
+- `awsathena+polars` (Polars cursor)
 - `awsathena+s3fs` (S3FS cursor)
 - `awsathena+aiorest`, `awsathena+aiopandas`, `awsathena+aioarrow`, `awsathena+aiopolars`, and `awsathena+aios3fs` (aio cursors)
 

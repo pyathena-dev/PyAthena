@@ -7,7 +7,7 @@
 ## ArrowCursor
 
 ArrowCursor directly handles the CSV file of the query execution result output to S3.
-This cursor is to download the CSV file after executing the query, and then loaded into [pyarrow.Table object](https://arrow.apache.org/docs/python/generated/pyarrow.Table.html).
+This cursor is to download the CSV file after executing the query, and then loaded into [`pyarrow.Table` object](https://arrow.apache.org/docs/python/generated/pyarrow.Table.html).
 Performance is better than fetching data with Cursor.
 
 You can use the ArrowCursor by specifying the `cursor_class`
@@ -49,7 +49,7 @@ cursor = Connection(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                     region_name="us-west-2").cursor(ArrowCursor)
 ```
 
-The as_arrow method returns a [pyarrow.Table object](https://arrow.apache.org/docs/python/generated/pyarrow.Table.html).
+The as_arrow method returns a [`pyarrow.Table` object](https://arrow.apache.org/docs/python/generated/pyarrow.Table.html).
 
 ```python
 from pyathena import connect
@@ -123,7 +123,7 @@ print(cursor.service_processing_time_in_millis)
 print(cursor.output_location)
 ```
 
-If you want to customize the [pyarrow.Table object](https://arrow.apache.org/docs/python/generated/pyarrow.Table.html) types, create a converter class like this:
+If you want to customize the [`pyarrow.Table` object](https://arrow.apache.org/docs/python/generated/pyarrow.Table.html) types, create a converter class like this:
 
 ```python
 import pyarrow as pa
@@ -290,8 +290,8 @@ cursor = connect(
 ).cursor(ArrowCursor, connect_timeout=10.0, request_timeout=30.0)
 ```
 
-The timeout parameters accept float values in seconds and apply to the pyarrow S3 filesystem that reads the result CSV and Parquet files.
-The pyarrow S3 filesystem uses the credentials of the connection's boto3 session, including the credentials of an assumed role.
+The timeout parameters accept float values in seconds and apply to the PyArrow S3 filesystem that reads the result CSV and Parquet files.
+The PyArrow S3 filesystem uses the credentials of the connection's boto3 session, including the credentials of an assumed role.
 The other S3 requests, the HeadObject request for the result file size and the GetObject request for the UNLOAD data manifest,
 use the connection's boto3 client and its botocore configuration.
 
@@ -299,7 +299,7 @@ use the connection's boto3 client and its botocore configuration.
 
 ## AsyncArrowCursor
 
-AsyncArrowCursor is an AsyncCursor that can handle [pyarrow.Table object](https://arrow.apache.org/docs/python/generated/pyarrow.Table.html).
+AsyncArrowCursor is an AsyncCursor that can handle [`pyarrow.Table` object](https://arrow.apache.org/docs/python/generated/pyarrow.Table.html).
 This cursor directly handles the CSV of query results output to S3 in the same way as ArrowCursor.
 
 You can use the AsyncArrowCursor by specifying the `cursor_class`
@@ -408,7 +408,7 @@ result_set = future.result()
 print(result_set.fetchall())
 ```
 
-This object also has an as_arrow method that returns a [pyarrow.Table object](https://arrow.apache.org/docs/python/generated/pyarrow.Table.html) similar to the ArrowCursor.
+This object also has an as_arrow method that returns a [`pyarrow.Table` object](https://arrow.apache.org/docs/python/generated/pyarrow.Table.html) similar to the ArrowCursor.
 
 ```python
 from pyathena import connect

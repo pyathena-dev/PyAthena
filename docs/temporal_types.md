@@ -42,7 +42,7 @@ Their fetch methods convert these values to `datetime` and `time` objects.
 
 Typed values cover years 1 to 9999.
 PyAthena does not check for other years.
-For them, the result is whatever Python, pandas, pyarrow, or Polars returns or raises.
+For them, the result is whatever Python, pandas, PyArrow, or Polars returns or raises.
 
 `PandasCursor` holds `timestamp with time zone` values in UTC, so for them the range applies to the year in UTC.
 For example, the fetch methods raise an error for `0001-01-01 00:00:00.000 Asia/Tokyo`, which is in year 0 in UTC.

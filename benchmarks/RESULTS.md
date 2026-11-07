@@ -28,7 +28,7 @@ These recommendations come from the runs of `9e99caa8` on `r7g.2xlarge` and `c8g
 
 | Need | Use | Measured |
 | --- | --- | --- |
-| A DataFrame or Table of a large result | `unload=True` with ArrowCursor, PolarsCursor, or PandasCursor | 10 million flat rows in 18.2 to 19.8 seconds through UNLOAD, against 55.2 to 84.2 seconds through CSV; nested rows in 33.8 to 36.4 seconds with ArrowCursor, PolarsCursor, or PandasCursor with pyarrow dtypes, against 211.3 to 280.3 seconds through CSV |
+| A DataFrame or Table of a large result | `unload=True` with ArrowCursor, PolarsCursor, or PandasCursor | 10 million flat rows in 18.2 to 19.8 seconds through UNLOAD, against 55.2 to 84.2 seconds through CSV; nested rows in 33.8 to 36.4 seconds with ArrowCursor, PolarsCursor, or PandasCursor with PyArrow dtypes, against 211.3 to 280.3 seconds through CSV |
 | A pandas DataFrame with nested columns | PandasCursor with `unload=True` and `dtype_backend="pyarrow"` | 10 million nested rows in 34.2 seconds and 5,820 MiB, against 88.0 seconds and 19,498 MiB with the default dtypes |
 | Bounded memory, including results larger than memory | `chunksize` with PandasCursor or PolarsCursor, with CSV or UNLOAD results | 100 million flat rows, about 29 GB of CSV, at 462 to 1,051 MiB with 100,000-row chunks; 10 million rows at 362 to 917 MiB with 10,000-row chunks, against 3,765 to 19,498 MiB without chunks; larger chunks use more memory |
 | A whole CSV result in PolarsCursor | Polars 2.0, or `chunksize`; with Polars 1.x, the read holds a copy of the result file (#1307) | 10 million flat rows peaked at 7,547 MiB with Polars 2.0.0 and 9,641 MiB with Polars 1.44.2 |
