@@ -7179,9 +7179,11 @@ class TestS3FileSystem:
         fs = self._stubbed_fs()
         with Stubber(fs._client) as stubber:
             stub_move_with_source_params(stubber)
+            # One copy at a time, in the order of the stubbed responses.
             fs.mv(
                 ["s3://bucket/a", "s3://bucket/a/x"],
                 ["s3://bucket/c", "s3://bucket/c"],
+                batch_size=1,
                 **MOVE_SOURCE_PARAMS,
             )
             stubber.assert_no_pending_responses()
