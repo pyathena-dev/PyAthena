@@ -2322,9 +2322,10 @@ class S3FileSystem(AbstractFileSystem):
             path: S3 path (s3://bucket or s3://bucket/key) to set the ACL on.
             acl: The value of the canned ACL to apply.
             recursive: Whether to apply the ACL to all keys below the given
-                path too. The keys are updated in parallel; once one fails, the
-                updates that have not started are cancelled, and the running
-                ones make no further attempt.
+                path too, and to the object at the key, if any. The keys are
+                updated in parallel; once one fails, the updates that have not
+                started are cancelled, and the running ones make no further
+                attempt. A path with a version ID updates that version only.
             **kwargs: Additional parameters passed to the PutObjectAcl or
                 PutBucketAcl API.
         """
@@ -2335,17 +2336,40 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError(f"ACL not in {self.core.BUCKET_ACLS}.")
         if s3_path.key and acl not in self.core.OBJECT_ACLS:
             raise ValueError(f"ACL not in {self.core.OBJECT_ACLS}.")
-        if recursive:
-            paths = self.find(path, withdirs=False)
-            self._map(lambda p: self.chmod(p, acl, recursive=False, **kwargs), paths)
+        if recursive and not (s3_path.key and s3_path.version_id):
+            found = self.find(path, withdirs=False)
+            items = [(p, False) for p in found]
+            name = self._strip_protocol(path)
+            if s3_path.key and found and name not in found:
+                # Objects lie below the key, so find() has not looked the key
+                # itself up; it may be an object too, which is skipped if missing.
+                items.append((name, True))
+            self._map(lambda item: self._chmod_object(*item, acl, **kwargs), items)
             if s3_path.key:
-                # A key prefix is not an object itself; only the objects
-                # below it have ACLs.
                 return
         if s3_path.key:
             self.core.put_object_acl(s3_path, acl, **kwargs)
         else:
             self.core.put_bucket_acl(s3_path.bucket, acl, **kwargs)
+
+    def _chmod_object(self, path: str, missing_ok: bool, acl: str, **kwargs) -> None:
+        """Apply a canned ACL to an object in a recursive ``chmod``.
+
+        Args:
+            path: S3 path of the object.
+            missing_ok: Whether to skip the object if it does not exist.
+            acl: The canned ACL, one of ``OBJECT_ACLS``.
+            **kwargs: Additional parameters passed to the PutObjectAcl API.
+
+        Raises:
+            FileNotFoundError: If the object does not exist and ``missing_ok``
+                is False.
+        """
+        try:
+            self.core.put_object_acl(S3Path.parse(path), acl, **kwargs)
+        except FileNotFoundError:
+            if not missing_ok:
+                raise
 
     def list_multipart_uploads(self, path: str) -> list[S3MultipartUpload]:
         """List in-progress (incomplete) multipart uploads in a bucket.

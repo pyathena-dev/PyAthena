@@ -932,8 +932,9 @@ class TestS3FileSystem:
 
     @staticmethod
     def _serve_keys(fs, keys, versioning=None):
-        # Answer the ListObjectsV2, HeadObject, CopyObject, DeleteObject, and DeleteObjects
-        # requests of "bucket" from a set of the given keys, which is returned.
+        # Answer the ListObjectsV2, HeadObject, CopyObject, DeleteObject, DeleteObjects,
+        # PutObjectAcl, and PutBucketAcl requests of "bucket" from a set of the given keys,
+        # which is returned.
         # GetBucketVersioning answers the status of each bucket in the
         # versioning dict, none by default, or raises versioning if it is an
         # exception.
@@ -956,6 +957,12 @@ class TestS3FileSystem:
                 return {}
             if method is fs._client.delete_object:
                 keys.discard(kwargs["Key"])
+                return {}
+            if method is fs._client.put_object_acl:
+                if kwargs["Key"] not in keys:
+                    raise FileNotFoundError(kwargs["Key"])
+                return {}
+            if method is fs._client.put_bucket_acl:
                 return {}
             if method is fs._client.delete_objects:
                 keys.difference_update(o["Key"] for o in kwargs["Delete"]["Objects"])
@@ -4734,17 +4741,40 @@ class TestS3FileSystem:
         fs.chmod("s3://bucket", "private")
         fs._call.assert_called_once_with(fs._client.put_bucket_acl, Bucket="bucket", ACL="private")
 
-    def test_chmod_recursive(self):
+    @pytest.mark.parametrize(
+        ("keys", "path", "expected"),
+        [
+            # GH-1335: the key is an object and the prefix of other objects.
+            (
+                {"a", "a/x", "a/y/z", "ab"},
+                "s3://bucket/a",
+                [("a", None), ("a/x", None), ("a/y/z", None)],
+            ),
+            ({"a/x", "ab"}, "s3://bucket/a", [("a/x", None)]),
+            ({"a", "ab"}, "s3://bucket/a", [("a", None)]),
+            ({"ab"}, "s3://bucket/a", []),
+            ({"a", "a/x", "ab"}, "s3://bucket", [("a", None), ("a/x", None), ("ab", None)]),
+            # A version path names one version, also the null version.
+            ({"a", "a/x"}, "s3://bucket/a?versionId=v1", [("a", "v1")]),
+            ({"a", "a/x"}, "s3://bucket/a?versionId=null", [("a", "null")]),
+        ],
+    )
+    def test_chmod_recursive(self, keys, path, expected):
         fs = self._make_fs()
-        fs.find = mock.MagicMock(return_value=["bucket/key1", "bucket/key2"])
+        self._serve_keys(fs, keys)
 
-        fs.chmod("s3://bucket/path", "private", recursive=True)
-        assert fs._call.call_count == 2
-        fs._call.assert_any_call(
-            fs._client.put_object_acl, Bucket="bucket", Key="key1", ACL="private"
-        )
-        fs._call.assert_any_call(
-            fs._client.put_object_acl, Bucket="bucket", Key="key2", ACL="private"
+        fs.chmod(path, "private", recursive=True)
+        # The (key, version ID) of the objects updated.
+        updated = [
+            (c.kwargs["Key"], c.kwargs.get("VersionId"))
+            for c in fs._call.call_args_list
+            if c.args[0] is fs._client.put_object_acl and c.kwargs["Key"] in keys
+        ]
+        assert sorted(updated) == expected
+        assert all(
+            c.kwargs["ACL"] == "private"
+            for c in fs._call.call_args_list
+            if c.args[0] is fs._client.put_object_acl
         )
 
     def test_chmod_recursive_failure_stops_running_requests(self):
@@ -4764,7 +4794,7 @@ class TestS3FileSystem:
         fs.core.put_object_acl = put_object_acl
         started = time.monotonic()
         with pytest.raises(PermissionError, match="Access Denied"):
-            fs.chmod("s3://bucket/path", "private", recursive=True)
+            fs.chmod("s3://bucket", "private", recursive=True)
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1
 
@@ -4804,7 +4834,7 @@ class TestS3FileSystem:
         fs._create_executor = mock.MagicMock(return_value=executor)
         started = time.monotonic()
         with pytest.raises(KeyboardInterrupt):
-            fs.chmod("s3://bucket/path", "private", recursive=True)
+            fs.chmod("s3://bucket", "private", recursive=True)
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert updated == ["key1"]
         assert operation.calls == 1
