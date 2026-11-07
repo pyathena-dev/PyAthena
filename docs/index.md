@@ -7,6 +7,7 @@ See LICENSE or https://opensource.org/licenses/MIT.
 SPDX-License-Identifier: MIT
 -->
 
+<!-- rumdl-disable-next-line MD044 -->
 (pyathena)=
 
 ![PyAthena](_static/header.png)

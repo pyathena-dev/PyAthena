@@ -7,12 +7,12 @@
 ## S3FSCursor
 
 S3FSCursor is a lightweight cursor that directly handles the CSV file of the query execution result output to S3.
-Unlike ArrowCursor or PandasCursor, this cursor does not require pandas or pyarrow dependencies,
+Unlike ArrowCursor or PandasCursor, this cursor does not require pandas or PyArrow dependencies,
 making it ideal for environments where installing these libraries is not desirable.
 
 **Key features:**
 
-- No pandas or pyarrow dependencies required
+- No pandas or PyArrow dependencies required
 - Lightweight CSV parsing (custom parser or Python's built-in `csv` module)
 - Lower memory footprint for simple query results
 - Full DB API 2.0 compatibility
@@ -271,7 +271,7 @@ S3FSCursor has some limitations compared to ArrowCursor or PandasCursor:
 
 S3FSCursor is recommended when:
 
-- You want to minimize dependencies (no pandas/pyarrow required)
+- You want to minimize dependencies (no pandas/PyArrow required)
 - You're working in a constrained environment (e.g., AWS Lambda with size limits)
 - You only need simple row-by-row result processing
 - Memory efficiency is important and results don't need columnar operations
@@ -283,7 +283,7 @@ For large-scale data processing or analytical workloads, consider using ArrowCur
 ## AsyncS3FSCursor
 
 AsyncS3FSCursor is an AsyncCursor that uses the same lightweight CSV parsing as S3FSCursor.
-This cursor is useful when you need to execute queries asynchronously without pandas or pyarrow dependencies.
+This cursor is useful when you need to execute queries asynchronously without pandas or PyArrow dependencies.
 
 You can use the AsyncS3FSCursor by specifying the `cursor_class`
 with the connect method or connection object.

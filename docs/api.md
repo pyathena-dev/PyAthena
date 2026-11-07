@@ -51,7 +51,7 @@ api/aio
 - {ref}`api_sqlalchemy` - SQLAlchemy dialect implementations
 - {ref}`api_pandas` - pandas DataFrame integration
 - {ref}`api_arrow` - Apache Arrow columnar data integration
-- {ref}`api_polars` - Polars DataFrame integration (no pyarrow required)
-- {ref}`api_s3fs` - Lightweight S3FS-based cursor (no pandas/pyarrow required)
+- {ref}`api_polars` - Polars DataFrame integration (no PyArrow required)
+- {ref}`api_s3fs` - Lightweight S3FS-based cursor (no pandas/PyArrow required)
 - {ref}`api_spark` - Apache Spark integration for big data processing
 - {ref}`api_aio` - Native asyncio cursor implementations

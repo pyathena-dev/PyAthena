@@ -352,8 +352,8 @@ When the temporary directory is a tmpfs, as `/tmp` is on Amazon Linux 2023, file
 | Capability | Treatment |
 | --- | --- |
 | Cursor, DictCursor, S3FS | Row batches with arraysize 100 and 1000 |
-| Pandas CSV | Full DataFrame or streamed chunks |
-| Pandas UNLOAD | Full DataFrame or chunks, each also with `dtype_backend="pyarrow"` |
+| pandas CSV | Full DataFrame or streamed chunks |
+| pandas UNLOAD | Full DataFrame or chunks, each also with `dtype_backend="pyarrow"` |
 | Arrow CSV and UNLOAD | Eager table loading; arraysize changes row extraction, not S3 streaming |
 | Polars CSV and UNLOAD | Full result or chunk iterator |
 | SQLAlchemy (`sqla_*`) | `pandas.read_sql_query()` through an engine of each PyAthena driver, whole or with `chunksize` |
