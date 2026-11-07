@@ -3651,7 +3651,7 @@ class TestS3FileSystem:
                 stubber.add_client_error(
                     "head_object", service_error_code="SlowDown", http_status_code=503
                 )
-            with pytest.raises(OSError):
+            with pytest.raises(OSError, match="Errno 16"):
                 fs.info("bucket/key")
             stubber.assert_no_pending_responses()
         with mock.patch.object(client, "close") as close:
