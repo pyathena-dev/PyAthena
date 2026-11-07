@@ -510,12 +510,19 @@ class S3FileSystem(AbstractFileSystem):
         """List the objects and common prefixes under a path.
 
         A complete, non-empty listing of the path is cached under
-        ``(path, delimiter)``, and an empty one evicts it.
+        ``(path, delimiter)``, and an empty one, or a listing that raises
+        FileNotFoundError because the bucket does not exist, evicts it.
         ``invalidate_cache`` drops it when the path or a path under it is
         invalidated.
 
+        A common prefix is named after its prefix without the final
+        delimiter, so the common prefix ``dir//`` of a key with an empty
+        segment, such as ``dir//x``, is the directory ``bucket/dir/``, and
+        ``/`` at the top of the bucket is ``bucket/``. Listing such a name
+        lists the keys under that prefix.
+
         Args:
-            path: The bucket or directory path to list.
+            path: The bucket or directory path to list, without the protocol.
             prefix: Key prefix to filter by, relative to the path. A prefixed
                 listing is neither read from nor written to the cache.
             delimiter: Delimiter to group keys by; ``""`` lists recursively.
@@ -530,8 +537,11 @@ class S3FileSystem(AbstractFileSystem):
         """
         s3_path = S3Path.parse(path)
         use_cache = not prefix and not next_token
-        if s3_path.key:
-            prefix = f"{s3_path.key}/{prefix if prefix else ''}"
+        # S3Path.parse() names the bucket by "bucket/" too, but here it is the
+        # directory of the common prefix "/".
+        key = "" if s3_path.key is None and path.endswith("/") else s3_path.key
+        if key is not None:
+            prefix = f"{key}/{prefix}"
 
         cache_key = (path, delimiter)
         cached = self.dircache.get(cache_key) if use_cache and not refresh else None
@@ -539,20 +549,23 @@ class S3FileSystem(AbstractFileSystem):
             return cast(list[S3Object], cached)
 
         files: list[S3Object] = []
-        for page in self.core.list_objects(
-            s3_path.bucket,
-            prefix=prefix,
-            delimiter=delimiter,
-            max_keys=max_keys,
-            continuation_token=next_token,
-        ):
-            files.extend(
-                self._directory_object(
-                    s3_path.bucket, c.prefix[:-1].rstrip("/"), s3_path.version_id
+        try:
+            for page in self.core.list_objects(
+                s3_path.bucket,
+                prefix=prefix,
+                delimiter=delimiter,
+                max_keys=max_keys,
+                continuation_token=next_token,
+            ):
+                files.extend(
+                    self._directory_object(s3_path.bucket, c.prefix[:-1])
+                    for c in page.common_prefixes
                 )
-                for c in page.common_prefixes
-            )
-            files.extend(S3Object.from_summary(o) for o in page.objects)
+                files.extend(S3Object.from_summary(o) for o in page.objects)
+        except FileNotFoundError:
+            # The bucket does not exist, so the cached listing is stale.
+            self._evict_cache(cache_key)
+            raise
         if use_cache:
             if files:
                 self.dircache[cache_key] = files
@@ -584,7 +597,8 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             FileNotFoundError: If the bucket does not exist, or if a key path
                 is neither an object nor a directory, a path that some key
-                starts with followed by ``/``.
+                starts with followed by ``/``, or if HeadObject reports the
+                version that a key path with a version ID names missing.
 
         Example:
             >>> fs = S3FileSystem()
@@ -600,8 +614,11 @@ class S3FileSystem(AbstractFileSystem):
         if path in ["", "/"]:
             files = self._ls_buckets(refresh)
         else:
-            key = S3Path.parse(path).key
-            if versions:
+            s3_path = S3Path.parse(path)
+            key = s3_path.key
+            if key and s3_path.version_id:
+                files = self._ls_version(s3_path, refresh=refresh)
+            elif versions:
                 files = self._ls_object_versions(path)
             else:
                 files = self._ls_dirs(path, refresh=refresh)
@@ -615,6 +632,29 @@ class S3FileSystem(AbstractFileSystem):
                 raise FileNotFoundError(path)
         return list(files) if detail else [f.name for f in files]
 
+    def _ls_version(self, s3_path: S3Path, refresh: bool = False) -> list[S3Object]:
+        """List the object version that a key path with a version ID names.
+
+        A version names one object, which has nothing below it, so no
+        directory is listed. The entry is named as ``ls(versions=True)``
+        names a version.
+
+        Args:
+            s3_path: The key path with a version ID.
+            refresh: If True, bypass the cache and call HeadObject.
+
+        Returns:
+            The entry of the version, or an empty list if it does not exist.
+        """
+        file = self._head_object(str(s3_path), refresh=refresh)
+        if not file:
+            return []
+        if s3_path.version_id != "null":
+            # The cached entry of the lookup is named without the version.
+            file = file.copy()
+            file.name = str(s3_path)
+        return [file]
+
     def _ls_object_versions(self, path: str) -> list[S3Object]:
         """List a prefix including all versions of the objects.
 
@@ -627,8 +667,7 @@ class S3FileSystem(AbstractFileSystem):
         files: list[S3Object] = []
         for page in self.core.list_object_versions(s3_path.bucket, prefix=prefix, delimiter="/"):
             files.extend(
-                self._directory_object(s3_path.bucket, c.prefix[:-1].rstrip("/"))
-                for c in page.common_prefixes
+                self._directory_object(s3_path.bucket, c.prefix[:-1]) for c in page.common_prefixes
             )
             files.extend(S3Object.from_version(v) for v in page.versions)
 
@@ -847,6 +886,8 @@ class S3FileSystem(AbstractFileSystem):
         prefix = kwargs.pop("prefix", "")
         refresh = kwargs.pop("refresh", False)
 
+        if s3_path.key and s3_path.version_id:
+            return self._ls_version(s3_path, refresh=refresh)
         if maxdepth is not None:
             # The entries listed with the prefix lie as many levels further
             # below the path as the prefix has slashes.
@@ -920,7 +961,9 @@ class S3FileSystem(AbstractFileSystem):
         with delimiter handling for performance. As in fsspec, the result
         includes the path itself if withdirs is True and objects exist below
         it, unless it is a bucket, or if it is an object and nothing is listed
-        below it.
+        below it. A key path with a version ID names that version of the
+        object: the result is the version, named as ``ls(versions=True)``
+        names it, or empty if HeadObject reports it missing.
 
         Args:
             path: S3 path to search under (e.g., "s3://bucket/prefix").
@@ -1005,8 +1048,11 @@ class S3FileSystem(AbstractFileSystem):
             self._strip_protocol(p)
             for p in ([path] if isinstance(path, (str, os.PathLike)) else path)
         ]
-        versions = [p for p in paths if S3Path.split_version_id(p)[1]]
-        return versions, [p for p in paths if p not in versions]
+        versions: list[str] = []
+        others: list[str] = []
+        for p in paths:
+            (versions if S3Path.has_version_id(p) else others).append(p)
+        return versions, others
 
     def exists(self, path: str, **kwargs) -> bool:
         """Check if an S3 path exists.
@@ -2453,38 +2499,57 @@ class S3FileSystem(AbstractFileSystem):
         accepts, and also the object path without the version, because deleting
         or copying a version can change the
         current version of the object.
+        A path that ends in slashes is invalidated both with and without
+        them, since lookups strip them while a key such as ``dir//`` is
+        listed in the directory ``bucket/dir/``.
 
         Args:
             path: The path to invalidate. If None, clear the whole cache.
         """
         if path is None:
             self.dircache.clear()
-        else:
-            path = self._strip_protocol(path)
-            if not path:
-                self._evict_cache("")
-            while path:
-                base, version_id = S3Path.split_version_id(path)
-                cache_paths = [path]
-                if version_id:
-                    cache_paths.extend(
-                        f"{base}?{name}={version_id}"
-                        for name in ("versionId", "versionID", "versionid", "version_id")
-                    )
-                for cache_path in cache_paths:
-                    # _ls_dirs caches listings under (path, delimiter), and
-                    # lookups with parameters are cached under
-                    # (path, _LOOKUPS_CACHE_KEY).
-                    for cache_key in (
-                        cache_path,
-                        (cache_path, "/"),
-                        (cache_path, ""),
-                        (cache_path, _LOOKUPS_CACHE_KEY),
-                    ):
-                        self._evict_cache(cache_key)
-                # A version-qualified path continues with the path without
-                # the version.
-                path = self._strip_protocol(base) if version_id else self._parent(path)
+            return
+        raw = os.fspath(path)
+        stripped = self._strip_protocol(raw)
+        if not stripped:
+            self._evict_cache("")
+            return
+        self._invalidate_path(stripped)
+        trailing = len(raw) - len(raw.rstrip("/"))
+        if trailing:
+            self._invalidate_path(stripped + "/" * trailing)
+
+    def _invalidate_path(self, path: str) -> None:
+        """Remove the cached entries of a path and its parent paths.
+
+        Args:
+            path: The path without the protocol, as described in
+                :meth:`invalidate_cache`.
+        """
+        while path:
+            base, version_id = S3Path.split_version_id(path)
+            cache_paths = [path]
+            if version_id:
+                cache_paths.extend(
+                    f"{base}?{name}={version_id}"
+                    for name in ("versionId", "versionID", "versionid", "version_id")
+                )
+            for cache_path in cache_paths:
+                # _ls_dirs caches listings under (path, delimiter), and
+                # lookups with parameters are cached under
+                # (path, _LOOKUPS_CACHE_KEY).
+                for cache_key in (
+                    cache_path,
+                    (cache_path, "/"),
+                    (cache_path, ""),
+                    (cache_path, _LOOKUPS_CACHE_KEY),
+                ):
+                    self._evict_cache(cache_key)
+            # A version-qualified path continues with the path without the
+            # version, keeping a trailing slash of its key. Otherwise, one
+            # segment is removed; _parent() would also strip the slash of
+            # "bucket/dir/" (from "dir//x").
+            path = base if version_id else path.rpartition("/")[0]
 
     def _evict_cache(self, key: str | tuple[str, str]) -> None:
         """Remove a dircache entry if it exists.
