@@ -1472,6 +1472,80 @@ MULTIPART_COPY_KWARGS = {
 }
 
 
+# The CopyObject parameters of a move from an SSE-C, requester-pays source
+# with an expected owner (GH-1333).
+MOVE_SOURCE_PARAMS = {
+    "CopySourceSSECustomerAlgorithm": "AES256",
+    "CopySourceSSECustomerKey": "k" * 32,
+    "RequestPayer": "requester",
+    "ExpectedSourceBucketOwner": "111111111111",
+}
+
+
+def stub_move_with_source_params(stubber):
+    """Queue the requests of a move of bucket/a and bucket/a/x onto bucket/c.
+
+    The move is made with MOVE_SOURCE_PARAMS, and no object exists at
+    bucket/a. Because bucket/a has bucket/a/x below it and the same
+    destination, the move depends on whether bucket/a is an object; the copy
+    of bucket/a looks it up again, and skips it as a directory. The lookups
+    of the sources receive the parameters that authorize the access to the
+    source, and the deletion of the copied source those that DeleteObjects
+    accepts.
+
+    Args:
+        stubber: The Stubber of the S3 client.
+    """
+    lookup = {
+        "SSECustomerAlgorithm": "AES256",
+        "SSECustomerKey": "k" * 32,
+        "RequestPayer": "requester",
+        "ExpectedBucketOwner": "111111111111",
+    }
+    for _ in range(2):
+        stubber.add_client_error(
+            "head_object",
+            service_error_code="404",
+            http_status_code=404,
+            expected_params={"Bucket": "bucket", "Key": "a", **lookup},
+        )
+    stubber.add_response(
+        "list_objects_v2",
+        {"KeyCount": 1, "Contents": [{"Key": "a/x"}]},
+        {
+            "Bucket": "bucket",
+            "Prefix": "a/",
+            "Delimiter": "/",
+            "MaxKeys": 1,
+            "RequestPayer": "requester",
+            "ExpectedBucketOwner": "111111111111",
+        },
+    )
+    stubber.add_response(
+        "head_object", {"ContentLength": 1}, {"Bucket": "bucket", "Key": "a/x", **lookup}
+    )
+    stubber.add_response(
+        "copy_object",
+        {},
+        {
+            "CopySource": {"Bucket": "bucket", "Key": "a/x"},
+            "Bucket": "bucket",
+            "Key": "c",
+            **MOVE_SOURCE_PARAMS,
+        },
+    )
+    stubber.add_response(
+        "delete_objects",
+        {},
+        {
+            "Bucket": "bucket",
+            "Delete": {"Objects": [{"Key": "a/x"}], "Quiet": True},
+            "RequestPayer": "requester",
+            "ExpectedBucketOwner": "111111111111",
+        },
+    )
+
+
 def _annotation(name):
     return {"AnnotationName": name, "LastModified": MULTIPART_COPY_EXPIRES, "Size": 1}
 

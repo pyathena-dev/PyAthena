@@ -1286,7 +1286,7 @@ class S3Core:
         if annotation_directive not in ("COPY", "EXCLUDE"):
             raise ValueError(f"Invalid AnnotationDirective: {annotation_directive}.")
 
-        source_params = self._copy_source_params(params)
+        source_params = self.copy_source_params(params)
         _logger.debug(f"Head object to copy: {source.uri}")
         head = self.head_object(source, **self.operation_params("head_object", source_params))
         if head.content_length is None:
@@ -1440,7 +1440,7 @@ class S3Core:
         _logger.debug(f"Copy object annotation {name} from {source.uri} to {destination.uri}.")
         response = self.call(
             self._client.get_object_annotation,
-            **self.operation_params("get_object_annotation", self._copy_source_params(params)),
+            **self.operation_params("get_object_annotation", self.copy_source_params(params)),
             **get_request,
         )
         put_request: dict[str, Any] = {
@@ -1659,8 +1659,12 @@ class S3Core:
         )
 
     @staticmethod
-    def _copy_source_params(params: Mapping[str, Any]) -> dict[str, Any]:
+    def copy_source_params(params: Mapping[str, Any]) -> dict[str, Any]:
         """Map the parameters of a copy to those of the requests that read its source.
+
+        The source of a copy is looked up, read, or deleted (by a move) with
+        the parameters that authorize the access to it, which CopyObject
+        names apart from those of the destination.
 
         Args:
             params: The CopyObject parameters of the copy.

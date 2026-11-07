@@ -39,6 +39,7 @@ from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
+    MOVE_SOURCE_PARAMS,
     MULTIPART_COPY_BLOCK_SIZE,
     MULTIPART_COPY_KWARGS,
     ThrottledOperation,
@@ -52,6 +53,7 @@ from tests.pyathena.util import (
     run_bounded,
     run_in_forked_child,
     shutdown_bounded,
+    stub_move_with_source_params,
     stub_multipart_copy,
     wait_until,
 )
@@ -227,6 +229,25 @@ class TestAioS3FileSystem:
         ):
             await self._multipart_copy(release_blocked_waits, fs, fail_annotation=True)
         assert [c.args[0] for c in copy_annotation.call_args_list] == ["a1"]
+
+    def test_mv_source_lookup_and_delete_params(self):
+        # GH-1333: see stub_move_with_source_params. max_workers=1 runs the
+        # copies, which _mv() gathers, in the order of the stubbed requests.
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=1,
+            skip_instance_cache=True,
+        )
+        with Stubber(fs._sync_fs._client) as stubber:
+            stub_move_with_source_params(stubber)
+            fs.mv(
+                ["s3://bucket/a", "s3://bucket/a/x"],
+                ["s3://bucket/c", "s3://bucket/c"],
+                **MOVE_SOURCE_PARAMS,
+            )
+            stubber.assert_no_pending_responses()
 
     @pytest.mark.asyncio
     async def test_cp_file_failed_multipart_copy_invalidates_cache(self):
