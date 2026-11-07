@@ -313,9 +313,10 @@ fs.chmod("s3://YOUR_S3_BUCKET/path/to/object", "bucket-owner-full-control")
 fs.chmod("s3://YOUR_S3_BUCKET/path/to/", "private", recursive=True)
 ```
 
-A recursive `chmod` updates the keys in parallel. Once an update fails, the updates
-that have not started are cancelled, the running ones make no further attempt, and the
-error is raised once they have ended.
+A recursive `chmod` updates the object at the path, if any, and the objects below it in
+parallel. A path with a version ID updates that version only. Once an update fails, the
+updates that have not started are cancelled, the running ones make no further attempt,
+and the error is raised once they have ended.
 
 Note that `setxattr` rewrites the object by copying it onto itself (S3 does not allow
 updating the metadata of an existing object in place), which updates its last-modified
