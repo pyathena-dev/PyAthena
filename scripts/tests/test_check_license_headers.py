@@ -65,7 +65,6 @@ class TestHasLicenseHeader:
             (".html", HTML + "<p></p>\n"),
             (".md", "---\n---\n" + HTML),
             (".css", "/*\n" + prefixed(" * ") + " */\n"),
-            (".jsonc", prefixed("// ") + "\n{}\n"),
         ],
     )
     def test_accepted(self, suffix, text):

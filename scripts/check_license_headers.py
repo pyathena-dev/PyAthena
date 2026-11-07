@@ -52,7 +52,6 @@ SUFFIX_BLOCKS = {
     ".css": (_block("/*", " * ", " */"),),
     ".html": (JINJA, HTML),
     ".jinja2": (JINJA,),
-    ".jsonc": (_block(None, "// ", None),),
     ".md": (HTML,),
     ".rst": (_block("..", "   ", None),),
 }
