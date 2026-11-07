@@ -25,7 +25,7 @@ from pyathena.filesystem.s3_object import (
     S3PutObject,
 )
 from pyathena.filesystem.s3_path import S3Path
-from pyathena.util import stop_retries_on
+from pyathena.util import raise_if_stopped, stop_retries_on
 
 T = TypeVar("T")
 
@@ -485,7 +485,10 @@ class _S3WriteSession:
 
         Raises:
             S3MultipartStateError: If a request has already been sent.
+            concurrent.futures.CancelledError: If an enclosing stop scope has
+                been stopped (see :func:`~pyathena.util.raise_if_stopped`).
         """
+        raise_if_stopped(f"create a multipart upload to {self._path.uri}")
         creation: Future[S3MultipartUpload] = Future()
         creation.add_done_callback(self._on_created)
         with self._lock:
@@ -625,11 +628,11 @@ class _S3WriteSession:
         Raises:
             S3MultipartStateError: If the write started a multipart upload,
                 failed, or has been discarded.
+            concurrent.futures.CancelledError: If an enclosing stop scope has
+                been stopped before the request (see
+                :func:`~pyathena.util.raise_if_stopped`); the write fails then.
         """
-        return self._commit(
-            _S3WriteState.IDLE,
-            lambda: self._core.put_object(self._path, body, **self._params("put_object")),
-        )
+        return self._commit(_S3WriteState.IDLE, lambda: self._put_object(body))
 
     def complete(self) -> S3CompleteMultipartUpload:
         """Commit the write by completing its multipart upload.
@@ -648,6 +651,9 @@ class _S3WriteSession:
                 raised yet, or the failure of the completion.
             S3MultipartStateError: If no upload is active, or the write failed
                 earlier or has been discarded.
+            concurrent.futures.CancelledError: If an enclosing stop scope has
+                been stopped before the request (see
+                :func:`~pyathena.util.raise_if_stopped`); the write fails then.
         """
         return self._commit(_S3WriteState.ACTIVE, self._complete_parts)
 
@@ -831,7 +837,13 @@ class _S3WriteSession:
             fn: The writer method that sends the request.
             **kwargs: The arguments of the method, whose ``part_number`` must
                 be the next one.
+
+        Raises:
+            concurrent.futures.CancelledError: If an enclosing stop scope has
+                been stopped, before the request is tracked, so that nothing
+                waits for a request that never runs.
         """
+        raise_if_stopped(f"upload part {kwargs['part_number']} to {self._path.uri}")
         request: Future[S3MultipartUploadPart] = Future()
         # Added first, so that a cancellation of the tracked request always
         # stops tracking it.
@@ -853,7 +865,7 @@ class _S3WriteSession:
             self._next_part_number += 1
         try:
             with stop_retries_on(self._stop):
-                self._executor.submit_to(request, fn, **kwargs)
+                self._executor.submit_to(request, self._send_part, fn, **kwargs)
         except BaseException as e:
             # Recorded before the cancellation, which would record its own.
             with self._update():
@@ -862,6 +874,45 @@ class _S3WriteSession:
             # tracked until it settles.
             request.cancel()
             raise
+
+    def _send_part(
+        self, fn: Callable[..., S3MultipartUploadPart], **kwargs: Any
+    ) -> S3MultipartUploadPart:
+        """Send a part request unless the write has been stopped meanwhile.
+
+        A part that waited behind other requests of the executor checks the
+        stop scopes of its context, which :meth:`_submit` copied, when it
+        starts: the retry stop does not cover the first attempt.
+
+        Args:
+            fn: The writer method that sends the request.
+            **kwargs: The arguments of the method.
+
+        Returns:
+            The uploaded part.
+
+        Raises:
+            concurrent.futures.CancelledError: If an enclosing stop scope has
+                been stopped.
+        """
+        raise_if_stopped(f"upload part {kwargs['part_number']} to {self._path.uri}")
+        return fn(**kwargs)
+
+    def _put_object(self, body: bytes | None) -> S3PutObject:
+        """Send the PutObject request of :meth:`put` unless the write has been stopped.
+
+        Args:
+            body: The data of the object, or None for an empty object.
+
+        Returns:
+            The result of the request.
+
+        Raises:
+            concurrent.futures.CancelledError: If an enclosing stop scope has
+                been stopped.
+        """
+        raise_if_stopped(f"put {self._path.uri}")
+        return self._core.put_object(self._path, body, **self._params("put_object"))
 
     def _commit(self, state: _S3WriteState, send: Callable[[], T]) -> T:
         """Reserve the commit, send its request, and record the outcome.
@@ -927,6 +978,10 @@ class _S3WriteSession:
             # invariant that no part is completed without its data.
             missing = sorted(set(range(1, self._next_part_number)) - set(self._parts))
             raise RuntimeError(f"The parts {missing} of {self._path.uri} have not been uploaded.")
+        # After the wait for the parts, which a stop may end, and inside the
+        # commit, so that a stopped completion leaves the write failed for
+        # the caller to abort.
+        raise_if_stopped(f"complete the multipart upload to {self._path.uri}")
         return self._writer.complete(parts, **self._params("complete_multipart_upload"))
 
     def _on_created(self, creation: Future[S3MultipartUpload]) -> None:

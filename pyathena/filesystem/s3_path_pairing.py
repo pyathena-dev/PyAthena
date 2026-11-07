@@ -145,13 +145,16 @@ class S3PathPairing:
         pairs: Sequence[tuple[str, str]],
         *,
         versioning_enabled_buckets: Collection[str] = (),
+        copy: bool = False,
     ) -> list[str]:
         """Return the sources of a move whose conflicts depend on an object at their key.
 
         A source with another source below it may be a directory. If no object
         exists at its key, it is not copied, so it writes no destination and
         is left out of the conflict checks of :meth:`move_pairs`. A path with
-        a version always names an object.
+        a version always names an object. For a copy, any source may be a
+        directory, such as a prefix given in a list, which the copy skips
+        (see :meth:`check_copy_pairs`).
 
         Args:
             pairs: The sources and destinations of the move, as
@@ -159,6 +162,9 @@ class S3PathPairing:
             versioning_enabled_buckets: Buckets whose versioning is enabled.
                 Their ``null`` versions are distinct from their unversioned
                 keys. Use the same collection for :meth:`move_pairs`.
+            copy: Whether the pairs are those of a copy, whose candidates
+                include every source without a version whose destination
+                conflicts.
 
         Returns:
             The sources, in ``bucket/key`` form (their
@@ -170,7 +176,7 @@ class S3PathPairing:
         Raises:
             TypeError: If ``versioning_enabled_buckets`` is a string.
         """
-        return self._moves(pairs, versioning_enabled_buckets)[2]
+        return self._moves(pairs, versioning_enabled_buckets, copy)[2]
 
     def move_pairs(
         self,
@@ -204,9 +210,72 @@ class S3PathPairing:
             TypeError: If ``missing`` is a string instead of a collection.
                 Also if ``versioning_enabled_buckets`` is a string.
         """
+        named = self._check(pairs, missing, versioning_enabled_buckets, "move")
+        return [(p1, p2) for p1, p2, _, source, dest in named if source != dest]
+
+    def check_copy_pairs(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        missing: Collection[str] | None = None,
+        *,
+        versioning_enabled_buckets: Collection[str] = (),
+    ) -> None:
+        """Check the pairs of a copy whose objects are copied in parallel.
+
+        A copy has the conflicts of a move (see :meth:`move_pairs`), since a
+        parallel copy has no order in which one pair would overwrite another
+        or read a source after another pair has written it. A pair whose
+        destination is its own source is no conflict: it rewrites the object
+        in place, such as with ``MetadataDirective="REPLACE"``.
+
+        Args:
+            pairs: The sources and destinations of the copy, as
+                :meth:`copy_pairs` of this pairing returns them.
+            missing: The :meth:`conflict_candidates` without an object at their
+                key, in any form that names them; needed when there are
+                candidates.
+            versioning_enabled_buckets: Buckets whose versioning is enabled.
+                Use the same collection for :meth:`conflict_candidates`.
+
+        Raises:
+            ValueError: If two sources have the same destination, or a
+                destination is another source, except for a directory with no
+                object at its key, which is not copied. Also if ``missing`` is
+                needed and None.
+            TypeError: If ``missing`` is a string instead of a collection.
+                Also if ``versioning_enabled_buckets`` is a string.
+        """
+        self._check(pairs, missing, versioning_enabled_buckets, "copy")
+
+    def _check(
+        self,
+        pairs: Sequence[tuple[str, str]],
+        missing: Collection[str] | None,
+        versioning_enabled_buckets: Collection[str],
+        operation: str,
+    ) -> list[tuple[str, str, bool, str, str]]:
+        """Raise for the conflicts of a move or a copy.
+
+        Args:
+            pairs: The sources and destinations.
+            missing: The conflict candidates without an object at their key.
+            versioning_enabled_buckets: Buckets whose versioning is enabled.
+            operation: ``"move"`` or ``"copy"``, for the error messages.
+
+        Returns:
+            The pairs as :meth:`_moves` names them.
+
+        Raises:
+            ValueError: If the pairs conflict, or ``missing`` is needed and
+                None.
+            TypeError: If ``missing`` or ``versioning_enabled_buckets`` is a
+                string.
+        """
         if isinstance(missing, str):
             raise TypeError("missing is a collection of paths, not a path.")
-        named, sources, candidates = self._moves(pairs, versioning_enabled_buckets)
+        named, sources, candidates = self._moves(
+            pairs, versioning_enabled_buckets, operation == "copy"
+        )
         if missing is None and candidates:
             raise ValueError("missing is needed to check the pairs.")
         # A directory without an object at its key writes no destination.
@@ -222,10 +291,11 @@ class S3PathPairing:
         )
         for dest in writers:
             if writers[dest] > 1:
-                raise ValueError("Cannot move several paths to the same destination.")
+                raise ValueError(f"Cannot {operation} several paths to the same destination.")
             if dest in sources:
-                raise ValueError("Cannot move a path onto another path that is moved.")
-        return [(p1, p2) for p1, p2, _, source, dest in named if source != dest]
+                done = "moved" if operation == "move" else "copied"
+                raise ValueError(f"Cannot {operation} a path onto another path that is {done}.")
+        return named
 
     @classmethod
     def delete_paths(cls, path: str | list[str]) -> tuple[list[str], list[str]]:
@@ -284,12 +354,14 @@ class S3PathPairing:
     def _moves(
         pairs: Sequence[tuple[str, str]],
         versioning_enabled_buckets: Collection[str] = (),
+        copy: bool = False,
     ) -> tuple[list[tuple[str, str, bool, str, str]], set[str], list[str]]:
         """Compare the paths of a move by what they name.
 
         Args:
             pairs: The sources and destinations of the move.
             versioning_enabled_buckets: Buckets whose versioning is enabled.
+            copy: Whether every conflicting source is a candidate.
 
         Returns:
             Each pair with whether its source has a version and the targets
@@ -331,7 +403,7 @@ class S3PathPairing:
             for _, _, versioned, source, dest in named
             if source != dest
             and (counts[dest] > 1 or dest in sources)
-            and source in directories
+            and (copy or source in directories)
             and not versioned
         ]
         return named, sources, candidates

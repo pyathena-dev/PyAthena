@@ -30,7 +30,8 @@ from pyathena.filesystem.s3_writer import (
     S3MultipartWriter,
     _S3WriteSession,
 )
-from pyathena.util import RetryConfig
+from pyathena.util import RetryConfig, stop_retries_on
+from tests.pyathena.util import poll_until
 
 
 def _make_writer(block_size=4, **kwargs):
@@ -257,8 +258,9 @@ def _make_session(executor, *, max_workers=1, part_errors=None, gate=None):
         gate: An event that each part request waits for, if any.
 
     Returns:
-        The session and its recorded requests: ``completed`` (the part
-        numbers of each completion) and ``aborts``.
+        The session and its recorded requests: ``created``, ``parts`` (the
+        numbers of the part requests sent), ``completed`` (the part numbers
+        of each completion), and ``aborts``.
     """
     client = boto3.client(
         "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
@@ -267,9 +269,14 @@ def _make_session(executor, *, max_workers=1, part_errors=None, gate=None):
     core.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
     core.MULTIPART_UPLOAD_MAX_PART_SIZE = 8
     errors = dict(part_errors or {})
-    requests = SimpleNamespace(completed=[], aborts=0)
+    requests = SimpleNamespace(created=0, parts=[], completed=[], aborts=0)
+
+    def create(path, **params):
+        requests.created += 1
+        return S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"})
 
     def upload_part(upload, part_number, body, **params):
+        requests.parts.append(part_number)
         if gate is not None:
             assert gate.wait(5)
         if part_number in errors:
@@ -282,9 +289,7 @@ def _make_session(executor, *, max_workers=1, part_errors=None, gate=None):
     def abort(upload, **params):
         requests.aborts += 1
 
-    core.create_multipart_upload = lambda path, **params: S3MultipartUpload(  # type: ignore[method-assign]
-        {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
-    )
+    core.create_multipart_upload = create  # type: ignore[method-assign]
     core.upload_part = upload_part  # type: ignore[method-assign]
     core.complete_multipart_upload = complete  # type: ignore[method-assign]
     core.abort_multipart_upload = abort  # type: ignore[method-assign]
@@ -301,6 +306,45 @@ def _start(session):
 
 
 class TestS3WriteSession:
+    @pytest.mark.parametrize("stopped", ["start", "submit", "queued", "completion"])
+    def test_stopped_write_sends_nothing_more(self, stopped):
+        # GH-1322 (B2): once an enclosing stop scope is stopped, such as that
+        # of a batch operation after another object failed, the write sends
+        # no creation, part, or completion: not when it is asked to, not for
+        # a part that waited behind another request, and not after the wait
+        # for the parts. The stop of the retries does not cover these first
+        # attempts. The write fails, and the abort aborts the upload.
+        stop = threading.Event()
+        gate = threading.Event()
+        with S3ThreadPool(max_workers=1) as executor, stop_retries_on(stop):
+            session, requests = _make_session(executor, max_workers=2, gate=gate)
+            if stopped == "start":
+                stop.set()
+                with pytest.raises(CancelledError):
+                    session.start()
+            else:
+                _start(session)
+                if stopped == "submit":
+                    stop.set()
+                    with pytest.raises(CancelledError):
+                        session.submit_part(1, b"abcd")
+                else:
+                    session.submit_part(1, b"abcd")
+                    poll_until(lambda: requests.parts == [1], "part 1 did not start")
+                    if stopped == "queued":
+                        # Waits behind part 1 in the only thread.
+                        session.submit_part(2, b"efgh")
+                        stop.set()
+                        gate.set()
+                    else:
+                        threading.Timer(0.2, lambda: (stop.set(), gate.set())).start()
+                    with pytest.raises(CancelledError):
+                        session.complete()
+            session.abort()
+        expected_parts = [1] if stopped in ("queued", "completion") else []
+        assert (requests.parts, requests.completed) == (expected_parts, [])
+        assert (requests.created, requests.aborts) == ((0, 0) if stopped == "start" else (1, 1))
+
     def test_failed_part_is_released(self):
         # GH-1211: the session drops the request of a failed part, whose body
         # the executor frees, and keeps no reference to its error once it is
