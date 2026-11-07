@@ -1866,7 +1866,7 @@ class S3FileSystem(AbstractFileSystem):
         if mode == "create":
             # Checked up front, as open() does in "xb" mode, and with
             # IfNoneMatch for an object created since.
-            if self.exists(path, **self._get_lookup_kwargs(request_kwargs)):
+            if self._object_exists(path, self._get_lookup_kwargs(request_kwargs)):
                 raise FileExistsError(path)
             request_kwargs["IfNoneMatch"] = "*"
         if not isinstance(value, bytes):
@@ -2531,6 +2531,26 @@ class S3FileSystem(AbstractFileSystem):
         with contextlib.suppress(KeyError):
             del self.dircache[key]
 
+    def _object_exists(self, path: str, lookup_kwargs: Mapping[str, Any]) -> bool:
+        """Check whether an object exists at the path, for a write that must not replace one.
+
+        A key that is only a prefix of other keys has no object, as when
+        reading.
+
+        Args:
+            path: S3 path (s3://bucket/key).
+            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
+                to send with the requests.
+
+        Returns:
+            True if an object exists at the path.
+        """
+        try:
+            info = self.info(path, **lookup_kwargs)
+        except FileNotFoundError:
+            return False
+        return bool(info.get("type") != S3ObjectType.S3_OBJECT_TYPE_DIRECTORY)
+
     @staticmethod
     def _get_lookup_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
         """Select the request parameters that lookups send.
@@ -2906,14 +2926,9 @@ class S3FileTarget:
                 details = appended
         elif "x" in mode:
             # Checked up front so that no data is uploaded for an existing
-            # object, and on commit with IfNoneMatch for one created since. A
-            # prefix has no object, as when reading.
-            with contextlib.suppress(FileNotFoundError):
-                if (
-                    fs.info(path, **lookup_kwargs).get("type")
-                    != S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
-                ):
-                    raise FileExistsError(path)
+            # object, and on commit with IfNoneMatch for one created since.
+            if fs._object_exists(path, lookup_kwargs):
+                raise FileExistsError(path)
             kwargs.update({"IfNoneMatch": "*"})
         return cls(
             path=path,

@@ -1303,7 +1303,7 @@ class TestS3FileSystem:
         # requests that accept it.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs.exists = mock.MagicMock(return_value=False)
+        fs._object_exists = mock.MagicMock(return_value=False)
         requests = self._record_requests(fs)
 
         with fs.open(
@@ -1311,7 +1311,7 @@ class TestS3FileSystem:
         ) as f:
             f.write(b"a" * size)
 
-        fs.exists.assert_called_once()
+        fs._object_exists.assert_called_once()
         assert [name for name, _ in requests] == expected
         for name, request in requests:
             conditional = name in {"put_object", "complete_multipart_upload"}
@@ -1322,7 +1322,7 @@ class TestS3FileSystem:
         # any data is uploaded.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs.exists = mock.MagicMock(return_value=True)
+        fs._object_exists = mock.MagicMock(return_value=True)
 
         with pytest.raises(FileExistsError):
             fs.open("s3://bucket/key", "xb")
@@ -1349,7 +1349,7 @@ class TestS3FileSystem:
         # FileExistsError, and the multipart upload is aborted.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs.exists = mock.MagicMock(return_value=False)
+        fs._object_exists = mock.MagicMock(return_value=False)
         requests = self._record_requests(fs, precondition_failed=True)
 
         with (
@@ -1368,7 +1368,7 @@ class TestS3FileSystem:
         # selects the mode of the remote file instead.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs.exists = mock.MagicMock(return_value=False)
+        fs._object_exists = mock.MagicMock(return_value=False)
         requests = self._record_requests(fs)
         lpath = tmp_path / "data"
         lpath.write_bytes(b"a")
@@ -1385,7 +1385,7 @@ class TestS3FileSystem:
     def test_put_file_create_existing(self, tmp_path):
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs.exists = mock.MagicMock(return_value=True)
+        fs._object_exists = mock.MagicMock(return_value=True)
         lpath = tmp_path / "data"
         lpath.write_bytes(b"a")
 
@@ -1407,13 +1407,13 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
         fs.default_block_size = fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE
-        fs.exists = mock.MagicMock(return_value=False)
+        fs._object_exists = mock.MagicMock(return_value=False)
         requests = self._record_requests(fs, precondition_failed=True)
 
         with pytest.raises(FileExistsError):
             fs.pipe_file("s3://bucket/key", b"a" * size, mode="create")
 
-        fs.exists.assert_called_once()
+        fs._object_exists.assert_called_once()
         assert [name for name, request in requests if request.get("IfNoneMatch") == "*"] == [
             conditional
         ]
@@ -2964,11 +2964,11 @@ class TestS3FileSystem:
         (read,) = [request for name, request in requests if name == "get_object"]
         assert read == {"Bucket": "bucket", "Key": "key", "IfMatch": '"e"'}
 
-    @pytest.mark.parametrize("mode", ["wb", "ab", "xb"])
-    def test_open_write_prefix_key(self, mode):
+    @pytest.mark.parametrize("mode", ["wb", "ab", "xb", "pipe-create"])
+    def test_write_prefix_key(self, mode):
         # GH-1334: a key that is only a prefix of other keys has no object,
         # as when reading, so an append writes a new object, and an
-        # exclusive create creates it.
+        # exclusive create, by open() or pipe_file(), creates it.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
         requests = self._record_requests(
@@ -2982,15 +2982,18 @@ class TestS3FileSystem:
             },
         )
 
-        with fs.open("s3://bucket/dir", mode) as f:
-            f.write(b"bb")
+        if mode == "pipe-create":
+            fs.pipe_file("s3://bucket/dir", b"bb", mode="create")
+        else:
+            with fs.open("s3://bucket/dir", mode) as f:
+                f.write(b"bb")
         names = [name for name, _ in requests]
         assert "get_object" not in names
         (put,) = [request for name, request in requests if name == "put_object"]
         assert (put["Key"], put["Body"], put.get("IfNoneMatch")) == (
             "dir",
             b"bb",
-            "*" if mode == "xb" else None,
+            None if mode in {"wb", "ab"} else "*",
         )
 
     @pytest.mark.parametrize("mode", ["wb", "ab", "xb"])

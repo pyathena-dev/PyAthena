@@ -1509,7 +1509,7 @@ class TestAioS3FileSystem:
         # GH-972: in a transaction, put_file(mode="create") also raises, when
         # the file is opened, for an existing object.
         fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
-        fs._sync_fs.exists = mock.MagicMock(return_value=True)
+        fs._sync_fs._object_exists = mock.MagicMock(return_value=True)
         fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
         local = tmp_path / "local"
         local.write_bytes(b"a")
@@ -3332,7 +3332,7 @@ class TestAioS3StreamedFile:
     @pytest.mark.parametrize("exists", [False, True])
     @pytest.mark.asyncio
     async def test_exclusive_create(self, fs, exists):
-        fs._sync_fs.exists = mock.MagicMock(return_value=exists)
+        fs._sync_fs._object_exists = mock.MagicMock(return_value=exists)
         if exists:
             with pytest.raises(FileExistsError):
                 await fs.open_async("s3://bucket/key", "xb")

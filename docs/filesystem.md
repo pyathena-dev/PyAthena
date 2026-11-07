@@ -249,7 +249,8 @@ copied as parts on the condition of the ETag looked up when the file was opened,
 append to an object replaced since raises `OSError`, and its multipart upload, if any,
 is aborted. A
 key that is only a prefix of other keys has no object: reading it raises
-`FileNotFoundError`, and appending or exclusive creation (`"xb"`) writes a new object.
+`FileNotFoundError`, and appending, exclusive creation (`"xb"`), and `pipe`/`put` with
+`mode="create"` write a new object.
 
 (filesystem-read-caching)=
 
