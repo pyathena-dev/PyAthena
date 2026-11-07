@@ -86,6 +86,43 @@ fs.cp("s3://YOUR_S3_BUCKET/src", "s3://YOUR_S3_BUCKET/dst")
 fs.rm("s3://YOUR_S3_BUCKET/path/to/", recursive=True)
 ```
 
+`cat`, `cat_ranges`, `get`, `put`, `pipe` with a dict of values, `cp`, and `mv` transfer
+their objects in parallel, `batch_size` objects at a time:
+
+```python
+fs.get("s3://YOUR_S3_BUCKET/path/to/", "local/dir/", recursive=True, batch_size=16)
+```
+
+`batch_size` is an argument of these methods, of `rm`, and of `S3FileSystem`. By default,
+and with `-1`, it is the filesystem's `max_workers`. The transfers of a batch run in
+threads of their own. With several transfers at once, each object sends at most
+`max_workers // n` range reads, parts, or part copies at once, `n` being the number of
+transfers that run at once, so that a batch keeps about `max_workers` requests in the
+request pool and as many parts in memory; a smaller `max_workers` given to the method is
+kept. `cat`, `cat_ranges`, and a small `pipe` send their single request from the
+transfer's thread, so a `batch_size` larger than `max_workers` sends that many requests
+at once.
+
+When a transfer fails, no further transfer starts, the retries of the running ones stop,
+and the error is raised once they have ended. A running upload or multipart copy sends
+no further part and is aborted instead of being committed, and a running download reads
+and writes no further block; a multipart copy that has been committed still copies its
+annotations. The transfers that ended before the failure stay done, and their number is
+not bounded by `batch_size`. `mv` deletes the sources only once every copy has
+succeeded. `on_error` of `cat`, `cat_ranges`, and `cp` keeps its fsspec meaning; with
+`on_error="omit"` or `"return"` of `cat`, `"return"` of `cat_ranges`, or `"ignore"` of
+`cp` for a missing source, those errors do not stop the batch.
+
+Pairs whose result would depend on the order of the transfers raise `ValueError` before
+anything is transferred: two sources of `get`, `put`, `cp`, or `pipe` with the same
+destination, including two paths of one local file or one file-like object, and a `cp`
+destination that is another source. A `cp` of an object onto itself, such as with
+`MetadataDirective="REPLACE"`, is no conflict. `get` with `outfile` writes the objects
+into it one after another, in order.
+
+`rm` deletes up to 1,000 objects per DeleteObjects request, `batch_size` requests at a
+time. Its `max_workers` argument is a deprecated alias of `batch_size`.
+
 Writes with `pipe`/`pipe_file` issue a single PutObject request for data up to the
 block size (5 MiB by default); larger data is uploaded as a parallel multipart upload
 through the buffered file path. Inside an
@@ -128,7 +165,8 @@ cancels the range reads that have not started, and the running ones make no furt
 attempt. The interrupt or the error is raised once they have ended, and their data is
 released. A second interrupt stops that wait, and the reads still finish. `rm` and
 `clear_multipart_uploads` send every request also after one fails; an interrupt cancels
-those that have not started and is raised once the running ones have ended. Closing
+those that have not started and is raised once the running ones have ended. An interrupt of
+a batch operation, such as `get` or `cp`, does the same as a failed transfer. Closing
 the file waits for its running requests; an interrupt of that wait stops it, and the
 requests still finish. An interrupt while a
 request is being submitted can let one more request than `max_workers` run at once

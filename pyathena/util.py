@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import Future, wait
+from concurrent.futures import CancelledError, Future, wait
 from contextlib import contextmanager
 from contextvars import ContextVar
 from re import Pattern
@@ -326,6 +326,28 @@ def unstoppable_retries() -> Iterator[None]:
         yield
     finally:
         _RETRY_STOP_EVENTS.reset(token)
+
+
+def raise_if_stopped(operation: str) -> None:
+    """Raise if an event of the enclosing stop scopes is set.
+
+    A writer calls this before a request that adds to or commits a write,
+    such as a part or the completion of a multipart upload, so that a write
+    whose owner has stopped, such as a batch operation after the failure of
+    another object, sends nothing more. The retries that
+    :func:`stop_retries_on` stops do not cover the first attempt of a new
+    request. The scopes that :func:`unstoppable_retries` clears do not stop
+    the writer either.
+
+    Args:
+        operation: What the caller was about to do, for the error message.
+
+    Raises:
+        concurrent.futures.CancelledError: If an event of the enclosing
+            :func:`stop_retries_on` scopes is set.
+    """
+    if any(event.is_set() for event in _RETRY_STOP_EVENTS.get()):
+        raise CancelledError(f"Stopped before it could {operation}.")
 
 
 def wait_with_retry_stop(future: Future[_T], *, stop: threading.Event) -> _T:
