@@ -228,9 +228,10 @@ def to_sql(
     that runs past their expiry fails.
 
     The SQL statements run on a ``pyathena.cursor.Cursor``, whatever the connection's
-    cursor class is, with the connection's query settings, such as ``work_group``;
-    the connection's ``converter`` and the options of its cursor class, such as
-    ``unload`` and ``arraysize``, do not apply.
+    cursor class is, with the connection's query settings, such as ``work_group``,
+    except that the existence check never reuses a query result; the connection's
+    ``converter`` and the options of its cursor class, such as ``unload`` and
+    ``arraysize``, do not apply.
 
     Args:
         df: The DataFrame to write to Athena.
