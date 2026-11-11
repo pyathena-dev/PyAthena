@@ -1,4 +1,3 @@
-<!-- rumdl-disable-next-line MD044 -->
 (polars)=
 
 # Polars
