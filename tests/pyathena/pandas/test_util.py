@@ -14,8 +14,11 @@ from boto3.session import Session
 from botocore.config import Config
 
 from pyathena import OperationalError
+from pyathena.aio.connection import AioConnection
+from pyathena.async_cursor import AsyncCursor
 from pyathena.connection import Connection
 from pyathena.pandas import util
+from pyathena.pandas.cursor import PandasCursor
 from pyathena.pandas.util import (
     as_pandas,
     generate_ddl,
@@ -25,6 +28,7 @@ from pyathena.pandas.util import (
 )
 from tests import ENV
 from tests.pyathena.conftest import connect
+from tests.pyathena.util import answered_requests
 
 
 def test_get_chunks():
@@ -606,6 +610,86 @@ def test_to_sql_workers_resolve_credentials(cursor):
         to_sql(df, table_name, cursor._connection, location, schema=ENV.schema)
     session_kwargs = to_parquet.call_args.args[4]
     assert "aws_secret_access_key" not in session_kwargs
+
+
+# The answers of Athena to a lookup that finds the table.
+EXISTING_TABLE_RESPONSES = {
+    "StartQueryExecution": {"QueryExecutionId": "query-id"},
+    "GetQueryExecution": {
+        "QueryExecution": {
+            "QueryExecutionId": "query-id",
+            "Query": "SELECT table_name FROM information_schema.tables",
+            "StatementType": "DML",
+            "ResultConfiguration": {"OutputLocation": "s3://bucket/path/query-id.csv"},
+            "Status": {"State": "SUCCEEDED"},
+        }
+    },
+    "GetQueryResults": {
+        "ResultSet": {
+            "Rows": [
+                {"Data": [{"VarCharValue": "table_name"}]},
+                {"Data": [{"VarCharValue": "existing"}]},
+            ],
+            "ResultSetMetadata": {
+                "ColumnInfo": [
+                    {
+                        "CatalogName": "hive",
+                        "SchemaName": "",
+                        "TableName": "",
+                        "Name": "table_name",
+                        "Label": "table_name",
+                        "Type": "varchar",
+                        "Precision": 2147483647,
+                        "Scale": 0,
+                        "Nullable": "UNKNOWN",
+                        "CaseSensitive": True,
+                    }
+                ]
+            },
+        },
+        "UpdateCount": 0,
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("connection_class", "connection_kwargs"),
+    [
+        (Connection, {"cursor_class": AsyncCursor}),
+        (AioConnection, {}),
+        (Connection, {"cursor_class": PandasCursor, "cursor_kwargs": {"unload": True}}),
+    ],
+    ids=["async_cursor", "aio_connection", "pandas_cursor_unload"],
+)
+def test_to_sql_queries_ignore_connection_cursor_class(connection_class, connection_kwargs):
+    # GH-1391: the lookup ran on the connection's cursor class, so it failed on
+    # an async cursor and an aio connection, and was wrapped in UNLOAD.
+    conn = connection_class(
+        region_name="us-east-1",
+        s3_staging_dir="s3://bucket/path/",
+        work_group="to-sql-work-group",
+        result_reuse_enable=True,
+        aws_access_key_id="access_key",
+        aws_secret_access_key="secret_key",
+        **connection_kwargs,
+    )
+    df = pd.DataFrame({"col_int": np.int32([1])})
+    try:
+        with (
+            answered_requests(conn.client, EXISTING_TABLE_RESPONSES) as requests,
+            pytest.raises(OperationalError),
+        ):
+            to_sql(df, "existing", conn, "s3://bucket/existing/", if_exists="fail")
+    finally:
+        conn.close()
+    (parameters,) = [p for operation, p in requests if operation == "StartQueryExecution"]
+    assert parameters["QueryString"].lstrip().startswith("SELECT table_name")
+    # The answer decides whether to drop the table, so it is never a reused result,
+    # even when the connection enables result reuse.
+    assert (
+        parameters["ResultReuseConfiguration"]["ResultReuseByAgeConfiguration"]["Enabled"] is False
+    )
+    assert parameters["WorkGroup"] == "to-sql-work-group"
 
 
 def test_to_sql_with_partitions(cursor):

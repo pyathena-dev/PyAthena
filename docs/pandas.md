@@ -110,6 +110,7 @@ print(cursor.fetchall())
 ```
 
 `to_sql` writes the data as Parquet with PyArrow, so it requires `pip install PyAthena[Pandas,Arrow]`.
+It runs its SQL statements on a `pyathena.cursor.Cursor` whatever the connection's cursor class is, so options of that class, such as `unload`, do not apply.
 With the default `flavor="spark"`, timestamps are written as INT96.
 Athena reads them correctly.
 PyArrow, of any version, reads the timestamps before 1970 in files that PyArrow 22 wrote as wrong values.
