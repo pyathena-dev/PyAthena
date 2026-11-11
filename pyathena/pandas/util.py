@@ -227,8 +227,10 @@ def to_sql(
     uploads start. They are not refreshed during the uploads, so an upload
     that runs past their expiry fails.
 
-    The SQL statements run on a ``pyathena.cursor.Cursor`` whatever the connection's
-    cursor class is, so options of that class, such as ``unload``, do not apply.
+    The SQL statements run on a ``pyathena.cursor.Cursor``, whatever the connection's
+    cursor class is, with the connection's query settings, such as ``work_group``;
+    the connection's ``converter`` and the options of its cursor class, such as
+    ``unload`` and ``arraysize``, do not apply.
 
     Args:
         df: The DataFrame to write to Athena.
