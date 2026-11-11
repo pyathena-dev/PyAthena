@@ -25,14 +25,12 @@ enable = [
     "MD012", "MD018", "MD019", "MD020", "MD021", "MD022", "MD023", "MD024",
     "MD025", "MD026", "MD027", "MD028", "MD029", "MD030", "MD031", "MD032",
     "MD033", "MD034", "MD035", "MD036", "MD037", "MD038", "MD039", "MD040",
-    "MD042", "MD044", "MD045", "MD046", "MD047", "MD048", "MD049",
+    "MD041", "MD042", "MD044", "MD045", "MD046", "MD047", "MD048", "MD049",
     "MD050", "MD051", "MD052", "MD053", "MD054", "MD055", "MD056", "MD058",
     "MD059",
     # Not enabled:
     # MD013: docs have long URLs and code lines that would be awkward to wrap
     # MD014: `$ command` style is intentional in docs/testing.md and README shell snippets
-    # MD041: MyST `(label)=` ref targets must come before the first heading, so the
-    #        first line of many docs/*.md files is not an H1
     # MD043: the docs share no single heading structure to require
 ]
 
@@ -74,6 +72,12 @@ list-items = true
 [MD036]
 punctuation = ".,;:!?。，；：！？"
 
+# markdownlint matches a front matter title key case-insensitively. Unlike
+# markdownlint, rumdl can let lines of only inline images or inline-linked
+# badges precede the first heading; it has no option to disallow them.
+[MD041]
+front-matter-title-pattern = '(?i)^\s*"?title"?\s*[:=]'
+
 [MD051]
 ignore-case = false
 
@@ -84,9 +88,6 @@ ignore = ["x"]
 ignored-definitions = ["//"]
 
 # Spell project and library names consistently in prose; code is exempt.
-# rumdl also checks MyST `(label)=` targets, so the labels that contain one of
-# these names disable MD044 for their line; remove those comments once the
-# pinned rumdl skips targets (https://github.com/rvben/rumdl/issues/983).
 [MD044]
 names = ["PyAthena", "Athena", "SQLAlchemy", "fsspec", "Polars", "PyArrow", "pandas"]
 code-blocks = false
