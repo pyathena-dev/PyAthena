@@ -73,7 +73,7 @@ list-items = true
 punctuation = ".,;:!?。，；：！？"
 
 # markdownlint matches a front matter title key case-insensitively. Unlike
-# markdownlint, rumdl always lets lines of only inline images or inline-linked
+# markdownlint, rumdl can let lines of only inline images or inline-linked
 # badges precede the first heading; it has no option to disallow them.
 [MD041]
 front-matter-title-pattern = '(?i)^\s*"?title"?\s*[:=]'
