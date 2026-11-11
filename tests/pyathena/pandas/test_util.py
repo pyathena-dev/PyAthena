@@ -28,7 +28,11 @@ from pyathena.pandas.util import (
 )
 from tests import ENV
 from tests.pyathena.conftest import connect
-from tests.pyathena.util import answered_requests
+from tests.pyathena.util import (
+    answered_requests,
+    query_results_response,
+    succeeded_query_execution_data,
+)
 
 
 def test_get_chunks():
@@ -612,46 +616,6 @@ def test_to_sql_workers_resolve_credentials(cursor):
     assert "aws_secret_access_key" not in session_kwargs
 
 
-# The answers of Athena to a lookup that finds the table.
-EXISTING_TABLE_RESPONSES = {
-    "StartQueryExecution": {"QueryExecutionId": "query-id"},
-    "GetQueryExecution": {
-        "QueryExecution": {
-            "QueryExecutionId": "query-id",
-            "Query": "SELECT table_name FROM information_schema.tables",
-            "StatementType": "DML",
-            "ResultConfiguration": {"OutputLocation": "s3://bucket/path/query-id.csv"},
-            "Status": {"State": "SUCCEEDED"},
-        }
-    },
-    "GetQueryResults": {
-        "ResultSet": {
-            "Rows": [
-                {"Data": [{"VarCharValue": "table_name"}]},
-                {"Data": [{"VarCharValue": "existing"}]},
-            ],
-            "ResultSetMetadata": {
-                "ColumnInfo": [
-                    {
-                        "CatalogName": "hive",
-                        "SchemaName": "",
-                        "TableName": "",
-                        "Name": "table_name",
-                        "Label": "table_name",
-                        "Type": "varchar",
-                        "Precision": 2147483647,
-                        "Scale": 0,
-                        "Nullable": "UNKNOWN",
-                        "CaseSensitive": True,
-                    }
-                ]
-            },
-        },
-        "UpdateCount": 0,
-    },
-}
-
-
 @pytest.mark.parametrize(
     ("connection_class", "connection_kwargs"),
     [
@@ -673,10 +637,28 @@ def test_to_sql_queries_ignore_connection_cursor_class(connection_class, connect
         aws_secret_access_key="secret_key",
         **connection_kwargs,
     )
+    lookup = query_results_response([("table_name", "varchar")])
+    # The column labels, then the table that the lookup finds.
+    lookup["ResultSet"]["Rows"] = [
+        {"Data": [{"VarCharValue": "table_name"}]},
+        {"Data": [{"VarCharValue": "existing"}]},
+    ]
+    responses = {
+        "StartQueryExecution": {"QueryExecutionId": "query-id"},
+        "GetQueryExecution": {
+            "QueryExecution": {
+                **succeeded_query_execution_data(
+                    "query-id", "SELECT table_name", datetime.now(UTC)
+                ),
+                "ResultConfiguration": {"OutputLocation": "s3://bucket/path/query-id.csv"},
+            }
+        },
+        "GetQueryResults": lookup,
+    }
     df = pd.DataFrame({"col_int": np.int32([1])})
     try:
         with (
-            answered_requests(conn.client, EXISTING_TABLE_RESPONSES) as requests,
+            answered_requests(conn.client, responses) as requests,
             pytest.raises(OperationalError),
         ):
             to_sql(df, "existing", conn, "s3://bucket/existing/", if_exists="fail")
