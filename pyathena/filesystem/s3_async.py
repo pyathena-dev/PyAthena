@@ -27,7 +27,7 @@ from fsspec.asyn import AbstractAsyncStreamedFile, AsyncFileSystem, sync
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
 from fsspec.implementations.local import LocalFileSystem, make_path_posix
-from fsspec.utils import check_contained
+from fsspec.utils import check_contained, stringify_path
 
 from pyathena.aio.util import create_in_thread
 from pyathena.filesystem.s3 import (
@@ -429,28 +429,38 @@ class AioS3FileSystem(AsyncFileSystem):
         """Release the threads with :meth:`close`."""
         self.close()
 
-    async def _info(self, path: str, **kwargs) -> S3Object:
+    async def _info(self, path: str | os.PathLike[str], **kwargs) -> S3Object:
         return await self._thread_pool.run(self._sync_fs.info, path, **kwargs)
 
-    async def _ls(self, path: str, detail: bool = False, **kwargs) -> list[S3Object] | list[str]:
+    async def _ls(
+        self, path: str | os.PathLike[str], detail: bool = False, **kwargs
+    ) -> list[S3Object] | list[str]:
         return await self._thread_pool.run(self._sync_fs.ls, path, detail=detail, **kwargs)
 
     async def _cat_file(
-        self, path: str, start: int | None = None, end: int | None = None, **kwargs
+        self,
+        path: str | os.PathLike[str],
+        start: int | None = None,
+        end: int | None = None,
+        **kwargs,
     ) -> bytes:
         _S3BatchTasks.track()
         return await self._thread_pool.run(
             self._sync_fs.cat_file, path, start=start, end=end, **kwargs
         )
 
-    async def _exists(self, path: str, **kwargs) -> bool:
+    async def _exists(self, path: str | os.PathLike[str], **kwargs) -> bool:
         return await self._thread_pool.run(self._sync_fs.exists, path, **kwargs)
 
-    async def _rm_file(self, path: str, **kwargs) -> None:
+    async def _rm_file(self, path: str | os.PathLike[str], **kwargs) -> None:
         await self._thread_pool.run(self._sync_fs.rm_file, path, **kwargs)
 
     async def _pipe_file(
-        self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
+        self,
+        path: str | os.PathLike[str],
+        value: bytes | bytearray | memoryview,
+        mode: str = "overwrite",
+        **kwargs,
     ) -> None:
         _S3BatchTasks.track()
         if self._intrans:
@@ -487,7 +497,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
     def _pipe_file_in_transaction(
         self,
-        path: str,
+        path: str | os.PathLike[str],
         value: bytes | bytearray | memoryview,
         mode: str,
         open_file: Callable[..., S3File],
@@ -524,13 +534,14 @@ class AioS3FileSystem(AsyncFileSystem):
 
     async def _put_file(
         self,
-        lpath: str,
-        rpath: str,
+        lpath: str | os.PathLike[str],
+        rpath: str | os.PathLike[str],
         callback=_DEFAULT_CALLBACK,
         mode: str = "overwrite",
         **kwargs,
     ) -> None:
         _S3BatchTasks.track()
+        rpath = stringify_path(rpath)
         if self._intrans:
             # See _pipe_file.
             await self._write_in_transaction(
@@ -545,7 +556,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
     def _put_file_in_transaction(
         self,
-        lpath: str,
+        lpath: str | os.PathLike[str],
         rpath: str,
         callback,
         mode: str,
@@ -604,23 +615,31 @@ class AioS3FileSystem(AsyncFileSystem):
             )._write_file_and_close(local, callback)
         self.invalidate_cache(rpath)
 
-    async def _get_file(self, rpath: str, lpath: str, callback=_DEFAULT_CALLBACK, **kwargs) -> None:
+    async def _get_file(
+        self,
+        rpath: str | os.PathLike[str],
+        lpath: str | os.PathLike[str],
+        callback=_DEFAULT_CALLBACK,
+        **kwargs,
+    ) -> None:
         _S3BatchTasks.track()
         await self._thread_pool.run(
             self._sync_fs.get_file, rpath, lpath, callback=callback, **kwargs
         )
 
-    async def _mkdir(self, path: str, create_parents: bool = True, **kwargs) -> None:
+    async def _mkdir(
+        self, path: str | os.PathLike[str], create_parents: bool = True, **kwargs
+    ) -> None:
         await self._thread_pool.run(
             self._sync_fs.mkdir, path, create_parents=create_parents, **kwargs
         )
 
-    async def _makedirs(self, path: str, exist_ok: bool = False) -> None:
+    async def _makedirs(self, path: str | os.PathLike[str], exist_ok: bool = False) -> None:
         await self._thread_pool.run(self._sync_fs.makedirs, path, exist_ok=exist_ok)
 
     async def _rm(
         self,
-        path: str | list[str],
+        path: str | os.PathLike[str] | list[str | os.PathLike[str]],
         recursive: bool = False,
         batch_size: int | None = None,
         maxdepth: int | None = None,
@@ -651,6 +670,7 @@ class AioS3FileSystem(AsyncFileSystem):
             TypeError: If both ``batch_size`` and ``max_workers`` are given.
             OSError: If S3 could not delete some of the objects.
         """
+        path = self._sync_fs._stringify_paths(path)
         max_workers = self._sync_fs._delete_batch_limit(batch_size, kwargs)
         paths = await self._thread_pool.run(
             self._sync_fs._delete_paths, path, recursive=recursive, maxdepth=maxdepth
@@ -741,6 +761,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 no object at its key, which is not copied, does not conflict.
             OSError: If bucket versioning cannot be read.
         """
+        path1, path2 = self._sync_fs._stringify_paths(path1), self._sync_fs._stringify_paths(path2)
         if path1 == path2:
             return
         source_params = self.core.copy_source_params(kwargs)
@@ -813,7 +834,8 @@ class AioS3FileSystem(AsyncFileSystem):
             batch_size: Number of copies to run at the same time.
             **kwargs: Additional S3 copy parameters passed to ``_cp_file()``.
         """
-        sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
+        path1, path2 = self._sync_fs._stringify_paths(path1), self._sync_fs._stringify_paths(path2)
+        sources = [path1] if isinstance(path1, str) else path1
         if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
             pairs = await self._thread_pool.run(
                 self._sync_fs._copy_pairs,
@@ -856,7 +878,8 @@ class AioS3FileSystem(AsyncFileSystem):
             ValueError: If a source with a version ID is paired, and a
                 destination lies outside ``lpath``.
         """
-        sources = [rpath] if isinstance(rpath, (str, os.PathLike)) else rpath
+        rpath = self._sync_fs._stringify_paths(rpath)
+        sources = [rpath] if isinstance(rpath, str) else rpath
         if isinstance(lpath, (str, os.PathLike)) and any(S3Path.has_version_id(p) for p in sources):
             root = make_path_posix(lpath)
             pairs = await self._thread_pool.run(
@@ -893,9 +916,10 @@ class AioS3FileSystem(AsyncFileSystem):
         has no directories, and creating one checks or creates the bucket.
 
         Args:
-            lpath: Local source path, glob pattern, or list of them.
+            lpath: Local source path, glob pattern, or list of them, as
+                strings or ``os.PathLike`` objects.
             rpath: S3 destination path, or list of paths when ``lpath`` is a
-                list.
+                list, as strings or ``os.PathLike`` objects.
             recursive: Whether to copy the directories with their contents.
             callback: Progress callback.
             batch_size: Number of uploads to run at the same time.
@@ -905,6 +929,7 @@ class AioS3FileSystem(AsyncFileSystem):
         Returns:
             The return values of the ``_put_file()`` calls, as in fsspec.
         """
+        lpath, rpath = self._sync_fs._stringify_paths(lpath), self._sync_fs._stringify_paths(rpath)
         pairs = await self._thread_pool.run(
             self._sync_fs._put_pairs, lpath, rpath, recursive=recursive, maxdepth=maxdepth, **kwargs
         )
@@ -935,6 +960,8 @@ class AioS3FileSystem(AsyncFileSystem):
         Returns:
             The return values of the ``_pipe_file()`` calls, as in fsspec.
         """
+        if not isinstance(path, dict):
+            path = stringify_path(path)
         return await _S3BatchTasks().run(
             super()._pipe(path, value, batch_size=batch_size, **kwargs)
         )
@@ -1005,7 +1032,13 @@ class AioS3FileSystem(AsyncFileSystem):
         )
 
     async def _cp_file(
-        self, path1: str, path2: str, recursive=False, maxdepth=None, on_error=None, **kwargs
+        self,
+        path1: str | os.PathLike[str],
+        path2: str | os.PathLike[str],
+        recursive=False,
+        maxdepth=None,
+        on_error=None,
+        **kwargs,
     ) -> None:
         """Copy an S3 object, using async parallel multipart upload for large files.
 
@@ -1025,6 +1058,7 @@ class AioS3FileSystem(AsyncFileSystem):
             ValueError: If trying to copy to a versioned file or copy buckets.
         """
         _S3BatchTasks.track()
+        path1, path2 = stringify_path(path1), stringify_path(path2)
         await self._copy_file(path1, path2, **kwargs)
 
     async def _copy_file(self, path1: str, path2: str, **kwargs) -> bool:
@@ -1216,7 +1250,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
     async def _find(
         self,
-        path: str,
+        path: str | os.PathLike[str],
         maxdepth: int | None = None,
         withdirs: bool = False,
         **kwargs,
@@ -1228,6 +1262,95 @@ class AioS3FileSystem(AsyncFileSystem):
         if detail:
             return {f.name: f for f in files}
         return [f.name for f in files]
+
+    async def _glob(self, path, maxdepth=None, **kwargs):
+        """Find the paths that a glob pattern matches, as fsspec's ``_glob()`` does.
+
+        Args:
+            path: The glob pattern, as a string or an ``os.PathLike``.
+            maxdepth: Maximum depth of a ``**`` pattern.
+            **kwargs: Additional arguments passed to ``_find()``.
+
+        Returns:
+            The matching paths, or a dict of their info with ``detail=True``.
+        """
+        return await super()._glob(stringify_path(path), maxdepth=maxdepth, **kwargs)
+
+    def tree(
+        self,
+        path: str | os.PathLike[str] = "/",
+        recursion_limit: int = 2,
+        max_display: int = 25,
+        display_size: bool = False,
+        prefix: str = "",
+        is_last: bool = True,
+        first: bool = True,
+        indent_size: int = 4,
+    ) -> str:
+        """Return a tree of the paths below a path, as fsspec's ``tree()`` does.
+
+        Args:
+            path: The root path, as a string or an ``os.PathLike``.
+            recursion_limit: Maximum depth of the tree.
+            max_display: Maximum number of entries shown per directory.
+            display_size: Whether to show the sizes of the files.
+            prefix: The prefix of each line.
+            is_last: Whether the path is the last entry of its directory.
+            first: Whether the path is the root of the tree.
+            indent_size: Number of spaces per level.
+
+        Returns:
+            The tree as a string.
+        """
+        return cast(
+            str,
+            super().tree(
+                stringify_path(path),
+                recursion_limit=recursion_limit,
+                max_display=max_display,
+                display_size=display_size,
+                prefix=prefix,
+                is_last=is_last,
+                first=first,
+                indent_size=indent_size,
+            ),
+        )
+
+    def get_mapper(
+        self,
+        root: str | os.PathLike[str] = "",
+        check: bool = False,
+        create: bool = False,
+        missing_exceptions=None,
+    ):
+        """Return a key/value store at a path, as fsspec's ``get_mapper()`` does.
+
+        Args:
+            root: The root path of the store, as a string or an ``os.PathLike``.
+            check: Whether to check that the root is writable.
+            create: Whether to create the root if it does not exist.
+            missing_exceptions: The exceptions that mean a missing key.
+
+        Returns:
+            The ``fsspec.mapping.FSMap`` of the root.
+        """
+        return super().get_mapper(
+            stringify_path(root),
+            check=check,
+            create=create,
+            missing_exceptions=missing_exceptions,
+        )
+
+    def unstrip_protocol(self, name: str | os.PathLike[str]) -> str:
+        """Add the protocol to a path, as fsspec's ``unstrip_protocol()`` does.
+
+        Args:
+            name: The path, as a string or an ``os.PathLike``.
+
+        Returns:
+            The path with the ``s3://`` protocol.
+        """
+        return cast(str, super().unstrip_protocol(stringify_path(name)))
 
     async def _expand_path(self, path, recursive=False, maxdepth=None, **kwargs) -> list[str]:
         """Expand glob patterns and directories into the paths they match.
@@ -1294,7 +1417,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
     async def open_async(
         self,
-        path: str,
+        path: str | os.PathLike[str],
         mode: str = "rb",
         block_size: int | None = None,
         max_workers: int | None = None,
@@ -1368,10 +1491,10 @@ class AioS3FileSystem(AsyncFileSystem):
             executor=self._thread_pool,
         )
 
-    async def _rmdir(self, path: str) -> None:
+    async def _rmdir(self, path: str | os.PathLike[str]) -> None:
         await self._thread_pool.run(self._sync_fs.rmdir, path)
 
-    def rmdir(self, path: str) -> None:
+    def rmdir(self, path: str | os.PathLike[str]) -> None:
         """Remove an S3 bucket, which must be empty.
 
         See :meth:`S3FileSystem.rmdir`.
@@ -1381,7 +1504,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         self._sync_fs.rmdir(path)
 
-    def sign(self, path: str, expiration: int = 3600, **kwargs) -> str:
+    def sign(self, path: str | os.PathLike[str], expiration: int = 3600, **kwargs) -> str:
         """Generate a presigned URL for S3 object access.
 
         See :meth:`S3FileSystem.sign`.
@@ -1396,7 +1519,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return cast(str, self._sync_fs.sign(path, expiration=expiration, **kwargs))
 
-    def metadata(self, path: str, **kwargs) -> S3Metadata:
+    def metadata(self, path: str | os.PathLike[str], **kwargs) -> S3Metadata:
         """Return the metadata of the path.
 
         See :meth:`S3FileSystem.metadata`.
@@ -1410,7 +1533,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return self._sync_fs.metadata(path, **kwargs)
 
-    def getxattr(self, path: str, attr_name: str, **kwargs) -> str | None:
+    def getxattr(self, path: str | os.PathLike[str], attr_name: str, **kwargs) -> str | None:
         """Get an attribute from the user-defined metadata of the path.
 
         See :meth:`S3FileSystem.getxattr`.
@@ -1425,7 +1548,9 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return self._sync_fs.getxattr(path, attr_name, **kwargs)
 
-    def setxattr(self, path: str, copy_kwargs: dict[str, Any] | None = None, **kwargs) -> None:
+    def setxattr(
+        self, path: str | os.PathLike[str], copy_kwargs: dict[str, Any] | None = None, **kwargs
+    ) -> None:
         """Set the user-defined metadata of the path.
 
         See :meth:`S3FileSystem.setxattr`.
@@ -1439,7 +1564,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         self._sync_fs.setxattr(path, copy_kwargs=copy_kwargs, **kwargs)
 
-    def get_tags(self, path: str) -> dict[str, str]:
+    def get_tags(self, path: str | os.PathLike[str]) -> dict[str, str]:
         """Retrieve the tag key/values for the given path.
 
         See :meth:`S3FileSystem.get_tags`.
@@ -1452,7 +1577,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return self._sync_fs.get_tags(path)
 
-    def put_tags(self, path: str, tags: dict[str, str], mode: str = "o") -> None:
+    def put_tags(self, path: str | os.PathLike[str], tags: dict[str, str], mode: str = "o") -> None:
         """Set the tags for the given existing key.
 
         See :meth:`S3FileSystem.put_tags`.
@@ -1464,7 +1589,9 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         self._sync_fs.put_tags(path, tags, mode=mode)
 
-    def chmod(self, path: str, acl: str, recursive: bool = False, **kwargs) -> None:
+    def chmod(
+        self, path: str | os.PathLike[str], acl: str, recursive: bool = False, **kwargs
+    ) -> None:
         """Set the canned ACL of a bucket or key.
 
         See :meth:`S3FileSystem.chmod`.
@@ -1479,7 +1606,7 @@ class AioS3FileSystem(AsyncFileSystem):
         self._sync_fs.chmod(path, acl, recursive=recursive, **kwargs)
 
     def object_version_info(
-        self, path: str, delete_markers: bool = False, **kwargs
+        self, path: str | os.PathLike[str], delete_markers: bool = False, **kwargs
     ) -> list[S3ObjectVersion]:
         """List the versions of the object or of the objects under the path.
 
@@ -1495,7 +1622,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return self._sync_fs.object_version_info(path, delete_markers=delete_markers, **kwargs)
 
-    def list_multipart_uploads(self, path: str) -> list[S3MultipartUpload]:
+    def list_multipart_uploads(self, path: str | os.PathLike[str]) -> list[S3MultipartUpload]:
         """List in-progress (incomplete) multipart uploads in a bucket.
 
         See :meth:`S3FileSystem.list_multipart_uploads`.
@@ -1508,7 +1635,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return self._sync_fs.list_multipart_uploads(path)
 
-    def clear_multipart_uploads(self, path: str) -> None:
+    def clear_multipart_uploads(self, path: str | os.PathLike[str]) -> None:
         """Abort any incomplete multipart uploads in the bucket.
 
         See :meth:`S3FileSystem.clear_multipart_uploads`.
@@ -1518,7 +1645,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         self._sync_fs.clear_multipart_uploads(path)
 
-    def checksum(self, path: str, **kwargs) -> int:
+    def checksum(self, path: str | os.PathLike[str], **kwargs) -> int:
         """Get the checksum of an S3 object or directory.
 
         See :meth:`S3FileSystem.checksum`.
@@ -1532,7 +1659,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return cast(int, self._sync_fs.checksum(path, **kwargs))
 
-    def created(self, path: str) -> datetime:
+    def created(self, path: str | os.PathLike[str]) -> datetime:
         """Return the creation time of the path.
 
         See :meth:`S3FileSystem.created`.
@@ -1545,7 +1672,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return self._sync_fs.created(path)
 
-    def modified(self, path: str) -> datetime:
+    def modified(self, path: str | os.PathLike[str]) -> datetime:
         """Return the last-modified time of the path.
 
         See :meth:`S3FileSystem.modified`.
@@ -1558,7 +1685,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return self._sync_fs.modified(path)
 
-    def invalidate_cache(self, path: str | None = None) -> None:
+    def invalidate_cache(self, path: str | os.PathLike[str] | None = None) -> None:
         """Remove the cached entries of the path and its parent paths.
 
         See :meth:`S3FileSystem.invalidate_cache`.
@@ -1568,10 +1695,14 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         self._sync_fs.invalidate_cache(path)
 
-    async def _touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
+    async def _touch(
+        self, path: str | os.PathLike[str], truncate: bool = True, **kwargs
+    ) -> dict[str, Any]:
         return await self._thread_pool.run(self._sync_fs.touch, path, truncate=truncate, **kwargs)
 
-    def touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
+    def touch(
+        self, path: str | os.PathLike[str], truncate: bool = True, **kwargs
+    ) -> dict[str, Any]:
         """Create an empty object with PutObject.
 
         See :meth:`S3FileSystem.touch`.

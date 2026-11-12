@@ -1759,3 +1759,114 @@ class LocalBucketFileSystem(DirFileSystem):
 
     def close(self):
         """Do nothing, as PyAthena's filesystems release their idle threads here."""
+
+
+class OpaquePath:
+    """An ``os.PathLike`` path whose ``str()`` is not the path.
+
+    A method that uses ``str()`` of a path instead of converting it as an
+    ``os.PathLike`` fails with it, as with any ``os.PathLike`` class that
+    does not define ``__str__``.
+    """
+
+    def __init__(self, path):
+        """Initialize the path.
+
+        Args:
+            path: The path string.
+        """
+        self._path = path
+
+    def __fspath__(self):
+        """Return the path string.
+
+        Returns:
+            The path string.
+        """
+        return self._path
+
+
+def serve_s3_keys(fs, keys):
+    """Answer the S3 requests of a filesystem from a set of keys of "bucket".
+
+    The requests may come from several threads at once. Signing sends no
+    request, so the arguments of a presigned URL are recorded as one.
+
+    Args:
+        fs: The ``S3FileSystem``.
+        keys: The keys of the objects in "bucket".
+
+    Returns:
+        The set of the keys, which the writes and deletions change, and the
+        list of the operation name and the parameters of each request.
+    """
+    store = set(keys)
+    requests = []
+    lock = threading.Lock()
+
+    def call(method, **request):
+        with lock:
+            return answer(method if isinstance(method, str) else method.__name__, request)
+
+    def answer(name, request):
+        requests.append((name, request))
+        key = request.get("Key")
+        if name == "head_bucket" and request["Bucket"] != "bucket":
+            raise FileNotFoundError(request["Bucket"])
+        if name == "head_object":
+            if key not in store:
+                raise FileNotFoundError(key)
+            return {
+                "ContentLength": 2,
+                "ETag": '"e"',
+                "LastModified": datetime(2026, 1, 1, tzinfo=UTC),
+                "Metadata": {"m": "1"},
+            }
+        if name == "get_object":
+            return {"Body": io.BytesIO(b"aa"), "ContentLength": 2, "ETag": '"e"'}
+        if name == "list_objects_v2":
+            prefix, delimiter = request.get("Prefix", ""), request.get("Delimiter")
+            listed = sorted(k for k in list(store) if k.startswith(prefix))
+            directories = sorted(
+                {
+                    prefix + k[len(prefix) :].split(delimiter)[0] + delimiter
+                    for k in listed
+                    if delimiter and delimiter in k[len(prefix) :]
+                }
+            )
+            files = [k for k in listed if not delimiter or delimiter not in k[len(prefix) :]]
+            return {
+                "Contents": [{"Key": k, "Size": 2, "ETag": '"e"'} for k in files],
+                "CommonPrefixes": [{"Prefix": d} for d in directories],
+                "KeyCount": len(files) + len(directories),
+            }
+        if name == "copy_object" and request["CopySource"]["Key"] not in store:
+            raise FileNotFoundError(request["CopySource"]["Key"])
+        if name in {"put_object", "copy_object"}:
+            store.add(key)
+            return {"ETag": '"e"'}
+        if name == "delete_object":
+            store.discard(key)
+        if name == "delete_objects":
+            deleted = [o["Key"] for o in request["Delete"]["Objects"]]
+            store.difference_update(deleted)
+            return {"Deleted": [{"Key": k} for k in deleted]}
+        if name == "get_object_tagging":
+            return {"TagSet": [{"Key": "a", "Value": "1"}]}
+        if name == "list_object_versions":
+            return {
+                "Versions": [{"Key": "key", "VersionId": "v1", "IsLatest": False}],
+                "DeleteMarkers": [{"Key": "key", "VersionId": "m1", "IsLatest": True}],
+            }
+        if name == "list_multipart_uploads":
+            return {"Uploads": [{"Key": "dir/a", "UploadId": "u1"}]}
+        return {}
+
+    def generate_presigned_url(*args, **kwargs):
+        with lock:
+            requests.append(("generate_presigned_url", {"args": args, **kwargs}))
+        return "https://signed"
+
+    fs._call = fs._core.call = call
+    fs.core.generate_presigned_url = generate_presigned_url
+    return store, requests
