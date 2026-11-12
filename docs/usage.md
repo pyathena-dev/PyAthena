@@ -822,12 +822,13 @@ fs = S3FileSystem(
 
 botocore also reads them from the `AWS_REQUEST_CHECKSUM_CALCULATION` and `AWS_RESPONSE_CHECKSUM_VALIDATION` environment variables and from the shared AWS config file.
 
-A PutObject or UploadPart request that sets a checksum algorithm or value, such as `ChecksumAlgorithm="SHA256"` or `ChecksumSHA256`, carries that checksum with either setting.
-For the other PutObject and UploadPart requests, `request_checksum_calculation="when_supported"` makes the client compute a CRC32 checksum of the body and send it with the request.
+A PutObject or UploadPart request that sets `ChecksumAlgorithm`, such as `ChecksumAlgorithm="SHA256"`, or a checksum value, such as `ChecksumSHA256`, carries that checksum with either setting.
+For the other PutObject and UploadPart requests, also those that set `ContentMD5`, `request_checksum_calculation="when_supported"` makes the client compute a CRC32 checksum of the body and send it with the request.
 S3 checks the received data against it and stores it with an object written by PutObject.
 With `"when_required"`, the client computes checksums only for the operations that require one, such as DeleteObjects.
 Those PutObject and UploadPart requests then include the SHA-256 hash of their body in their signature, which S3 also checks against the received data.
-They do not if they set `ContentMD5`, which S3 checks instead, if the client sends unsigned requests, such as `S3FileSystem(anon=True)`, or if its `s3` options set `payload_signing_enabled` to `False`.
+Over HTTPS, the client leaves the hash out of a request that sets `ContentMD5`, which S3 checks instead, unless its `s3` options set `payload_signing_enabled` to `True`.
+It also leaves the hash out if its `s3` options set `payload_signing_enabled` to `False` or if it sends unsigned requests, such as `S3FileSystem(anon=True)`.
 
 With `response_checksum_validation="when_supported"`, the client requests the checksum of the object with every GetObject request.
 It validates the body it reads when the response carries a full-object checksum of an algorithm that botocore supports, and reads the body without validation otherwise, such as with the composite checksum of an object uploaded in parts.
