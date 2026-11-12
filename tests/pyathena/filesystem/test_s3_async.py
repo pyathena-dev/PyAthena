@@ -49,6 +49,7 @@ from tests.pyathena.util import (
     interrupt_each_opcode,
     mock_connection,
     overlapping_calls,
+    poll_until,
     retried,
     run_bounded,
     run_in_forked_child,
@@ -1822,6 +1823,34 @@ class TestAioS3FileSystem:
             release.set()
         assert requests == ["create_multipart_upload", "upload_part", "abort_multipart_upload"]
 
+    @staticmethod
+    def _held_until_stopped(state, result=None):
+        # Return a blocking call that records in state that it started, is
+        # held until a stop scope of its thread stops, then 0.2 s longer, so
+        # that a caller that does not wait for it returns first, and records
+        # that it was stopped and ended. A call that is never stopped ends
+        # after EVENT_TIMEOUT without being recorded as stopped.
+        lock = threading.Lock()
+
+        def call(*args, **kwargs):
+            with lock:
+                state["started"] += 1
+            deadline = time.monotonic() + EVENT_TIMEOUT
+            while time.monotonic() < deadline:
+                try:
+                    raise_if_stopped("continue")
+                except CancelledError:
+                    with lock:
+                        state["stopped"] += 1
+                    time.sleep(0.2)
+                    break
+                time.sleep(0.01)
+            with lock:
+                state["ended"] += 1
+            return result
+
+        return call
+
     @pytest.mark.parametrize("shutdown", [False, True])
     @pytest.mark.parametrize(
         "method", ["_cat", "_cat_ranges", "_pipe", "_put", "_get", "_copy", "_mv"]
@@ -1835,34 +1864,15 @@ class TestAioS3FileSystem:
         # not cancelled again, which would stop its wait.
         fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
-        release = threading.Event()
-        lock = threading.Lock()
         state = {"started": 0, "ended": 0, "stopped": 0}
-
-        def blocking(result):
-            def call(*args, **kwargs):
-                with lock:
-                    state["started"] += 1
-                release.wait(EVENT_TIMEOUT)
-                try:
-                    raise_if_stopped("continue")
-                except CancelledError:
-                    with lock:
-                        state["stopped"] += 1
-                with lock:
-                    state["ended"] += 1
-                return result
-
-            return call
-
         sources = ["s3://bucket/a", "s3://bucket/b"]
         destinations = ["s3://bucket/c", "s3://bucket/d"]
         local = [str(tmp_path / "a"), str(tmp_path / "b")]
-        sync_fs.cat_file = blocking(b"")
-        sync_fs.pipe_file = blocking(None)
-        sync_fs.put_file = blocking(None)
-        sync_fs.get_file = blocking(None)
-        sync_fs.info = blocking({"name": "bucket/a", "type": "file", "size": 0})
+        sync_fs.cat_file = self._held_until_stopped(state, b"")
+        sync_fs.pipe_file = sync_fs.put_file = sync_fs.get_file = self._held_until_stopped(state)
+        sync_fs.info = self._held_until_stopped(
+            state, {"name": "bucket/a", "type": "file", "size": 0}
+        )
         sync_fs._move_pairs = mock.MagicMock(
             return_value=list(zip(sources, destinations, strict=True))
         )
@@ -1881,21 +1891,14 @@ class TestAioS3FileSystem:
             await wait_until(lambda: state["started"] == 2)
             if shutdown:
                 # asyncio.run() cancels the batch and its calls once main()
-                # has returned.
-                threading.Timer(0.2, release.set).start()
+                # has returned, and returns once they have ended.
                 return
             task.cancel()
-            done, _ = await asyncio.wait([task], timeout=0.1)
-            assert not done
-            release.set()
             with pytest.raises(asyncio.CancelledError):
                 await await_bounded(task)
             assert state["ended"] == 2
 
-        try:
-            run_bounded(main)
-        finally:
-            release.set()
+        run_bounded(main)
         assert state == {"started": 2, "ended": 2, "stopped": 2}
 
     @pytest.mark.parametrize("method", ["_pipe", "_put", "_get"])
@@ -1906,23 +1909,15 @@ class TestAioS3FileSystem:
         # commit, after the failure was raised.
         fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
-        release = threading.Event()
-        lock = threading.Lock()
         state = {"started": 0, "ended": 0, "stopped": 0}
+        held = self._held_until_stopped(state)
 
         def call(source, *args, **kwargs):
             if source.endswith("/a"):
+                # Once the other call has started.
+                poll_until(lambda: state["started"] == 1, "the other call did not start")
                 raise ValueError("failed")
-            with lock:
-                state["started"] += 1
-            release.wait(EVENT_TIMEOUT)
-            try:
-                raise_if_stopped("continue")
-            except CancelledError:
-                with lock:
-                    state["stopped"] += 1
-            with lock:
-                state["ended"] += 1
+            return held(source, *args, **kwargs)
 
         sync_fs.pipe_file = sync_fs.put_file = sync_fs.get_file = call
         sources = ["s3://bucket/b", "s3://bucket/a"]
@@ -1934,19 +1929,11 @@ class TestAioS3FileSystem:
         }
 
         async def main():
-            task = asyncio.ensure_future(batches[method]())
-            await wait_until(lambda: state["started"] == 1)
-            done, _ = await asyncio.wait([task], timeout=0.1)
-            assert not done
-            release.set()
             with pytest.raises(ValueError, match="failed"):
-                await await_bounded(task)
+                await await_bounded(batches[method]())
             assert state == {"started": 1, "ended": 1, "stopped": 1}
 
-        try:
-            run_bounded(main)
-        finally:
-            release.set()
+        run_bounded(main)
 
     @pytest.mark.asyncio
     async def test_put_recursive_creates_no_directories(self, tmp_path):
