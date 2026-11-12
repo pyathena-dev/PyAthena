@@ -44,6 +44,7 @@ from pyathena.filesystem.s3_object import (
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.filesystem.s3_writer import _S3WriteSession, _S3WriteState
+from pyathena.util import retries_stopped
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -118,13 +119,16 @@ class _S3BatchTasks:
 class _S3TransactionWrite:
     """A write of a file of an ``AioS3FileSystem`` transaction, which a cancellation discards.
 
-    The write opens its file with :meth:`open`, which adds it to the
-    transaction unless the write has been cancelled. Once the write is
-    cancelled, its file is dropped from the transaction, so that the
-    transaction cannot commit it, and it is discarded once the write has
-    ended: by the thread of the write if the write was still running when
-    it was cancelled, and otherwise by the cancelled coroutine, after
-    :meth:`cancel`.
+    The write runs with :meth:`run` in a thread of the filesystem, through
+    :meth:`S3Executor.run() <pyathena.filesystem.s3_executor.S3Executor.run>`,
+    whose cancellation stops the stop scope of the write, and opens its file
+    with :meth:`open`, which adds the file to the transaction unless the
+    write has been stopped. A write that ends stopped drops its file from
+    the transaction and discards it, so that the wait of the cancelled
+    coroutine for the write includes the discard. The coroutine calls
+    :meth:`cancel` once the cancellation has been raised, which drops the
+    file from the transaction also when the write had ended before it was
+    stopped, and then discards it.
 
     Args:
         fs: The filesystem, which is in a transaction.
@@ -149,18 +153,23 @@ class _S3TransactionWrite:
         self._ended = False
 
     def run(self) -> None:
-        """Run the write, and discard its file if it was cancelled while running."""
+        """Run the write, and drop and discard its file if it ends stopped."""
         try:
             self._write(self.open)
         finally:
             with self._lock:
                 self._ended = True
-                cancelled = self._cancelled
-            if cancelled:
+                stopped = self._cancelled or retries_stopped()
+                if stopped:
+                    self._cancelled = True
+                    # Also here, for a write that a scope other than the
+                    # cancellation of the coroutine has stopped.
+                    self._detach_all()
+            if stopped:
                 self.discard()
 
     def open(self, path: str, mode: str, **kwargs) -> S3File:
-        """Open the file of the write, which joins the transaction unless the write was cancelled.
+        """Open the file of the write, which joins the transaction unless the write is stopped.
 
         Args:
             path: S3 path (s3://bucket/key) of the file.
@@ -179,7 +188,7 @@ class _S3TransactionWrite:
             self._files.append(file)
             # Under the lock, so that a cancellation either finds the file
             # in the transaction or keeps it out.
-            if not autocommit and not self._cancelled:
+            if not autocommit and not self._cancelled and not retries_stopped():
                 self._transaction.files.append(file)
         return file
 
@@ -187,16 +196,15 @@ class _S3TransactionWrite:
         """Drop the file of the write from the transaction.
 
         Returns:
-            Whether the write has ended, in which case the caller discards
-            the file with :meth:`discard`; otherwise the thread of the write
-            discards it when the write ends.
+            Whether the write ended before it was stopped, in which case
+            the caller discards the file with :meth:`discard`; otherwise the
+            thread of the write discards it when the write ends, or has.
         """
         with self._lock:
+            ended_unstopped = self._ended and not self._cancelled
             self._cancelled = True
-            for file in self._files:
-                with contextlib.suppress(ValueError):
-                    self._transaction.files.remove(file)
-            return self._ended
+            self._detach_all()
+            return ended_unstopped
 
     def discard(self) -> None:
         """Discard the file of the write.
@@ -211,6 +219,20 @@ class _S3TransactionWrite:
                 file.discard()
             except Exception:
                 _logger.exception(f"Failed to discard the cancelled write to s3://{file.path}.")
+
+    def _detach_all(self) -> None:
+        """Drop the files of the write from the transaction; called under the lock."""
+        for file in self._files:
+            while True:
+                try:
+                    self._transaction.files.remove(file)
+                except ValueError:
+                    break
+                except (IndexError, RuntimeError):
+                    # Another write changed the transaction during the search,
+                    # which compares the files with their __eq__().
+                    continue
+                break
 
 
 class AioS3FileSystem(AsyncFileSystem):
@@ -393,30 +415,23 @@ class AioS3FileSystem(AsyncFileSystem):
         """Run a write of a file of this filesystem's transaction in a thread of the filesystem.
 
         A cancellation keeps the file out of the transaction, which would
-        otherwise commit it, and discards it once the write has ended: a
-        write whose last part was running when it was cancelled has nothing
-        left that its stop would skip. See :class:`_S3TransactionWrite`.
-        After a repeated cancellation, the discard runs without being waited
-        for.
+        otherwise commit it, and discards it: a write whose last part was
+        running when it was cancelled has nothing left that its stop would
+        skip. A write that the cancellation stops discards its file before
+        it ends, which the cancellation waits for; the file of a write that
+        ended before is discarded in a thread of the filesystem without
+        being waited for. See :class:`_S3TransactionWrite`.
 
         Args:
             write: The write, which opens its file with the callable that it
                 receives, which takes the arguments of ``open()``.
         """
-        task = asyncio.current_task()
-        cancellations = task.cancelling() if task is not None else 0
         transaction_write = _S3TransactionWrite(self, write)
         try:
             await self._thread_pool.run(transaction_write.run)
         except asyncio.CancelledError:
             if transaction_write.cancel():
-                if task is not None and task.cancelling() > cancellations + 1:
-                    # A repeated cancellation, which stopped the wait for the
-                    # write, does not wait for the discard either.
-                    self._thread_pool.submit(transaction_write.discard)
-                else:
-                    # A repeated cancellation does not stop the discard.
-                    await self._thread_pool.run_shielded(transaction_write.discard)
+                self._thread_pool.submit(transaction_write.discard)
             raise
 
     def _pipe_file_in_transaction(
