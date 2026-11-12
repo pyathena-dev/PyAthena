@@ -8961,7 +8961,7 @@ class TestS3File:
         #   thread of the pool, while the first part is queued behind it.
         # A close handed over to another thread starts only once the
         # finalization has returned, after the collector has finalized the
-        # buffer of the file. Returns the files whose close was handed over.
+        # buffer of the file. Returns the files closed by `_close_collected`.
         holder = []
         ready = threading.Event()
         finalized = threading.Event()
@@ -8998,7 +8998,8 @@ class TestS3File:
 
         def close_after_finalization(file, complete):
             closes.append(file)
-            assert finalized.wait(EVENT_TIMEOUT)
+            if threading.current_thread().name.startswith("pyathena-close-"):
+                assert finalized.wait(EVENT_TIMEOUT)
             close_collected(file, complete)
 
         gc.disable()
@@ -9096,13 +9097,21 @@ class TestS3File:
         fs.core.complete_multipart_upload.assert_not_called()
         assert "buffer was finalized" in caplog.text
 
-    def test_finalized_unclosed_file_without_thread(self, caplog):
-        # GH-1364: if no thread can be started for the close of a file
-        # finalized in a thread of the request pool, as during interpreter
-        # finalization, the file is left unclosed, and its data uncommitted,
-        # rather than closed in the pool, where it would wait forever.
+    @pytest.mark.parametrize("finalizing", [False, True])
+    def test_finalized_unclosed_file_without_thread(self, caplog, finalizing):
+        # GH-1364: if no thread can be started for the close of a finalized
+        # file, it is left unclosed, and its data uncommitted, rather than
+        # closed where it would wait forever, here in the thread of the
+        # request pool with its first part queued behind it. During
+        # interpreter finalization, when no other thread runs requests, it is
+        # closed in the finalizing thread instead, without starting a thread.
         fs = self._make_append_fs(b"")
         fs._request_pool = S3ThreadPool(1)
+        committers = []
+        fs.core.complete_multipart_upload.side_effect = lambda *args, **kwargs: (
+            committers.append(threading.current_thread()),
+            mock.DEFAULT,
+        )[1]
         start = threading.Thread.start
 
         def start_unless_closing(thread):
@@ -9113,13 +9122,18 @@ class TestS3File:
         try:
             with (
                 mock.patch.object(threading.Thread, "start", start_unless_closing),
+                mock.patch.object(sys, "is_finalizing", return_value=finalizing),
                 caplog.at_level(logging.WARNING, logger="pyathena.filesystem.s3"),
             ):
-                self._finalize_unclosed_file(fs, "queued part")
+                self._finalize_unclosed_file(fs, "collection" if finalizing else "queued part")
         finally:
             shutdown_bounded(fs._request_pool)
-        fs.core.complete_multipart_upload.assert_not_called()
-        assert "no thread could be started" in caplog.text
+        if finalizing:
+            assert self._uploaded_object(fs, b"") == b"abcde"
+            assert committers == [threading.current_thread()]
+        else:
+            fs.core.complete_multipart_upload.assert_not_called()
+            assert "no thread could be started" in caplog.text
 
     @pytest.mark.parametrize("autocommit", [True, False])
     def test_upload_chunk_multipart(self, autocommit):

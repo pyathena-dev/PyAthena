@@ -212,10 +212,9 @@ closed is closed when it is finalized, which commits its written data unless
 - When the cyclic garbage collector finalizes it, or it is finalized in a thread of an
   `S3ThreadPool`, it is closed in a new thread after the finalization returns. If the
   collector has finalized its write buffer first, its data is not committed, and its
-  multipart upload is aborted. If no thread can be started, as during interpreter
-  finalization, the file is left unclosed and its multipart upload incomplete.
-- During interpreter shutdown, a file whose last part can no longer be submitted is
-  closed without committing it, and its multipart upload is aborted.
+  multipart upload is aborted. During interpreter finalization, the file is closed in
+  the finalizing thread instead. If a thread cannot be started otherwise, the file is
+  left unclosed and its multipart upload incomplete.
 
 A file opened in text mode writes its remaining text to the file in the thread that
 finalizes it, before the file is closed.

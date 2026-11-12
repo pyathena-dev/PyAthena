@@ -4325,6 +4325,10 @@ class S3File(AbstractBufferedFile):
         if not self.closed and S3File._in_collection():
             self._close_later()
             return
+        self._close()
+
+    def _close(self) -> None:
+        """Close the file in this thread, flushing any written data, and shut down its executor."""
         try:
             super().close()
         finally:
@@ -4382,9 +4386,12 @@ class S3File(AbstractBufferedFile):
         closes it. If the buffer is already closed, the data is incomplete,
         so the write is discarded instead of committed. The thread runs with
         an empty context, so that the stop scopes of the collecting thread do
-        not stop the requests of the file. If no thread can be started, as
-        during interpreter finalization, the file is left unclosed rather
-        than closed in this thread.
+        not stop the requests of the file. During interpreter finalization,
+        when a started thread never runs, the file is closed in this thread,
+        as no other thread runs requests then and the pools take no more
+        calls. If no thread can be started otherwise, the file is left
+        unclosed rather than closed in this thread, where it could wait
+        forever.
         """
         if getattr(self, "_closing_later", False):
             return
@@ -4397,6 +4404,10 @@ class S3File(AbstractBufferedFile):
                 buffer = BytesIO(self.buffer.getvalue())
                 buffer.seek(self.buffer.tell())
                 self.buffer = buffer
+        if sys.is_finalizing():
+            # Python 3.11 waits forever in Thread.start() here.
+            self._close_collected(complete)
+            return
         try:
             threading.Thread(
                 target=contextvars.Context().run,
@@ -4418,7 +4429,7 @@ class S3File(AbstractBufferedFile):
         """
         try:
             if complete:
-                self.close()
+                self._close()
             else:
                 _logger.warning(
                     f"s3://{self.bucket}/{self.key} was not closed, and its buffer was "
