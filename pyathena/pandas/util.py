@@ -21,6 +21,7 @@ from typing import (
 from boto3 import Session
 
 from pyathena import OperationalError
+from pyathena.cursor import Cursor
 from pyathena.model import AthenaCompression
 from pyathena.util import RetryConfig, parse_output_location, retry_api_call
 
@@ -28,7 +29,6 @@ if TYPE_CHECKING:
     from pandas import DataFrame, Series
 
     from pyathena.connection import Connection
-    from pyathena.cursor import Cursor
 
 _logger = logging.getLogger(__name__)
 # The characters that pyarrow's Spark flavor replaces with "_" in column names, as
@@ -227,6 +227,12 @@ def to_sql(
     uploads start. They are not refreshed during the uploads, so an upload
     that runs past their expiry fails.
 
+    The SQL statements run on a ``pyathena.cursor.Cursor``, whatever the connection's
+    cursor class is, with the connection's query settings, such as ``work_group``,
+    except that the existence check never reuses a query result; the connection's
+    ``converter`` and the options of its cursor class, such as ``unload`` and
+    ``arraysize``, do not apply.
+
     Args:
         df: The DataFrame to write to Athena.
         name: Name of the table to create.
@@ -274,36 +280,39 @@ def to_sql(
     bucket = conn.session.resource(
         "s3", region_name=conn.region_name, config=conn.s3_config, **conn._s3_client_kwargs
     ).Bucket(bucket_name)
-    cursor = conn.cursor()
 
     # Athena stores identifiers in lowercase and information_schema reports them
     # that way, so compare lowercase literals.
     schema_literal = schema.lower().replace("'", "''")
     name_literal = name.lower().replace("'", "''")
-    table = cursor.execute(
-        textwrap.dedent(
-            f"""
-            SELECT table_name
-            FROM information_schema.tables
-            WHERE table_schema = '{schema_literal}'
-            AND table_name = '{name_literal}'
-            """
-        )
-    ).fetchall()
-    if if_exists == "fail":
-        if table:
-            raise OperationalError(f"Table `{schema}.{name}` already exists.")
-    elif if_exists == "replace" and table:
-        cursor.execute(
+    with conn._internal_cursor(Cursor) as cursor:
+        # The answer decides whether to drop the table, so it must reflect the
+        # catalog now and query result reuse is off.
+        table = cursor.execute(
             textwrap.dedent(
                 f"""
-                DROP TABLE `{schema}`.`{name}`
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = '{schema_literal}'
+                AND table_name = '{name_literal}'
                 """
+            ),
+            result_reuse_enable=False,
+        ).fetchall()
+        if if_exists == "fail":
+            if table:
+                raise OperationalError(f"Table `{schema}.{name}` already exists.")
+        elif if_exists == "replace" and table:
+            cursor.execute(
+                textwrap.dedent(
+                    f"""
+                    DROP TABLE `{schema}`.`{name}`
+                    """
+                )
             )
-        )
-        objects = bucket.objects.filter(Prefix=key_prefix)
-        if list(objects.limit(1)):
-            objects.delete()
+            objects = bucket.objects.filter(Prefix=key_prefix)
+            if list(objects.limit(1)):
+                objects.delete()
 
     if index:
         reset_index(df, index_label)
@@ -394,17 +403,18 @@ def to_sql(
         flavor=flavor,
     )
     _logger.info(ddl)
-    cursor.execute(ddl)
-    if partitions and repair_table:
-        for partition in partition_prefixes:
-            add_partition = textwrap.dedent(
-                f"""
-                ALTER TABLE `{schema}`.`{name}`
-                ADD IF NOT EXISTS PARTITION ({partition[0]}) LOCATION '{partition[1]}'
-                """
-            )
-            _logger.info(add_partition)
-            cursor.execute(add_partition)
+    with conn._internal_cursor(Cursor) as cursor:
+        cursor.execute(ddl)
+        if partitions and repair_table:
+            for partition in partition_prefixes:
+                add_partition = textwrap.dedent(
+                    f"""
+                    ALTER TABLE `{schema}`.`{name}`
+                    ADD IF NOT EXISTS PARTITION ({partition[0]}) LOCATION '{partition[1]}'
+                    """
+                )
+                _logger.info(add_partition)
+                cursor.execute(add_partition)
 
 
 def get_column_names_and_types(df: DataFrame, type_mappings) -> OrderedDict[str, str]:
