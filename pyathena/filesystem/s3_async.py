@@ -284,12 +284,56 @@ class AioS3FileSystem(AsyncFileSystem):
         if self._intrans:
             # The transaction belongs to this filesystem, not to the internal
             # S3FileSystem, so write through open() to defer the commit to it.
-            await self._thread_pool.run(self._pipe_file_in_transaction, path, value, mode, **kwargs)
+            await self._write_in_transaction(
+                functools.partial(self._pipe_file_in_transaction, path, value, mode, **kwargs)
+            )
             return
         await self._thread_pool.run(self._sync_fs.pipe_file, path, value, mode=mode, **kwargs)
 
+    async def _write_in_transaction(self, write: Callable[[list[S3File]], None]) -> None:
+        """Run a write of a file of this filesystem's transaction in a thread of the filesystem.
+
+        A cancellation discards the file once the write has ended, and drops
+        it from the transaction, which would otherwise commit it: a write
+        whose last part was running when it was cancelled has nothing left
+        that its stop would skip.
+
+        Args:
+            write: The write, which appends the file that it opens to the
+                list that it receives.
+        """
+        files: list[S3File] = []
+        try:
+            await self._thread_pool.run(write, files)
+        except asyncio.CancelledError:
+            # A repeated cancellation does not stop the discard.
+            await self._thread_pool.run_shielded(self._discard_transaction_files, files)
+            raise
+
+    def _discard_transaction_files(self, files: list[S3File]) -> None:
+        """Drop files from this filesystem's transaction and discard them.
+
+        A failed discard is logged instead of raised, so that the
+        cancellation that discarded the files is raised.
+
+        Args:
+            files: The files.
+        """
+        for file in files:
+            with contextlib.suppress(ValueError):
+                self.transaction.files.remove(file)
+            try:
+                file.discard()
+            except Exception:
+                _logger.exception(f"Failed to discard the cancelled write to s3://{file.path}.")
+
     def _pipe_file_in_transaction(
-        self, path: str, value: bytes | bytearray | memoryview, mode: str, **kwargs
+        self,
+        path: str,
+        value: bytes | bytearray | memoryview,
+        mode: str,
+        files: list[S3File],
+        **kwargs,
     ) -> None:
         """Write bytes into the path as a file of this filesystem's transaction.
 
@@ -300,6 +344,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 opened in ``xb`` mode: raise FileExistsError when the object
                 already exists, including one created before the
                 transaction is committed, which is not replaced.
+            files: The list to which the opened file is appended.
             **kwargs: Additional parameters passed to ``open()``, except
                 ``compression``, with which the value is compressed before
                 it is written, as in :meth:`S3FileSystem.pipe_file`.
@@ -317,7 +362,9 @@ class AioS3FileSystem(AsyncFileSystem):
         block_size = kwargs.get("block_size") or self._sync_fs.default_block_size
         # The size in bytes; the length of a memoryview counts its items.
         self.core.check_multipart_upload_size(memoryview(value).nbytes, block_size)
-        self.open(path, "xb" if mode == "create" else "wb", **kwargs)._write_and_close(value)
+        file = self.open(path, "xb" if mode == "create" else "wb", **kwargs)
+        files.append(file)
+        file._write_and_close(value)
 
     async def _put_file(
         self,
@@ -330,8 +377,10 @@ class AioS3FileSystem(AsyncFileSystem):
         _S3BatchTasks.track()
         if self._intrans:
             # See _pipe_file.
-            await self._thread_pool.run(
-                self._put_file_in_transaction, lpath, rpath, callback, mode, **kwargs
+            await self._write_in_transaction(
+                functools.partial(
+                    self._put_file_in_transaction, lpath, rpath, callback, mode, **kwargs
+                )
             )
             return
         await self._thread_pool.run(
@@ -339,7 +388,7 @@ class AioS3FileSystem(AsyncFileSystem):
         )
 
     def _put_file_in_transaction(
-        self, lpath: str, rpath: str, callback, mode: str, **kwargs
+        self, lpath: str, rpath: str, callback, mode: str, files: list[S3File], **kwargs
     ) -> None:
         """Upload a local file as a file of this filesystem's transaction.
 
@@ -354,6 +403,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 opened in ``xb`` mode: raise FileExistsError when the object
                 already exists, including one created before the
                 transaction is committed, which is not replaced.
+            files: The list to which the opened file is appended.
             **kwargs: Additional S3 parameters (e.g., ContentType, StorageClass).
                 The ``block_size``, ``max_workers``, and ``s3_additional_kwargs``
                 parameters of ``open()`` are also accepted.
@@ -383,13 +433,15 @@ class AioS3FileSystem(AsyncFileSystem):
 
         # See S3FileSystem.put_file.
         with open(lpath, "rb") as local:
-            self.open(
+            file = self.open(
                 rpath,
                 "xb" if mode == "create" else "wb",
                 block_size=block_size,
                 max_workers=max_workers,
                 s3_additional_kwargs=s3_additional_kwargs,
-            )._write_file_and_close(local, callback)
+            )
+            files.append(file)
+            file._write_file_and_close(local, callback)
         self.invalidate_cache(rpath)
 
     async def _get_file(self, rpath: str, lpath: str, callback=_DEFAULT_CALLBACK, **kwargs) -> None:
@@ -671,7 +723,7 @@ class AioS3FileSystem(AsyncFileSystem):
         batch_size=None,
         maxdepth=None,
         **kwargs,
-    ) -> None:
+    ) -> list[Any]:
         """Copy files from the local filesystem to S3.
 
         See :meth:`S3FileSystem.put`. The uploads run as in fsspec's
@@ -689,12 +741,15 @@ class AioS3FileSystem(AsyncFileSystem):
             batch_size: Number of uploads to run at the same time.
             maxdepth: Maximum depth of a recursive copy.
             **kwargs: Additional parameters passed to ``_put_file()``.
+
+        Returns:
+            The return values of the ``_put_file()`` calls, as in fsspec.
         """
         pairs = await self._thread_pool.run(
             self._sync_fs._put_pairs, lpath, rpath, recursive=recursive, maxdepth=maxdepth, **kwargs
         )
         files = [(lp, rp) for lp, rp in pairs if not os.path.isdir(lp)]
-        await _S3BatchTasks().run(
+        return await _S3BatchTasks().run(
             super()._put(
                 [lp for lp, _ in files],
                 [rp for _, rp in files],
@@ -704,7 +759,7 @@ class AioS3FileSystem(AsyncFileSystem):
             )
         )
 
-    async def _pipe(self, path, value=None, batch_size=None, **kwargs) -> None:
+    async def _pipe(self, path, value=None, batch_size=None, **kwargs) -> list[Any]:
         """Write bytes into one or more paths.
 
         See :meth:`S3FileSystem.pipe`. The writes run as in fsspec's
@@ -716,8 +771,13 @@ class AioS3FileSystem(AsyncFileSystem):
             value: The bytes to write when ``path`` is a path.
             batch_size: Number of writes to run at the same time.
             **kwargs: Additional parameters passed to ``_pipe_file()``.
+
+        Returns:
+            The return values of the ``_pipe_file()`` calls, as in fsspec.
         """
-        await _S3BatchTasks().run(super()._pipe(path, value, batch_size=batch_size, **kwargs))
+        return await _S3BatchTasks().run(
+            super()._pipe(path, value, batch_size=batch_size, **kwargs)
+        )
 
     async def _cat(self, path, recursive=False, on_error="raise", batch_size=None, **kwargs):
         """Read the contents of one or more paths.

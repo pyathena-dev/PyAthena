@@ -13,6 +13,7 @@ import warnings
 import weakref
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from types import SimpleNamespace
 from unittest import mock
 
@@ -1824,12 +1825,11 @@ class TestAioS3FileSystem:
         assert requests == ["create_multipart_upload", "upload_part", "abort_multipart_upload"]
 
     @staticmethod
-    def _held_until_stopped(state, result=None):
-        # Return a blocking call that records in state that it started, is
-        # held until a stop scope of its thread stops, then 0.2 s longer, so
-        # that a caller that does not wait for it returns first, and records
-        # that it was stopped and ended. A call that is never stopped ends
-        # after EVENT_TIMEOUT without being recorded as stopped.
+    def _held_until_stopped(state, release, result=None):
+        # Return a blocking call that records in state that it started, waits
+        # until a stop scope of its thread stops, records that, and then
+        # waits for release. A call that is never stopped ends after
+        # EVENT_TIMEOUT without being recorded as stopped.
         lock = threading.Lock()
 
         def call(*args, **kwargs):
@@ -1842,7 +1842,7 @@ class TestAioS3FileSystem:
                 except CancelledError:
                     with lock:
                         state["stopped"] += 1
-                    time.sleep(0.2)
+                    release.wait(EVENT_TIMEOUT)
                     break
                 time.sleep(0.01)
             with lock:
@@ -1865,13 +1865,15 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
         state = {"started": 0, "ended": 0, "stopped": 0}
+        release = threading.Event()
         sources = ["s3://bucket/a", "s3://bucket/b"]
         destinations = ["s3://bucket/c", "s3://bucket/d"]
         local = [str(tmp_path / "a"), str(tmp_path / "b")]
-        sync_fs.cat_file = self._held_until_stopped(state, b"")
-        sync_fs.pipe_file = sync_fs.put_file = sync_fs.get_file = self._held_until_stopped(state)
+        held = self._held_until_stopped(state, release)
+        sync_fs.cat_file = self._held_until_stopped(state, release, b"")
+        sync_fs.pipe_file = sync_fs.put_file = sync_fs.get_file = held
         sync_fs.info = self._held_until_stopped(
-            state, {"name": "bucket/a", "type": "file", "size": 0}
+            state, release, {"name": "bucket/a", "type": "file", "size": 0}
         )
         sync_fs._move_pairs = mock.MagicMock(
             return_value=list(zip(sources, destinations, strict=True))
@@ -1885,21 +1887,40 @@ class TestAioS3FileSystem:
             "_copy": lambda: fs._copy(sources, destinations),
             "_mv": lambda: fs._mv(sources, destinations),
         }
+        returned = threading.Event()
+        returned_while_held = []
+
+        def release_once_stopped():
+            # The shutdown: asyncio.run() must not return while the stopped
+            # calls are held.
+            poll_until(lambda: state["stopped"] == 2, "the calls were not stopped")
+            returned_while_held.append(returned.wait(0.1))
+            release.set()
 
         async def main():
             task = asyncio.ensure_future(batches[method]())
             await wait_until(lambda: state["started"] == 2)
             if shutdown:
                 # asyncio.run() cancels the batch and its calls once main()
-                # has returned, and returns once they have ended.
+                # has returned.
+                threading.Thread(target=release_once_stopped, daemon=True).start()
                 return
             task.cancel()
+            await wait_until(lambda: state["stopped"] == 2)
+            done, _ = await asyncio.wait([task], timeout=0.1)
+            assert not done
+            release.set()
             with pytest.raises(asyncio.CancelledError):
                 await await_bounded(task)
             assert state["ended"] == 2
 
-        run_bounded(main)
+        try:
+            run_bounded(main)
+            returned.set()
+        finally:
+            release.set()
         assert state == {"started": 2, "ended": 2, "stopped": 2}
+        assert returned_while_held == ([False] if shutdown else [])
 
     @pytest.mark.parametrize("method", ["_pipe", "_put", "_get"])
     def test_batch_failure_waits_for_calls(self, tmp_path, method):
@@ -1910,7 +1931,8 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
         state = {"started": 0, "ended": 0, "stopped": 0}
-        held = self._held_until_stopped(state)
+        release = threading.Event()
+        held = self._held_until_stopped(state, release)
 
         def call(source, *args, **kwargs):
             if source.endswith("/a"):
@@ -1929,11 +1951,85 @@ class TestAioS3FileSystem:
         }
 
         async def main():
+            task = asyncio.ensure_future(batches[method]())
+            await wait_until(lambda: state["stopped"] == 1)
+            done, _ = await asyncio.wait([task], timeout=0.1)
+            assert not done
+            release.set()
             with pytest.raises(ValueError, match="failed"):
-                await await_bounded(batches[method]())
+                await await_bounded(task)
             assert state == {"started": 1, "ended": 1, "stopped": 1}
 
-        run_bounded(main)
+        try:
+            run_bounded(main)
+        finally:
+            release.set()
+
+    @pytest.mark.asyncio
+    async def test_transaction_put_file_cancelled_is_discarded(self, tmp_path):
+        # GH-1337: a _put_file() in a transaction that is cancelled while its
+        # last part runs is discarded, and the transaction does not commit
+        # it. The part ended normally, so the write had nothing left to stop,
+        # and the file stayed in the transaction.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        local = tmp_path / "local"
+        local.write_bytes(bytes(2 * block_size))
+        started = threading.Event()
+        release = threading.Event()
+        requests = []
+
+        def call(method, **request):
+            name = method.__name__
+            requests.append(name)
+            if name == "create_multipart_upload":
+                return {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+            if name == "upload_part":
+                if request["PartNumber"] == 2:
+                    started.set()
+                    release.wait(EVENT_TIMEOUT)
+                return {"ETag": '"e"'}
+            return {}
+
+        fs._sync_fs._call = fs._sync_fs._core.call = call
+        try:
+            with fs.transaction:
+                task = asyncio.ensure_future(
+                    fs._put_file(
+                        str(local), "s3://bucket/key", block_size=block_size, max_workers=1
+                    )
+                )
+                assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+                task.cancel()
+                await asyncio.sleep(0.1)
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await await_bounded(task)
+        finally:
+            release.set()
+        assert requests == [
+            "create_multipart_upload",
+            "upload_part",
+            "upload_part",
+            "abort_multipart_upload",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_put_pipe_return_values(self, tmp_path):
+        # GH-1337: _put() and _pipe() return the values of their per-object
+        # calls, as fsspec's do, and _put() accepts a path-like destination.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = self._serve_keys(fs, set())
+        local = tmp_path / "local"
+        local.write_bytes(b"a")
+
+        assert await fs._pipe("s3://bucket/a", b"a") == [None]
+        assert await fs._put(str(local), PurePosixPath("bucket/b")) == [None]
+        assert store == {"a", "b"}
 
     @pytest.mark.asyncio
     async def test_put_recursive_creates_no_directories(self, tmp_path):

@@ -332,7 +332,8 @@ its call makes in these threads, including the part uploads and range reads that
 call runs in parallel: no further attempt is made, and the wait before the next attempt
 ends. A write, such as one of `_put_file()` or `_pipe_file()`, sends no further part and
 aborts its multipart upload instead of completing it, and `_get_file()` reads and writes
-no further block. A request that has already been sent still runs to its end in its
+no further block. In a transaction, a cancelled `_put_file()` or `_pipe_file()` is
+discarded and left out of the commit. A request that has already been sent still runs to its end in its
 thread. The requests that run to their end after a cancellation keep their retries: the
 commit of a file, the CompleteMultipartUpload request of a multipart copy, and the
 aborts of multipart uploads.

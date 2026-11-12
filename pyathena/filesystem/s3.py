@@ -2767,11 +2767,8 @@ class S3FileSystem(AbstractFileSystem):
             if not lpaths:
                 return []
         dest_is_dir = isinstance(rpath, str) and (trailing_sep(rpath) or self.isdir(rpath))
-        rpath = (
-            self._strip_protocol(rpath)
-            if isinstance(rpath, str)
-            else [self._strip_protocol(p) for p in rpath]
-        )
+        # A list of destinations or one path, also path-like, as in fsspec.
+        rpath = self._strip_protocol(rpath)
         exists = source_is_str and (
             (has_magic(lpath) and len(lpaths) == 1)
             or (not has_magic(lpath) and dest_is_dir and not trailing_sep(lpath))
