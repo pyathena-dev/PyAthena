@@ -1173,8 +1173,8 @@ class S3FileSystem(AbstractFileSystem):
             path: A path or a list of paths.
 
         Returns:
-            The path or the list of paths, with the ``os.PathLike`` ones
-            converted. Other values are returned unchanged.
+            The converted path, or a new list of the converted paths.
+            Strings are returned unchanged.
         """
         if isinstance(path, list):
             return [stringify_path(p) for p in path]
