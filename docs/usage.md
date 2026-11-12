@@ -807,7 +807,7 @@ conn = connect(
 )
 ```
 
-An `S3FileSystem` built without a connection takes them in `config_kwargs`:
+An `S3FileSystem` built from s3fs-style arguments takes them in `config_kwargs`, and one given `client` uses the configuration of that client:
 
 ```python
 from pyathena.filesystem.s3 import S3FileSystem
