@@ -787,6 +787,57 @@ Concurrent requests beyond that open more connections, which urllib3 closes afte
 `Connection.close()` closes the network connections of the connection's Athena client, and of its Glue and S3 clients if they were built.
 A client used after that opens new connections.
 
+### Checksums
+
+Two botocore options of the S3 client control the checksums of uploads and downloads: `request_checksum_calculation` and `response_checksum_validation`.
+Both default to `"when_supported"`.
+Set them in `s3_config` to change them for the S3 clients of the connection, including those that `pyathena.pandas.util.to_sql()` builds:
+
+```python
+from botocore.config import Config
+from pyathena import connect
+
+conn = connect(
+    s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
+    region_name="us-west-2",
+    s3_config=Config(
+        request_checksum_calculation="when_required",
+        response_checksum_validation="when_required",
+    ),
+)
+```
+
+An `S3FileSystem` built without a connection takes them in `config_kwargs`:
+
+```python
+from pyathena.filesystem.s3 import S3FileSystem
+
+fs = S3FileSystem(
+    config_kwargs={
+        "request_checksum_calculation": "when_required",
+        "response_checksum_validation": "when_required",
+    },
+)
+```
+
+botocore also reads them from the `AWS_REQUEST_CHECKSUM_CALCULATION` and `AWS_RESPONSE_CHECKSUM_VALIDATION` environment variables and from the shared AWS config file.
+
+A PutObject or UploadPart request that sets `ChecksumAlgorithm`, such as `ChecksumAlgorithm="SHA256"`, or a checksum value, such as `ChecksumSHA256`, carries that checksum with either setting.
+For the other PutObject and UploadPart requests, also those that set `ContentMD5`, `request_checksum_calculation="when_supported"` makes the client compute a CRC32 checksum of the body and send it with the request.
+S3 checks the received data against it and stores it with an object written by PutObject.
+With `"when_required"`, the client computes checksums only for the operations that require one, such as DeleteObjects.
+Those PutObject and UploadPart requests then include the SHA-256 hash of their body in their signature, which S3 also checks against the received data.
+Over HTTPS, the client leaves the hash out of a request that sets `ContentMD5`, which S3 checks instead, unless its `s3` options set `payload_signing_enabled` to `True`.
+It also leaves the hash out if its `s3` options set `payload_signing_enabled` to `False` or if it sends unsigned requests, such as `S3FileSystem(anon=True)`.
+
+With `response_checksum_validation="when_supported"`, the client requests the checksum of the object with every GetObject request.
+It validates the body it reads when the response carries a full-object checksum of an algorithm that botocore supports, and reads the body without validation otherwise, such as with the composite checksum of an object uploaded in parts.
+botocore supports CRC32, SHA-1, SHA-256, and SHA-512, and with `botocore[crt]` also CRC32C, CRC64NVME, XXHASH64, XXHASH3, and XXHASH128.
+S3 calculates a CRC64NVME checksum for an object uploaded without a checksum.
+S3 returns no checksum for a byte range, so the range reads of `S3FileSystem`, such as those of its files and of `get()`, are not validated with either setting.
+With `"when_required"`, the client validates only the responses to requests that set `ChecksumMode="ENABLED"`.
+Over HTTPS, TLS protects the data in transit with either setting.
+
 ## Environment variables
 
 Support [Boto3 environment variables](https://boto3.amazonaws.com/v1/documentation/api/latest/guide/configuration.html#using-environment-variables).

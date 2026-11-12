@@ -69,6 +69,11 @@ fs = S3FileSystem(profile="YOUR_PROFILE")
 fs = S3FileSystem(anon=True)
 ```
 
+The S3 client computes checksums of uploads and validates those of downloads by
+botocore's `request_checksum_calculation` and `response_checksum_validation` options,
+set with `s3_config` of the connection or with `config_kwargs`; see "Checksums" under
+"S3 client" in [Usage](usage.md) for their settings and their effect on data integrity.
+
 Standard fsspec operations work as expected:
 
 ```python
