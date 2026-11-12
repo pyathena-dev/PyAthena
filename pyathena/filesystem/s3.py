@@ -3196,7 +3196,7 @@ class S3FileSystem(AbstractFileSystem):
         # The codec, if any, as fsspec's open() resolves it, with "infer"
         # from the key without the version.
         codec = get_compression(
-            S3Path.parse(self._strip_protocol(rpath)).key, kwargs.pop("compression", None)
+            S3Path.parse(self._strip_protocol(rpath)).key or "", kwargs.pop("compression", None)
         )
         if codec is None:
             # No data cache: the object is read in ranges, and a cache
