@@ -3179,8 +3179,9 @@ class S3FileSystem(AbstractFileSystem):
                 ``cache_options`` are not used. With ``compression``, the
                 object is decompressed into the destination, read in order
                 through ``open()`` with a block cache, whose block size, if
-                not positive, is that of the filesystem, and the size of the
-                callback is unknown.
+                not positive, is that of the filesystem, or
+                ``DEFAULT_BLOCK_SIZE`` if that is not positive either, and the
+                size of the callback is unknown.
         """
         path_version_id = S3Path.parse(self._strip_protocol(rpath)).version_id
         if outfile is None and isfilelike(lpath):
@@ -3211,7 +3212,9 @@ class S3FileSystem(AbstractFileSystem):
         if codec is not None and not (
             isinstance(kwargs.get("block_size"), int) and kwargs["block_size"] > 0
         ):
-            kwargs["block_size"] = self.default_block_size
+            kwargs["block_size"] = (
+                self.default_block_size if self.default_block_size > 0 else self.DEFAULT_BLOCK_SIZE
+            )
         # The remote file is opened first so that no local file is created
         # when open() finds no object at the path.
         with contextlib.ExitStack() as stack:

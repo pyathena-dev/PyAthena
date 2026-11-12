@@ -4893,11 +4893,13 @@ class TestS3FileSystem:
     @pytest.mark.parametrize("block_size", [0, -1])
     def test_get_file_non_positive_block_size(self, block_size, compressed):
         # GH-1323: a block size that is not positive reads the object in one
-        # range, as read() reads the rest, and with compression takes the
-        # filesystem's; the waves read nothing, and the block cache of the
-        # decompressing path failed.
+        # range, as read() reads the rest, and with compression takes a
+        # positive default; the waves read nothing, and the block cache of
+        # the decompressing path failed.
         data = b"0123456789"
         fs, ranges = self._make_object_fs(gzip.compress(data) if compressed else data)
+        # Accepted by the constructor; DEFAULT_BLOCK_SIZE then applies.
+        fs.default_block_size = -1
         outfile = io.BytesIO()
         fs.get_file(
             "s3://bucket/key",
