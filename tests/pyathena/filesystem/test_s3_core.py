@@ -97,8 +97,9 @@ class TestS3Core:
         # A per-call parameter is not filtered, so botocore rejects a
         # misspelled one instead of the core dropping it.
         core, _ = _make_core()
-        with pytest.raises(botocore.exceptions.ParamValidationError):
+        with pytest.raises(ValueError, match="RequestPayers") as exc_info:
             core.head_object(S3Path("bucket", "key"), RequestPayers="requester")
+        assert isinstance(exc_info.value.__cause__, botocore.exceptions.ParamValidationError)
 
     @pytest.mark.parametrize(
         ("status", "code", "error"),
@@ -1449,9 +1450,10 @@ class TestS3Core:
         # the annotation is written to the version and the ETag that the copy
         # wrote, with the parameters that PutObjectAnnotation accepts.
         core, stubber = _make_core()
+        payload = io.BytesIO(b"payload")
         stubber.add_response(
             "get_object_annotation",
-            {"AnnotationPayload": StreamingBody(io.BytesIO(b"payload"), 7)},
+            {"AnnotationPayload": StreamingBody(payload, 7)},
             {
                 "Bucket": "bucket",
                 "Key": "src",
@@ -1490,6 +1492,24 @@ class TestS3Core:
                 ObjectIfMatch='"other"',
             )
         stubber.assert_no_pending_responses()
+        assert payload.closed
+
+    def test_copy_object_annotation_payload_read_failure(self):
+        # A payload shorter than its length fails to read; it is closed, the
+        # botocore error propagates, and nothing is written.
+        core, stubber = _make_core()
+        payload = io.BytesIO(b"pay")
+        stubber.add_response(
+            "get_object_annotation",
+            {"AnnotationPayload": StreamingBody(payload, 7)},
+            {"Bucket": "bucket", "Key": "src", "AnnotationName": "a1"},
+        )
+        with stubber, pytest.raises(botocore.exceptions.IncompleteReadError):
+            core.copy_object_annotation(
+                "a1", S3Path("bucket", "src"), S3Path("bucket", "dst"), None, None
+            )
+        stubber.assert_no_pending_responses()
+        assert payload.closed
 
     @pytest.mark.parametrize(
         ("algorithm", "checksum_type"),

@@ -648,6 +648,8 @@ class S3Core:
             The response.
 
         Raises:
+            ValueError: If botocore rejects the parameters of the request
+                (``ParamValidationError``), which is not sent.
             OSError: The translation of an S3 error response (see
                 :class:`~pyathena.filesystem.s3_errors.S3ClientError`).
 
@@ -672,6 +674,8 @@ class S3Core:
             traceback.clear_frames(e.__traceback__)
             if isinstance(e, botocore.exceptions.ClientError):
                 raise S3ClientError(e).os_error from e
+            if isinstance(e, botocore.exceptions.ParamValidationError):
+                raise ValueError(str(e)) from e
             raise
         return cast(dict[str, Any], response)
 
@@ -1421,6 +1425,10 @@ class S3Core:
         destination still has the ETag of the copy, so that it is not
         attached to an object written over the copy.
 
+        The payload of the annotation is read whole and then closed, also
+        when the read fails. As for :meth:`get_object`, a failure to read it
+        is neither translated nor retried: the botocore exception propagates.
+
         Args:
             name: The annotation name.
             source: The path of the copied object, with the version ID that
@@ -1459,8 +1467,9 @@ class S3Core:
             "Bucket": destination.bucket,
             "Key": destination.key,
             "AnnotationName": name,
-            "AnnotationPayload": response["AnnotationPayload"].read(),
         }
+        with contextlib.closing(response["AnnotationPayload"]) as payload:
+            put_request.update({"AnnotationPayload": payload.read()})
         if version_id:
             put_request.update({"VersionId": version_id})
         if etag:
