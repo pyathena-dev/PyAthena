@@ -791,7 +791,7 @@ A client used after that opens new connections.
 
 Two botocore options of the S3 client control the checksums of uploads and downloads: `request_checksum_calculation` and `response_checksum_validation`.
 Both default to `"when_supported"`.
-Set them in `s3_config` to change them for the connection's S3 client, which the S3 requests of `pyathena.pandas.util.to_sql()` also use:
+Set them in `s3_config` to change them for the S3 clients of the connection, including those that `pyathena.pandas.util.to_sql()` builds:
 
 ```python
 from botocore.config import Config
