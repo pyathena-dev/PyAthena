@@ -3150,8 +3150,10 @@ class S3FileSystem(AbstractFileSystem):
         The object is read in waves of parallel range requests of the block
         size, at most ``max_workers`` of them at once, but no more than the
         request pool of the filesystem runs, and the bodies of each wave are
-        written in order before the next wave is read, so that at most one
-        wave of bodies is held (see :meth:`S3File._download`). The reads are
+        written in order before the next wave is read, so that the download
+        holds at most one wave of bodies; a thread of the pool that has just
+        read a range drops its body when its call returns (see
+        :meth:`S3File._download`). The reads are
         conditional on the version and the ETag of the object looked up when
         the download starts, as with ``open()``, so that an object replaced
         during the download fails it instead of mixing two objects, unless
@@ -3175,9 +3177,10 @@ class S3FileSystem(AbstractFileSystem):
                 ``max_workers``, ``version_id``, and ``s3_additional_kwargs``,
                 and additional S3 parameters. ``cache_type`` and
                 ``cache_options`` are not used. With ``compression``, the
-                object is decompressed into the destination, read one block
-                at a time through ``open()``, and the size of the callback is
-                unknown.
+                object is decompressed into the destination, read in order
+                through ``open()`` with a block cache, whose block size, if
+                not positive, is that of the filesystem, and the size of the
+                callback is unknown.
         """
         path_version_id = S3Path.parse(self._strip_protocol(rpath)).version_id
         if outfile is None and isfilelike(lpath):
@@ -3202,9 +3205,13 @@ class S3FileSystem(AbstractFileSystem):
         # object when the file is opened, and "background" reads outside
         # the stop scopes of the caller. Without a codec, the object is read
         # in ranges without a cache; with one, the decompressor's small reads
-        # go through a cache of one block at a time.
+        # go through a block cache, which needs a positive block size.
         kwargs.pop("cache_options", None)
         kwargs["cache_type"] = "none" if codec is None else "bytes"
+        if codec is not None and not (
+            isinstance(kwargs.get("block_size"), int) and kwargs["block_size"] > 0
+        ):
+            kwargs["block_size"] = self.default_block_size
         # The remote file is opened first so that no local file is created
         # when open() finds no object at the path.
         with contextlib.ExitStack() as stack:

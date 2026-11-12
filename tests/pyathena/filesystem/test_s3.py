@@ -4889,15 +4889,26 @@ class TestS3FileSystem:
         assert outfile.getvalue() == b"0123456789"
         assert sorted(ranges) == ["bytes=0-3", "bytes=4-7", "bytes=8-9"]
 
+    @pytest.mark.parametrize("compressed", [False, True])
     @pytest.mark.parametrize("block_size", [0, -1])
-    def test_get_file_non_positive_block_size(self, block_size):
+    def test_get_file_non_positive_block_size(self, block_size, compressed):
         # GH-1323: a block size that is not positive reads the object in one
-        # range, as read() reads the rest; the waves would read nothing.
-        fs, ranges = self._make_object_fs(b"0123456789")
+        # range, as read() reads the rest, and with compression takes the
+        # filesystem's; the waves read nothing, and the block cache of the
+        # decompressing path failed.
+        data = b"0123456789"
+        fs, ranges = self._make_object_fs(gzip.compress(data) if compressed else data)
         outfile = io.BytesIO()
-        fs.get_file("s3://bucket/key", outfile=outfile, block_size=block_size, max_workers=1)
-        assert outfile.getvalue() == b"0123456789"
-        assert ranges == ["bytes=0-9"]
+        fs.get_file(
+            "s3://bucket/key",
+            outfile=outfile,
+            block_size=block_size,
+            max_workers=1,
+            compression="gzip" if compressed else None,
+        )
+        assert outfile.getvalue() == data
+        if not compressed:
+            assert ranges == ["bytes=0-9"]
 
     def test_get_file_compression_ignores_cache_type(self):
         # GH-1323: the decompressed download reads one block at a time
@@ -4912,8 +4923,9 @@ class TestS3FileSystem:
             outfile=outfile,
             compression="gzip",
             block_size=1024,
+            # One worker, so that a whole-object read is one request.
+            max_workers=1,
             cache_type="all",
-            cache_options={"unused": True},
         )
         assert outfile.getvalue() == data
         assert f"bytes=0-{len(compressed) - 1}" not in ranges
