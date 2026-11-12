@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import functools
+import gc
 import hashlib
 import logging
 import mimetypes
@@ -78,6 +80,8 @@ _CONNECTION_DEPRECATION_MESSAGE = (
     "major version. Use pyathena.filesystem.s3_filesystem(connection), or pass "
     "client=connection.s3_client and retry_config=connection.retry_config."
 )
+# Whether the cyclic garbage collector runs in a thread (S3File._track_collection).
+_collecting = threading.local()
 
 # The request parameters on which the authorization of a lookup (HeadObject,
 # HeadBucket, or ListObjectsV2) depends.
@@ -4310,16 +4314,119 @@ class S3File(AbstractBufferedFile):
 
         In a forked child process, a file that the parent opened is only
         marked closed: its data is neither flushed nor committed, and its
-        upload is not aborted, since they belong to the parent.
+        upload is not aborted, since they belong to the parent. Called by
+        another finalizer while the cyclic garbage collector runs in this
+        thread, such as that of a ``TextIOWrapper``, the file is closed in a
+        new thread instead (see :meth:`__del__`).
         """
         if self._inherited():
             self.closed = True
+            return
+        if not self.closed and S3File._in_collection():
+            self._close_later()
             return
         try:
             super().close()
         finally:
             # The executor is shut down even if the final flush fails.
             self._executor.shutdown()
+
+    def __del__(self) -> None:
+        """Close the file when it is finalized without having been closed.
+
+        A file whose last reference is dropped in a user thread is closed
+        here. A file that the cyclic garbage collector finalizes, or that is
+        finalized in a thread of an :class:`S3ThreadPool`, is closed in a new
+        thread instead, since a wait here could last forever (T1): the
+        requests of the file may be queued behind this thread or include the
+        one that runs the collection, and this thread may hold a lock that
+        the close takes.
+        """
+        if getattr(self, "closed", True) or self._inherited():
+            # The upload of a file inherited across a fork is the parent's.
+            return
+        if S3ThreadPool.in_pool_thread():
+            self._close_later()
+        else:
+            # Hands the close over itself during a collection.
+            self.close()
+
+    @staticmethod
+    def _track_collection(phase: str, info: dict[str, int]) -> None:
+        """Record whether the cyclic garbage collector runs in this thread.
+
+        Registered in ``gc.callbacks``, which the collector calls in the
+        thread that runs it.
+
+        Args:
+            phase: ``"start"`` or ``"stop"``.
+            info: The details of the collection, which are not used.
+        """
+        _collecting.active = phase == "start"
+
+    @staticmethod
+    def _in_collection() -> bool:
+        """Whether the cyclic garbage collector runs in this thread.
+
+        Returns:
+            True while a collection runs in the calling thread.
+        """
+        return getattr(_collecting, "active", False)
+
+    def _close_later(self) -> None:
+        """Close the file in a new thread, once.
+
+        The written data is copied first: the collector finalizes every
+        object that it found unreachable before it checks whether a
+        finalizer has made it reachable again, and finalizing the buffer
+        closes it. If the buffer is already closed, the data is incomplete,
+        so the write is discarded instead of committed. The thread runs with
+        an empty context, so that the stop scopes of the collecting thread do
+        not stop the requests of the file. If no thread can be started, as
+        during interpreter finalization, the file is left unclosed rather
+        than closed in this thread.
+        """
+        if getattr(self, "_closing_later", False):
+            return
+        self._closing_later = True
+        complete = True
+        if self.mode != "rb" and self.buffer is not None:
+            if self.buffer.closed:
+                complete = False
+            else:
+                buffer = BytesIO(self.buffer.getvalue())
+                buffer.seek(self.buffer.tell())
+                self.buffer = buffer
+        try:
+            threading.Thread(
+                target=contextvars.Context().run,
+                args=(self._close_collected, complete),
+                name=f"pyathena-close-s3://{self.bucket}/{self.key}",
+            ).start()
+        except RuntimeError:
+            _logger.warning(
+                f"s3://{self.bucket}/{self.key} was not closed, and no thread could be "
+                "started to close it when it was finalized; its data was not committed."
+            )
+
+    def _close_collected(self, complete: bool) -> None:
+        """Close a finalized file, logging a failure instead of raising it.
+
+        Args:
+            complete: Whether the written data is complete. If not, the
+                write is discarded instead of committed.
+        """
+        try:
+            if complete:
+                self.close()
+            else:
+                _logger.warning(
+                    f"s3://{self.bucket}/{self.key} was not closed, and its buffer was "
+                    "finalized before it; its data was not committed."
+                )
+                self._close_without_commit()
+        except Exception:
+            _logger.exception(f"Failed to close s3://{self.bucket}/{self.key}.")
 
     def read(self, length: int = -1) -> bytes:
         """Read bytes from the file.
@@ -4823,3 +4930,6 @@ class S3File(AbstractBufferedFile):
         else:
             ranges.append((start, end))
         return ranges
+
+
+gc.callbacks.append(S3File._track_collection)

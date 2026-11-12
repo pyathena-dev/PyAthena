@@ -203,6 +203,23 @@ In a forked child process, create a new filesystem. A file that the parent opene
 `RuntimeError` there from its reads, writes, and flushes, `commit()`, and `discard()`,
 and closing it only marks it closed, without uploading or aborting anything.
 
+Close a file returned by `open` explicitly or with a `with` block. A file that is not
+closed is closed when it is finalized, which commits its written data unless
+`autocommit` is False:
+
+- When its last reference is dropped outside the threads of an `S3ThreadPool`, such as
+  the request pool of a filesystem, it is closed before that returns.
+- When the cyclic garbage collector finalizes it, or it is finalized in a thread of an
+  `S3ThreadPool`, it is closed in a new thread after the finalization returns. If the
+  collector has finalized its write buffer first, its data is not committed, and its
+  multipart upload is aborted. If no thread can be started, as during interpreter
+  finalization, the file is left unclosed and its multipart upload incomplete.
+- During interpreter shutdown, a file whose last part can no longer be submitted is
+  closed without committing it, and its multipart upload is aborted.
+
+A file opened in text mode writes its remaining text to the file in the thread that
+finalizes it, before the file is closed.
+
 An interrupt, such as Ctrl+C, or a failure while a file reads ranges in parallel
 cancels the range reads that have not started, and the running ones make no further
 attempt. The interrupt or the error is raised once they have ended, and their data is
