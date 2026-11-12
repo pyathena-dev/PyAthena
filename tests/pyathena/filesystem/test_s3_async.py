@@ -23,7 +23,12 @@ from botocore.stub import Stubber
 from fsspec.callbacks import Callback
 
 from pyathena.filesystem.s3 import S3FileSystem
-from pyathena.filesystem.s3_async import AioS3File, AioS3FileSystem, AioS3StreamedFile
+from pyathena.filesystem.s3_async import (
+    AioS3File,
+    AioS3FileSystem,
+    AioS3StreamedFile,
+    _S3TransactionWrite,
+)
 from pyathena.filesystem.s3_core import S3Core, S3MultipartCopyPlan
 from pyathena.filesystem.s3_executor import S3ThreadPool, _S3PoolScope
 from pyathena.filesystem.s3_object import (
@@ -36,7 +41,7 @@ from pyathena.filesystem.s3_object import (
 )
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
-from pyathena.util import RetryConfig, raise_if_stopped
+from pyathena.util import RetryConfig, raise_if_stopped, stop_retries_on
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
@@ -2184,8 +2189,20 @@ class TestAioS3FileSystem:
             return {}
 
         fs._sync_fs._call = fs._sync_fs._core.call = call
+        write_ended = threading.Event()
+        run = _S3TransactionWrite.run
+
+        def run_and_signal(transaction_write):
+            try:
+                run(transaction_write)
+            finally:
+                write_ended.set()
+
         try:
-            with fs.transaction:
+            with (
+                mock.patch.object(_S3TransactionWrite, "run", run_and_signal),
+                fs.transaction,
+            ):
                 fs.transaction.files = HeldFiles()
                 task = asyncio.ensure_future(
                     fs._put_file(str(local), "s3://bucket/key", callback=HeldCallback())
@@ -2197,13 +2214,38 @@ class TestAioS3FileSystem:
                 with pytest.raises(asyncio.CancelledError):
                     await await_bounded(task, timeout=2)
                 release.set()
-                # Exits once the file has joined, or after 1 s.
-                await asyncio.to_thread(joined.wait, 1)
+                # Exits once the file has joined, or once the write has ended.
+                await wait_until(lambda: joined.is_set() or write_ended.is_set())
         finally:
             proceed.set()
             release.set()
         await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
         assert not joined.is_set()
+        assert requests == []
+
+    @pytest.mark.asyncio
+    async def test_transaction_write_stopped_by_enclosing_scope(self):
+        # GH-1337: a transaction write that an enclosing stop scope, not a
+        # cancellation, has stopped raises instead of returning, since its
+        # file is discarded and left out of the transaction. The
+        # concurrent.futures.CancelledError of the stop reaches the coroutine
+        # as asyncio.CancelledError, which asyncio.wrap_future() converts it to.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        requests = []
+
+        def call(method, **request):
+            requests.append(method.__name__)
+            return {}
+
+        fs._sync_fs._call = fs._sync_fs._core.call = call
+        stop = threading.Event()
+        stop.set()
+        with fs.transaction:
+            with stop_retries_on(stop), pytest.raises(asyncio.CancelledError):
+                await fs._pipe_file("s3://bucket/key", b"a")
+            assert not fs.transaction.files
         assert requests == []
 
     @pytest.mark.asyncio

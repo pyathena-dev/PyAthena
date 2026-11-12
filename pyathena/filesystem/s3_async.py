@@ -19,7 +19,7 @@ import os
 import threading
 import warnings
 from collections.abc import Awaitable, Callable, Iterable
-from concurrent.futures import Future, wait
+from concurrent.futures import CancelledError, Future, wait
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -153,7 +153,12 @@ class _S3TransactionWrite:
         self._ended = False
 
     def run(self) -> None:
-        """Run the write, and drop and discard its file if it ends stopped."""
+        """Run the write, and drop and discard its file if it ends stopped.
+
+        Raises:
+            concurrent.futures.CancelledError: If the write was stopped, also
+                when the write itself succeeded, since its file is discarded.
+        """
         try:
             self._write(self.open)
         finally:
@@ -167,6 +172,8 @@ class _S3TransactionWrite:
                     self._detach_all()
             if stopped:
                 self.discard()
+        if stopped:
+            raise CancelledError("Stopped before the transaction could commit the write.")
 
     def open(self, path: str, mode: str, **kwargs) -> S3File:
         """Open the file of the write, which joins the transaction unless the write is stopped.
