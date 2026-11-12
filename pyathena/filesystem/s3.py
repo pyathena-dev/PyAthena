@@ -3174,10 +3174,10 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs: The arguments of ``open()``, such as ``block_size``,
                 ``max_workers``, ``version_id``, and ``s3_additional_kwargs``,
                 and additional S3 parameters. ``cache_type`` and
-                ``cache_options`` are not used, since no data cache reads the
-                object. With ``compression``, the object is decompressed into
-                the destination, read one block at a time through ``open()``,
-                and the size of the callback is unknown.
+                ``cache_options`` are not used. With ``compression``, the
+                object is decompressed into the destination, read one block
+                at a time through ``open()``, and the size of the callback is
+                unknown.
         """
         path_version_id = S3Path.parse(self._strip_protocol(rpath)).version_id
         if outfile is None and isfilelike(lpath):
@@ -3198,12 +3198,13 @@ class S3FileSystem(AbstractFileSystem):
         codec = get_compression(
             S3Path.parse(self._strip_protocol(rpath)).key or "", kwargs.pop("compression", None)
         )
-        if codec is None:
-            # No data cache: the object is read in ranges, and a cache
-            # constructed when the file is opened, such as "all", would read
-            # the whole object.
-            kwargs.pop("cache_options", None)
-            kwargs["cache_type"] = "none"
+        # Not the caller's cache: one such as "all" would read the whole
+        # object when the file is opened, and "background" reads outside
+        # the stop scopes of the caller. Without a codec, the object is read
+        # in ranges without a cache; with one, the decompressor's small reads
+        # go through a cache of one block at a time.
+        kwargs.pop("cache_options", None)
+        kwargs["cache_type"] = "none" if codec is None else "bytes"
         # The remote file is opened first so that no local file is created
         # when open() finds no object at the path.
         with contextlib.ExitStack() as stack:
@@ -4843,15 +4844,18 @@ class S3File(AbstractBufferedFile):
     def _download(self, outfile: Any, callback: Callback) -> None:
         """Write the whole object into a writable file with parallel range reads.
 
-        The object is read in waves of ranges of the block size, one wave of
-        at most ``max_workers`` ranges at a time, but no more than the request
-        pool of the filesystem runs at once, since the others would only wait
+        The object is read in waves of ranges of the block size, or in one
+        range if the block size is not positive, one wave of at most
+        ``max_workers`` ranges at a time, but no more than the request pool
+        of the filesystem runs at once, since the others would only wait
         with their bodies held. Each wave is read with :meth:`S3Executor.map()
         <pyathena.filesystem.s3_executor.S3Executor.map>`, and its bodies are
         written in order, each dropped once written, before the next wave is
-        read, so that at most one wave of bodies is held. The reads carry the
-        version and the conditions of the file, and each checks the stop
-        scopes when it starts; a body read when a stop came is not written.
+        read, so that the download holds at most one wave of bodies; a thread
+        of the pool that has just returned a body drops it when its call
+        returns. The reads carry the version and the conditions of the file,
+        and each checks the stop scopes when it starts; a body read when a
+        stop came is not written.
 
         A failure or an interrupt while a wave is read is raised as
         :meth:`S3Executor.map()` raises it. One while its bodies are written,
@@ -4870,10 +4874,13 @@ class S3File(AbstractBufferedFile):
                 been stopped.
         """
         size = cast(int, self.size)
+        # A block size that is not positive reads the rest of the object,
+        # as read() does.
+        block = self.blocksize if self.blocksize > 0 else max(size, 1)
         window = min(self.max_workers, self.fs._request_pool.max_workers)
         path = S3Path(self.bucket, self.key, self.version_id)
         read = functools.partial(self._get_range, path, **self._get_request_kwargs("get_object"))
-        wave = window * self.blocksize
+        wave = window * block
         result: S3MapResult[bytes] | None = None
         try:
             for wave_start in range(0, size, wave):
@@ -4883,8 +4890,8 @@ class S3File(AbstractBufferedFile):
                 result = self._executor.map(
                     read,
                     [
-                        (start, min(start + self.blocksize, wave_end))
-                        for start in range(wave_start, wave_end, self.blocksize)
+                        (start, min(start + block, wave_end))
+                        for start in range(wave_start, wave_end, block)
                     ],
                 )
                 bodies = result.outcomes

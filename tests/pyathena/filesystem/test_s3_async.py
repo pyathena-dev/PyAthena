@@ -2293,6 +2293,21 @@ class TestAioS3FileSystem:
         assert windows == [expected] * files
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("rpath", ["s3://bucket/key", ["s3://bucket/key"]])
+    async def test_get_relative_destination_list(self, tmp_path, monkeypatch, rpath):
+        # GH-1323: relative local paths in a list are made absolute, as
+        # fsspec's _get() does for one source, so that it can create their
+        # parent directories.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        self._serve_keys(fs, {"key"})
+        monkeypatch.chdir(tmp_path)
+
+        await fs._get(rpath, ["download.txt"])
+        assert (tmp_path / "download.txt").read_bytes() == b"aa"
+
+    @pytest.mark.asyncio
     async def test_put_recursive_creates_no_directories(self, tmp_path):
         # GH-1337: a recursive _put() sends no request for the local
         # directories. fsspec's _put() created a directory for each, which

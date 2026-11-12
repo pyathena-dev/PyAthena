@@ -4889,6 +4889,35 @@ class TestS3FileSystem:
         assert outfile.getvalue() == b"0123456789"
         assert sorted(ranges) == ["bytes=0-3", "bytes=4-7", "bytes=8-9"]
 
+    @pytest.mark.parametrize("block_size", [0, -1])
+    def test_get_file_non_positive_block_size(self, block_size):
+        # GH-1323: a block size that is not positive reads the object in one
+        # range, as read() reads the rest; the waves would read nothing.
+        fs, ranges = self._make_object_fs(b"0123456789")
+        outfile = io.BytesIO()
+        fs.get_file("s3://bucket/key", outfile=outfile, block_size=block_size, max_workers=1)
+        assert outfile.getvalue() == b"0123456789"
+        assert ranges == ["bytes=0-9"]
+
+    def test_get_file_compression_ignores_cache_type(self):
+        # GH-1323: the decompressed download reads one block at a time
+        # through its own cache; the caller's "all" read the whole object
+        # when the file was opened.
+        data = bytes(range(256)) * 64
+        compressed = gzip.compress(data, compresslevel=0)
+        fs, ranges = self._make_object_fs(compressed)
+        outfile = io.BytesIO()
+        fs.get_file(
+            "s3://bucket/key",
+            outfile=outfile,
+            compression="gzip",
+            block_size=1024,
+            cache_type="all",
+            cache_options={"unused": True},
+        )
+        assert outfile.getvalue() == data
+        assert f"bytes=0-{len(compressed) - 1}" not in ranges
+
     def test_get_file_failed_range_reads_no_further_wave(self):
         # GH-1323: a failed range stops the download: no further wave is
         # read, and nothing of the failed wave is written.
@@ -4899,6 +4928,9 @@ class TestS3FileSystem:
         def failing(**request):
             ranges.append(request["Range"])
             if request["Range"] == "bytes=4-7":
+                # Once the other range of the wave has been requested, which
+                # would otherwise find the batch stopped.
+                poll_until(lambda: "bytes=0-3" in ranges, "the first range was not requested")
                 raise OSError("failed")
             return get_object(**request)
 
@@ -4913,7 +4945,7 @@ class TestS3FileSystem:
         # GH-1323 (Q2): the bodies of a wave are dropped once written, so
         # that they are not kept while the next wave is read.
         fs, _ = self._make_object_fs(b"0123456789")
-        refs = {}
+        refs: dict[int, weakref.ref] = {}
         held = []
 
         class Body(bytearray):
@@ -4923,7 +4955,15 @@ class TestS3FileSystem:
         get_object = fs.core.get_object
 
         def read(path, range_, **kwargs):
-            held.append(sorted(start for start, ref in refs.items() if ref() is not None))
+            if range_[0] >= 8:
+                # The second wave: no body of the first is alive, once the
+                # threads that returned them have returned themselves.
+                poll_until(
+                    lambda: all(ref() is None for ref in refs.values()),
+                    "a body of the first wave is held",
+                    timeout=2,
+                )
+                held.append(range_)
             body = Body(get_object(path, range_, **kwargs))
             refs[range_[0]] = weakref.ref(body)
             return body
@@ -4934,8 +4974,7 @@ class TestS3FileSystem:
             fs.get_file("s3://bucket/key", outfile=io.BytesIO(), block_size=4, max_workers=2)
         finally:
             gc.enable()
-        # The read of the second wave finds no body of the first.
-        assert held[-1] == []
+        assert held == [(8, 10)]
 
     @pytest.mark.parametrize("failure", ["write", "wrapped_write", "callback", "interrupt"])
     def test_get_file_failure_while_writing_keeps_no_bodies(self, failure):

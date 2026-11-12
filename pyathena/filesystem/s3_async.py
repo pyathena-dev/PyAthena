@@ -885,7 +885,13 @@ class AioS3FileSystem(AsyncFileSystem):
                 ``lpath``.
         """
         rpath = self._sync_fs._stringify_paths(rpath)
-        root = make_path_posix(lpath) if isinstance(lpath, (str, os.PathLike)) else lpath
+        # Local paths are made absolute, as fsspec's _get() does, so that
+        # it can create their parent directories.
+        root = (
+            make_path_posix(lpath)
+            if isinstance(lpath, (str, os.PathLike))
+            else [make_path_posix(p) if isinstance(p, (str, os.PathLike)) else p for p in lpath]
+        )
         pairs = await self._thread_pool.run(
             self._sync_fs._copy_pairs,
             S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),

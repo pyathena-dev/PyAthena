@@ -156,14 +156,14 @@ time. Its `max_workers` argument is a deprecated alias of `batch_size`.
 `get` and `get_file` download each object in waves of parallel range reads of the block
 size: at most `max_workers` ranges at a time, and no more than the request pool runs at
 once. The ranges of a wave are written in order before the next wave is read, so a
-download holds at most one wave of data, `max_workers` × the block size. No data cache
-reads the object, so `cache_type` and `cache_options` do not apply. The range reads are
+download holds at most one wave of data, `max_workers` × the block size. `cache_type`
+and `cache_options` do not apply: no data cache reads the object. The range reads are
 conditional on the ETag, and the version, if any, of the object looked up when the
 download starts: an object replaced during the download fails it with `OSError`, unless
 the download reads a version other than `null`, which a replacement does not change. A
 failed download leaves the part written so far in the local file, as fsspec's
 `get_file` does. With `compression`, the object is decompressed into the destination,
-one block at a time.
+read one block at a time through a cache of one block.
 
 Writes with `pipe`/`pipe_file` issue a single PutObject request for data up to the
 block size (5 MiB by default); larger data is uploaded as a parallel multipart upload
