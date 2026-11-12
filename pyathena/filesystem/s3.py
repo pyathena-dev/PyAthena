@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import _thread
+import atexit
 import contextlib
 import contextvars
 import functools
@@ -84,6 +86,10 @@ _CONNECTION_DEPRECATION_MESSAGE = (
 # Whether the cyclic garbage collector runs in a thread, and the closes of
 # files that it handed over (S3File._track_collection).
 _collecting = threading.local()
+
+# The ends of the closes that run in threads of the _thread module, which an
+# exit waits for (S3File._wait_for_handed_over_closes).
+_handed_over_closes: set[threading.Event] = set()
 
 # The request parameters on which the authorization of a lookup (HeadObject,
 # HeadBucket, or ListObjectsV2) depends.
@@ -4320,8 +4326,9 @@ class S3File(AbstractBufferedFile):
         another finalizer while the cyclic garbage collector runs in this
         thread, such as that of a ``TextIOWrapper``, the file is closed in a
         new thread once the collection has ended (see :meth:`__del__`), and
-        this returns before that. Otherwise, a close handed over to another
-        thread is waited for.
+        this returns before that. A close handed over to another thread is
+        waited for, except during a collection or in a thread of an
+        :class:`S3ThreadPool`, where this returns without waiting.
         """
         if self._inherited():
             self.closed = True
@@ -4329,8 +4336,8 @@ class S3File(AbstractBufferedFile):
         if not self.closed and S3File._in_collection():
             self._close_later()
             return
-        self._wait_for_close_later()
-        self._close()
+        if self._wait_for_close_later():
+            self._close()
 
     def _close(self) -> None:
         """Close the file in this thread, flushing any written data, and shut down its executor."""
@@ -4413,6 +4420,7 @@ class S3File(AbstractBufferedFile):
                 buffer = BytesIO(self.buffer.getvalue())
                 buffer.seek(self.buffer.tell())
                 self.buffer = buffer
+        _handed_over_closes.add(self._closed_later)
         if S3File._in_collection():
             if not hasattr(_collecting, "pending"):
                 _collecting.pending = []
@@ -4423,12 +4431,17 @@ class S3File(AbstractBufferedFile):
     def _start_close(self, complete: bool) -> None:
         """Start the close that :meth:`_close_later` handed over.
 
-        The thread runs with an empty context, so that the stop scopes of
-        the finalizing thread do not stop the requests of the file. During
-        interpreter finalization, the file is closed in this thread without
-        starting one: Python 3.11 waits forever for a thread started then,
-        and later versions raise. No other thread runs requests then, and the
-        pools take no more calls, so the close does not wait for a part
+        The file is closed in a thread of the ``_thread`` module, since
+        ``Thread.start()`` takes locks of the ``threading`` module, which this
+        thread, in which a finalizer or the collector runs, may hold, and
+        waits for the new thread, which may take another. The interpreter
+        does not join such a thread, so an exit waits for the close instead
+        (see :meth:`_wait_for_handed_over_closes`). The thread runs with an
+        empty context, so that the stop scopes of the finalizing thread do
+        not stop the requests of the file. During interpreter finalization,
+        the file is closed in this thread without starting one, since no
+        thread started then runs. No other thread runs requests then, and
+        the pools take no more calls, so the close does not wait for a part
         queued behind it. If no thread can be started otherwise, the file is
         left unclosed rather than closed in this thread, where it could wait
         forever.
@@ -4436,24 +4449,24 @@ class S3File(AbstractBufferedFile):
         Args:
             complete: Whether the written data is complete.
         """
+        if self._inherited():
+            # Handed over in the parent, which forked before the collection
+            # ended.
+            self.closed = True
+            self._end_close_later()
+            return
         if sys.is_finalizing():
-            self._closer = threading.current_thread()
             self._close_collected(complete)
             return
         try:
-            self._closer = threading.Thread(
-                target=contextvars.Context().run,
-                args=(self._close_collected, complete),
-                name=f"pyathena-close-s3://{self.bucket}/{self.key}",
-            )
-            self._closer.start()
+            _thread.start_new_thread(contextvars.Context().run, (self._close_collected, complete))
         except Exception:
             # Such as RuntimeError, when no more threads can be started.
             _logger.warning(
                 f"s3://{self.bucket}/{self.key} was not closed, and no thread could be "
                 "started to close it when it was finalized; its data was not committed."
             )
-            self._closed_later.set()
+            self._end_close_later()
 
     def _close_collected(self, complete: bool) -> None:
         """Close a finalized file, logging a failure instead of raising it.
@@ -4462,6 +4475,7 @@ class S3File(AbstractBufferedFile):
             complete: Whether the written data is complete. If not, the
                 write is discarded instead of committed.
         """
+        self._closer_ident = threading.get_ident()
         try:
             if complete:
                 self._close()
@@ -4474,21 +4488,61 @@ class S3File(AbstractBufferedFile):
         except Exception:
             _logger.exception(f"Failed to close s3://{self.bucket}/{self.key}.")
         finally:
-            self._closed_later.set()
+            self._end_close_later()
 
-    def _wait_for_close_later(self) -> None:
+    def _end_close_later(self) -> None:
+        """Mark the close that :meth:`_close_later` handed over as ended."""
+        self._closed_later.set()
+        _handed_over_closes.discard(self._closed_later)
+
+    @staticmethod
+    def _wait_for_handed_over_closes() -> None:
+        """Wait for the closes that run in threads of the ``_thread`` module.
+
+        Registered with :mod:`atexit`, since the interpreter does not join
+        these threads when it exits.
+        """
+        for closed in list(_handed_over_closes):
+            closed.wait()
+
+    def _wait_for_close_later(self) -> bool:
         """Wait for a close that :meth:`_close_later` handed over to end.
 
-        Not waited for in the thread that closes the file, or during a
-        collection, whose end starts the close.
+        It is not waited for in the thread that runs it, during a
+        collection, whose end starts it, or in a thread of an
+        :class:`S3ThreadPool`, since it may wait for a request queued behind
+        that thread.
+
+        Returns:
+            False if a handed-over close runs and cannot be waited for in
+            this thread; otherwise True.
         """
         closed_later = getattr(self, "_closed_later", None)
         if (
-            closed_later is not None
-            and getattr(self, "_closer", None) is not threading.current_thread()
-            and not S3File._in_collection()
+            closed_later is None
+            or closed_later.is_set()
+            or getattr(self, "_closer_ident", None) == threading.get_ident()
         ):
-            closed_later.wait()
+            return True
+        if S3File._in_collection() or S3ThreadPool.in_pool_thread():
+            return False
+        closed_later.wait()
+        return True
+
+    def _raise_unless_closed_later(self) -> None:
+        """Wait for a handed-over close to end, or raise if it cannot be waited for here.
+
+        Raises:
+            RuntimeError: If a close of the file was handed over to another
+                thread and runs, and this is called during a collection or
+                in a thread of an :class:`S3ThreadPool`.
+        """
+        if not self._wait_for_close_later():
+            raise RuntimeError(
+                f"s3://{self.bucket}/{self.key} is being closed in another thread, which "
+                "cannot be waited for during a garbage collection or in a thread of an "
+                "S3ThreadPool."
+            )
 
     def read(self, length: int = -1) -> bytes:
         """Read bytes from the file.
@@ -4751,12 +4805,14 @@ class S3File(AbstractBufferedFile):
             FileExistsError: If an object was created at the path after the
                 file was opened in exclusive-create mode.
             RuntimeError: In a forked child process of the process that
-                opened the file.
+                opened the file, or if a close of the file that was handed
+                over to another thread runs and this is called during a
+                garbage collection or in a thread of an :class:`S3ThreadPool`.
             S3MultipartStateError: If the write was discarded, or the write
                 or an earlier commit failed.
         """
         self._check_process()
-        self._wait_for_close_later()
+        self._raise_unless_closed_later()
         if self._session is None:
             # A file opened for reading has nothing to commit.
             return
@@ -4794,10 +4850,12 @@ class S3File(AbstractBufferedFile):
 
         Raises:
             RuntimeError: In a forked child process of the process that
-                opened the file.
+                opened the file, or if a close of the file that was handed
+                over to another thread runs and this is called during a
+                garbage collection or in a thread of an :class:`S3ThreadPool`.
         """
         self._check_process()
-        self._wait_for_close_later()
+        self._raise_unless_closed_later()
         if self._session is not None:
             self._session.abort()
 
@@ -5000,3 +5058,7 @@ class S3File(AbstractBufferedFile):
 
 
 gc.callbacks.append(S3File._track_collection)
+atexit.register(S3File._wait_for_handed_over_closes)
+if hasattr(os, "register_at_fork"):
+    # The closes of the parent do not run in a child.
+    os.register_at_fork(after_in_child=_handed_over_closes.clear)
