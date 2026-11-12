@@ -614,6 +614,8 @@ class TestAioS3FileSystem:
                 result = call(fs, convert, local)
             files = sorted(f.relative_to(local).as_posix() for f in local.rglob("*"))
             outcomes.append((result, sorted(map(repr, requests)), sorted(store), files))
+        # Each call either sends a request or returns a value.
+        assert outcomes[0][0] is not None or outcomes[0][1]
         assert outcomes[1] == outcomes[0]
 
     @pytest.mark.parametrize("path", ["s3://bucket/dir", None])

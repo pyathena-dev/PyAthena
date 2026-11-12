@@ -239,10 +239,11 @@ while the CreateMultipartUpload request is waited for is ignored. One while the 
 copies are waited for or the upload is aborted stops the cleanup, and the upload ID is
 logged.
 
-The methods also accept paths as `os.PathLike` objects, such as
-`pathlib.PurePosixPath("YOUR_S3_BUCKET/dir/key")`, and use them as their strings.
+Every method of the filesystems also accepts paths as `os.PathLike` objects, such as
+`pathlib.PurePosixPath("YOUR_S3_BUCKET/dir/key")`, and uses them as their strings.
 `pathlib` removes a trailing slash and collapses `//`, so a path with the `s3://`
-protocol or a trailing slash needs to be a string.
+protocol or a trailing slash needs to be a string. On Windows, `pathlib.Path` joins
+its parts with backslashes, so S3 paths need `PurePosixPath`.
 
 Paths are normalized as in fsspec, which drops a trailing slash, so `info`, `isfile`,
 and `open` treat `s3://YOUR_S3_BUCKET/dir/` as `s3://YOUR_S3_BUCKET/dir`: the object

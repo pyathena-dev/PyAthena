@@ -1824,7 +1824,6 @@ def serve_s3_keys(fs, keys):
         return {}
 
     def generate_presigned_url(*args, **kwargs):
-        # Signing sends no request, so its arguments are recorded as one.
         with lock:
             requests.append(("generate_presigned_url", {"args": args, **kwargs}))
         return "https://signed"

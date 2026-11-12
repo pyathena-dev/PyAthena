@@ -704,7 +704,7 @@ class S3FileSystem(AbstractFileSystem):
         return files
 
     def ls(
-        self, path: str, detail: bool = False, refresh: bool = False, **kwargs
+        self, path: str | os.PathLike[str], detail: bool = False, refresh: bool = False, **kwargs
     ) -> list[S3Object] | list[str]:
         """List contents of an S3 path.
 
@@ -813,7 +813,7 @@ class S3FileSystem(AbstractFileSystem):
             ]
         return files
 
-    def info(self, path: str, **kwargs) -> S3Object:
+    def info(self, path: str | os.PathLike[str], **kwargs) -> S3Object:
         """Return information about an S3 path.
 
         Uses the directory cache first: a cached entry for the path is
@@ -986,7 +986,7 @@ class S3FileSystem(AbstractFileSystem):
 
     def _find(
         self,
-        path: str,
+        path: str | os.PathLike[str],
         maxdepth: int | None = None,
         withdirs: bool | None = None,
         **kwargs,
@@ -1078,7 +1078,7 @@ class S3FileSystem(AbstractFileSystem):
 
     def find(
         self,
-        path: str,
+        path: str | os.PathLike[str],
         maxdepth: int | None = None,
         withdirs: bool | None = None,
         detail: bool = False,
@@ -1151,7 +1151,7 @@ class S3FileSystem(AbstractFileSystem):
             kwargs["prefix"] = stem
         return super().glob(stringify_path(path), maxdepth=maxdepth, **kwargs)
 
-    def unstrip_protocol(self, name: str) -> str:
+    def unstrip_protocol(self, name: str | os.PathLike[str]) -> str:
         """Add the protocol to a path, as fsspec's ``unstrip_protocol()`` does.
 
         Args:
@@ -1238,7 +1238,7 @@ class S3FileSystem(AbstractFileSystem):
             (versions if S3Path.has_version_id(p) else others).append(p)
         return versions, others
 
-    def exists(self, path: str, **kwargs) -> bool:
+    def exists(self, path: str | os.PathLike[str], **kwargs) -> bool:
         """Check if an S3 path exists.
 
         Determines whether a bucket, object, or prefix exists in S3.
@@ -1295,7 +1295,7 @@ class S3FileSystem(AbstractFileSystem):
             return True
         return bool(file)
 
-    def rm_file(self, path: str, **kwargs) -> None:
+    def rm_file(self, path: str | os.PathLike[str], **kwargs) -> None:
         """Delete an S3 object with DeleteObject.
 
         Does nothing for a bucket path. If the path has a version ID, that
@@ -1652,7 +1652,7 @@ class S3FileSystem(AbstractFileSystem):
         if message:
             raise OSError(message)
 
-    def mkdir(self, path: str, create_parents: bool = True, **kwargs) -> None:
+    def mkdir(self, path: str | os.PathLike[str], create_parents: bool = True, **kwargs) -> None:
         """Create an S3 bucket.
 
         S3 has no real directories below the bucket level; creating a key
@@ -1716,7 +1716,7 @@ class S3FileSystem(AbstractFileSystem):
             # and it is not requested to be created.
             raise FileNotFoundError(s3_path.bucket)
 
-    def makedirs(self, path: str, exist_ok: bool = False) -> None:
+    def makedirs(self, path: str | os.PathLike[str], exist_ok: bool = False) -> None:
         """Recursively create a directory, creating the bucket if necessary.
 
         Creating the bucket requires ``allow_bucket_creation=True`` on the
@@ -1739,7 +1739,7 @@ class S3FileSystem(AbstractFileSystem):
             if not exist_ok:
                 raise
 
-    def rmdir(self, path: str) -> None:
+    def rmdir(self, path: str | os.PathLike[str]) -> None:
         """Remove an S3 bucket, which must be empty.
 
         S3 has no real directories below the bucket level, so only bucket
@@ -1780,7 +1780,9 @@ class S3FileSystem(AbstractFileSystem):
         # so evict it directly.
         self._evict_cache("")
 
-    def touch(self, path: str, truncate: bool = True, **kwargs) -> dict[str, Any]:
+    def touch(
+        self, path: str | os.PathLike[str], truncate: bool = True, **kwargs
+    ) -> dict[str, Any]:
         """Create an empty object with PutObject.
 
         Args:
@@ -2209,7 +2211,13 @@ class S3FileSystem(AbstractFileSystem):
             seen.add(key)
 
     def cp_file(
-        self, path1: str, path2: str, recursive=False, maxdepth=None, on_error=None, **kwargs
+        self,
+        path1: str | os.PathLike[str],
+        path2: str | os.PathLike[str],
+        recursive=False,
+        maxdepth=None,
+        on_error=None,
+        **kwargs,
     ):
         """Copy an S3 object to another S3 location.
 
@@ -2448,7 +2456,11 @@ class S3FileSystem(AbstractFileSystem):
         self._run_batch(pipe_item, items, concurrency)
 
     def pipe_file(
-        self, path: str, value: bytes | bytearray | memoryview, mode: str = "overwrite", **kwargs
+        self,
+        path: str | os.PathLike[str],
+        value: bytes | bytearray | memoryview,
+        mode: str = "overwrite",
+        **kwargs,
     ) -> None:
         """Write bytes into the path.
 
@@ -2646,7 +2658,11 @@ class S3FileSystem(AbstractFileSystem):
         )
 
     def cat_file(
-        self, path: str, start: int | None = None, end: int | None = None, **kwargs
+        self,
+        path: str | os.PathLike[str],
+        start: int | None = None,
+        end: int | None = None,
+        **kwargs,
     ) -> bytes:
         """Read the contents of an S3 object with GetObject.
 
@@ -2819,8 +2835,8 @@ class S3FileSystem(AbstractFileSystem):
 
     def put_file(
         self,
-        lpath: str,
-        rpath: str,
+        lpath: str | os.PathLike[str],
+        rpath: str | os.PathLike[str],
         callback=_DEFAULT_CALLBACK,
         mode: str = "overwrite",
         **kwargs,
@@ -2891,7 +2907,14 @@ class S3FileSystem(AbstractFileSystem):
 
         self.invalidate_cache(rpath)
 
-    def get_file(self, rpath: str, lpath=None, callback=_DEFAULT_CALLBACK, outfile=None, **kwargs):
+    def get_file(
+        self,
+        rpath: str | os.PathLike[str],
+        lpath=None,
+        callback=_DEFAULT_CALLBACK,
+        outfile=None,
+        **kwargs,
+    ):
         """Download an S3 file to local filesystem.
 
         Downloads a file from S3 to the local filesystem with progress tracking.
@@ -2939,7 +2962,7 @@ class S3FileSystem(AbstractFileSystem):
                 outfile.write(data)
                 callback.relative_update(len(data))
 
-    def checksum(self, path: str, **kwargs):
+    def checksum(self, path: str | os.PathLike[str], **kwargs):
         """Get checksum for S3 object or directory.
 
         Computes a checksum for the specified S3 path. For individual objects,
@@ -2964,7 +2987,7 @@ class S3FileSystem(AbstractFileSystem):
             return int(info.get("etag").strip('"').split("-")[0], 16)
         return int(tokenize(info), 16)
 
-    def sign(self, path: str, expiration: int = 3600, **kwargs):
+    def sign(self, path: str | os.PathLike[str], expiration: int = 3600, **kwargs):
         """Generate a presigned URL for S3 object access.
 
         Creates a presigned URL that allows temporary access to an S3 object
@@ -2999,7 +3022,7 @@ class S3FileSystem(AbstractFileSystem):
             S3Path.parse(path), client_method, expiration, **kwargs
         )
 
-    def metadata(self, path: str, **kwargs) -> S3Metadata:
+    def metadata(self, path: str | os.PathLike[str], **kwargs) -> S3Metadata:
         """Return the metadata of the path.
 
         Args:
@@ -3019,7 +3042,7 @@ class S3FileSystem(AbstractFileSystem):
         _logger.debug(f"Head object metadata: {s3_path.uri}")
         return self.core.head_object(s3_path, **kwargs)
 
-    def getxattr(self, path: str, attr_name: str, **kwargs) -> str | None:
+    def getxattr(self, path: str | os.PathLike[str], attr_name: str, **kwargs) -> str | None:
         """Get an attribute from the user-defined metadata of the path.
 
         Args:
@@ -3030,10 +3053,11 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The value of the attribute, or None if the attribute is not set.
         """
-        path = stringify_path(path)
         return self.metadata(path, **kwargs).get(attr_name)
 
-    def setxattr(self, path: str, copy_kwargs: dict[str, Any] | None = None, **kw_args) -> None:
+    def setxattr(
+        self, path: str | os.PathLike[str], copy_kwargs: dict[str, Any] | None = None, **kw_args
+    ) -> None:
         """Set the user-defined metadata of the path.
 
         S3 does not allow updating the metadata of an existing object in
@@ -3091,7 +3115,7 @@ class S3FileSystem(AbstractFileSystem):
         self.core.replace_object_metadata(s3_path, head, metadata, **copy_kwargs)
         self.invalidate_cache(path)
 
-    def get_tags(self, path: str) -> dict[str, str]:
+    def get_tags(self, path: str | os.PathLike[str]) -> dict[str, str]:
         """Retrieve the tag key/values for the given path.
 
         Args:
@@ -3106,7 +3130,7 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError("Cannot get tags of a bucket.")
         return self.core.get_object_tagging(s3_path)
 
-    def put_tags(self, path: str, tags: dict[str, str], mode: str = "o") -> None:
+    def put_tags(self, path: str | os.PathLike[str], tags: dict[str, str], mode: str = "o") -> None:
         """Set the tags for the given existing key.
 
         Tags are a str:str mapping that can be attached to any key, distinct
@@ -3134,7 +3158,9 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError(f"Mode must be {{'o', 'm'}}, not {mode}.")
         self.core.put_object_tagging(s3_path, new_tags)
 
-    def chmod(self, path: str, acl: str, recursive: bool = False, **kwargs) -> None:
+    def chmod(
+        self, path: str | os.PathLike[str], acl: str, recursive: bool = False, **kwargs
+    ) -> None:
         """Set the Access Control on a bucket/key.
 
         See https://docs.aws.amazon.com/AmazonS3/latest/userguide/acl-overview.html#canned-acl
@@ -3194,7 +3220,7 @@ class S3FileSystem(AbstractFileSystem):
             if not missing_ok:
                 raise
 
-    def list_multipart_uploads(self, path: str) -> list[S3MultipartUpload]:
+    def list_multipart_uploads(self, path: str | os.PathLike[str]) -> list[S3MultipartUpload]:
         """List in-progress (incomplete) multipart uploads in a bucket.
 
         Incomplete multipart uploads continue to accrue storage costs until
@@ -3228,7 +3254,7 @@ class S3FileSystem(AbstractFileSystem):
         ]
 
     def object_version_info(
-        self, path: str, delete_markers: bool = False, **kwargs
+        self, path: str | os.PathLike[str], delete_markers: bool = False, **kwargs
     ) -> list[S3ObjectVersion]:
         """List the versions of the object or of the objects under the path.
 
@@ -3282,7 +3308,7 @@ class S3FileSystem(AbstractFileSystem):
             selected = [v for v, k in zip(versions, keys, strict=True) if k.startswith(prefix)]
         return [v for v in selected if delete_markers or not v.is_delete_marker]
 
-    def clear_multipart_uploads(self, path: str) -> None:
+    def clear_multipart_uploads(self, path: str | os.PathLike[str]) -> None:
         """Abort any incomplete multipart uploads in the bucket.
 
         Uploads completed or aborted after listing are already cleared.
@@ -3322,7 +3348,7 @@ class S3FileSystem(AbstractFileSystem):
             isinstance(error, FileNotFoundError) and S3ClientError.code_of(error) == "NoSuchUpload"
         )
 
-    def created(self, path: str) -> datetime:
+    def created(self, path: str | os.PathLike[str]) -> datetime:
         """Return the creation time of the path.
 
         Returns the same value as :meth:`modified`.
@@ -3335,7 +3361,7 @@ class S3FileSystem(AbstractFileSystem):
         """
         return self.modified(path)
 
-    def modified(self, path: str) -> datetime:
+    def modified(self, path: str | os.PathLike[str]) -> datetime:
         """Return the last-modified time of the path.
 
         Args:
@@ -3348,7 +3374,7 @@ class S3FileSystem(AbstractFileSystem):
         info = self.info(path)
         return cast(datetime, info.get("last_modified"))
 
-    def invalidate_cache(self, path: str | None = None) -> None:
+    def invalidate_cache(self, path: str | os.PathLike[str] | None = None) -> None:
         """Remove the cached entries of the path and its parent paths.
 
         The cached bucket listing is removed only by the root path (``""``,
@@ -3368,7 +3394,7 @@ class S3FileSystem(AbstractFileSystem):
         if path is None:
             self.dircache.clear()
             return
-        raw = os.fspath(path)
+        raw = stringify_path(path)
         stripped = self._strip_protocol(raw)
         if not stripped:
             self._evict_cache("")
