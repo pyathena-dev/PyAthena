@@ -9163,15 +9163,18 @@ class TestS3File:
 
         return start
 
-    @pytest.mark.parametrize("finalizing", [False, True])
     @pytest.mark.usefixtures("handed_over_closes_end")
-    def test_finalized_unclosed_file_without_thread(self, caplog, finalizing):
+    @pytest.mark.parametrize("when", ["running", "finalizing", "exiting"])
+    def test_finalized_unclosed_file_without_thread(self, caplog, when):
         # GH-1364: if no thread can be started for the close of a finalized
         # file, it is left unclosed, and its data uncommitted, rather than
         # closed where it would wait forever, here in the thread of the
         # request pool with its first part queued behind it. During
-        # interpreter finalization, when no other thread runs requests, it is
-        # closed in the finalizing thread instead, without starting a thread.
+        # interpreter finalization, when no other thread runs requests, and
+        # once the exit has waited for the handed-over closes, which it would
+        # not wait for again, it is closed in the finalizing thread instead,
+        # without starting a thread.
+        finalizing = when != "running"
         fs = self._make_append_fs(b"")
         fs._request_pool = S3ThreadPool(1)
         committers = []
@@ -9186,9 +9189,12 @@ class TestS3File:
                     "start_new_thread",
                     self._start_new_thread_unless_closing(_thread.start_new_thread),
                 ),
-                mock.patch.object(sys, "is_finalizing", return_value=finalizing),
+                mock.patch.object(sys, "is_finalizing", return_value=when == "finalizing"),
+                mock.patch("pyathena.filesystem.s3._handed_over_closes_waited", False),
                 caplog.at_level(logging.WARNING, logger="pyathena.filesystem.s3"),
             ):
+                if when == "exiting":
+                    S3File._wait_for_handed_over_closes()
                 finalization = self._finalize_unclosed_file(
                     fs, "collection" if finalizing else "queued part"
                 )
@@ -9326,9 +9332,18 @@ class TestS3File:
                     fs._request_pool.submit(close_and_commit, f).result(EVENT_TIMEOUT)
                 assert len(errors) == 1
                 fs.core.complete_multipart_upload.assert_not_called()
-                # Waits for the handed-over close.
-                f.close()
-                f.commit()
+
+                def close_and_commit_later():
+                    # Waits for the handed-over close.
+                    f.close()
+                    f.commit()
+
+                # A daemon thread, so that a close that waits forever does
+                # not keep the process alive.
+                committer = threading.Thread(target=close_and_commit_later, daemon=True)
+                committer.start()
+                committer.join(EVENT_TIMEOUT)
+                assert not committer.is_alive()
         finally:
             gc.enable()
             release.set()
@@ -9336,13 +9351,40 @@ class TestS3File:
         assert self._uploaded_object(fs, b"") == b"abcdefg"
 
     @pytest.mark.usefixtures("handed_over_closes_end")
-    @pytest.mark.parametrize("method", ["close", "commit"])
-    def test_close_handed_over_not_started(self, method):
+    @pytest.mark.parametrize(
+        ("method", "waiting"),
+        [("close", False), ("commit", False), ("commit", True), ("close in pool", False)],
+    )
+    def test_close_handed_over_not_started(self, method, waiting):
         # GH-1364: when no thread could be started for a handed-over close,
-        # a later close() or commit() of the file closes it first, instead of
-        # waiting forever, or completing the upload, as at the end of a
-        # transaction, without the data that the close uploads.
+        # a later close() or commit() of the file closes it first, also one
+        # that already waits for it, instead of waiting forever, or
+        # completing the upload, as at the end of a transaction, without the
+        # data that the close uploads. In a thread of the request pool, where
+        # the close could wait for a part queued behind it, close() leaves
+        # the file open and commit() raises.
         fs = self._make_append_fs(b"")
+        fs._request_pool = S3ThreadPool(1)
+        errors = []
+
+        def close_and_commit_in_pool(file):
+            file.close()
+            assert not file.closed
+            try:
+                file.commit()
+            except RuntimeError as e:
+                errors.append(e)
+
+        handed_over = threading.Event()
+        waited = threading.Event()
+        start_new_thread = self._start_new_thread_unless_closing(_thread.start_new_thread)
+
+        def start_new_thread_once_waited(function, args):
+            if isinstance(getattr(function, "__self__", None), contextvars.Context):
+                handed_over.set()
+                if waiting:
+                    assert waited.wait(EVENT_TIMEOUT)
+            return start_new_thread(function, args)
 
         class Closer:
             def __init__(self, file):
@@ -9355,30 +9397,99 @@ class TestS3File:
 
         gc.disable()
         try:
-            with mock.patch.object(
-                _thread,
-                "start_new_thread",
-                self._start_new_thread_unless_closing(_thread.start_new_thread),
-            ):
+            with mock.patch.object(_thread, "start_new_thread", start_new_thread_once_waited):
                 f = S3File(
-                    fs, "s3://bucket/key.txt", mode="wb", block_size=4, autocommit=method == "close"
+                    fs,
+                    "s3://bucket/key.txt",
+                    mode="wb",
+                    block_size=4,
+                    autocommit=method != "commit",
                 )
                 f.write(b"abcde")
                 f.write(b"fg")
                 Closer(f)
-                gc.collect()
-            assert not f.closed
-            # A daemon thread, so that a call that waits forever does not
-            # keep the process alive.
-            caller = threading.Thread(target=getattr(f, method), daemon=True)
-            caller.start()
+                # Daemon threads, so that a call that waits forever does not
+                # keep the process alive.
+                collector = threading.Thread(target=gc.collect, daemon=True)
+                collector.start()
+                assert handed_over.wait(EVENT_TIMEOUT)
+                caller = threading.Thread(target=getattr(f, method.split()[0]), daemon=True)
+                if waiting:
+                    # The caller waits for the close before its start fails.
+                    closed_later = f._closed_later
+                    wait = closed_later.wait
+
+                    def observed_wait(timeout=None):
+                        waited.set()
+                        return wait(timeout)
+
+                    closed_later.wait = observed_wait
+                    caller.start()
+                collector.join(EVENT_TIMEOUT)
+                assert not collector.is_alive()
+            if method == "close in pool":
+                fs._request_pool.submit(close_and_commit_in_pool, f).result(EVENT_TIMEOUT)
+                assert len(errors) == 1
+            if not waiting:
+                assert not f.closed
+                caller.start()
             caller.join(EVENT_TIMEOUT)
             assert not caller.is_alive()
         finally:
             gc.enable()
+            waited.set()
             shutdown_bounded(fs._request_pool)
         assert f.closed
         assert self._uploaded_object(fs, b"") == b"abcdefg"
+
+    @pytest.mark.usefixtures("handed_over_closes_end")
+    def test_close_handed_over_failed_write_is_discarded(self):
+        # GH-1364: when a write fails during the collection that handed over
+        # the close of its file, as a text wrapper writes when it is
+        # finalized, the handed-over close discards the write, which the
+        # failing write cannot wait for.
+        fs = self._make_append_fs(b"")
+        failed = threading.Event()
+        aborted = threading.Event()
+        errors = []
+
+        def fail_part(**kwargs):
+            failed.set()
+            raise OSError("part failed")
+
+        fs.core.upload_part.side_effect = fail_part
+        fs._call.side_effect = lambda *args, **kwargs: aborted.set()
+
+        class Writer:
+            def __init__(self, file):
+                self.file = file
+                self.cycle = self
+
+            def __del__(self):
+                # Hands the close over, then writes another part.
+                self.file.close()
+                try:
+                    self.file.write(b"fghij")
+                except OSError as e:
+                    errors.append(e)
+
+        gc.disable()
+        try:
+            f = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4)
+            f.write(b"abcde")
+            assert failed.wait(EVENT_TIMEOUT)
+            Writer(f)
+            del f
+            gc.collect()
+            assert aborted.wait(EVENT_TIMEOUT)
+        finally:
+            gc.enable()
+            shutdown_bounded(fs._request_pool)
+        assert len(errors) == 1
+        fs._call.assert_called_once_with(
+            S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
+        )
+        fs.core.complete_multipart_upload.assert_not_called()
 
     @pytest.mark.parametrize("autocommit", [True, False])
     def test_upload_chunk_multipart(self, autocommit):

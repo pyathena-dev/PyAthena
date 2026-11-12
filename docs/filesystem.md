@@ -213,9 +213,10 @@ closed is closed when it is finalized, which commits its written data unless
   in a new thread. The interpreter waits for these closes when it exits. If no thread
   can be started, the file is left unclosed and its multipart upload incomplete.
 - When its last reference is dropped elsewhere, it is closed before that returns.
-- During interpreter finalization, it is closed in the finalizing thread instead of a
-  new thread. The request pools take no more calls then, so a file with data left to
-  upload as a part is not committed, and its multipart upload is aborted.
+- During interpreter finalization, or after the exit has waited for the closes in new
+  threads, it is closed in the finalizing thread instead of a new thread. The request
+  pools take no more calls then, so a file with data left to upload as a part is not
+  committed, and its multipart upload is aborted.
 
 If the garbage collector finalizes the write buffer of a file before the file, the data
 of the file is not committed, and its multipart upload is aborted.
@@ -226,7 +227,8 @@ collection has ended, and returns before the file is closed. A later `close()`,
 `commit()`, or `discard()` of the file waits for that close to end. During a collection
 or in a thread of an `S3ThreadPool`, `close()` returns without waiting instead, and
 `commit()` and `discard()` raise `RuntimeError`. If no thread could be started for that
-close, a later `close()`, `commit()`, or `discard()` of the file closes it first.
+close, a later `close()`, `commit()`, or `discard()` of the file elsewhere closes it
+first.
 
 A file opened in text mode is closed by its text wrapper when the wrapper is finalized.
 The wrapper writes its remaining text to the file in the thread that finalizes it, and
