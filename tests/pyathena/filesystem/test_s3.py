@@ -47,7 +47,12 @@ from fsspec.implementations.memory import MemoryFileSystem
 
 import pyathena
 from pyathena.filesystem import register_s3_filesystem, s3_filesystem
-from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
+from pyathena.filesystem.s3 import (
+    CompressedBuffer,
+    S3File,
+    S3FileSystem,
+    _handed_over_closes,
+)
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3MultipartCopyPlan
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool, _S3Batch, _S3PoolScope
@@ -8950,6 +8955,15 @@ class TestS3File:
         assert operation.calls == 1
         assert file.closed
 
+    @pytest.fixture
+    def handed_over_closes_end(self):
+        # Each close that the test hands over ends; one that does not fails
+        # the test instead of leaving an exit to wait for it forever.
+        yield
+        pending = list(_handed_over_closes)
+        _handed_over_closes.clear()
+        assert all(closed.wait(EVENT_TIMEOUT) for closed in pending)
+
     @staticmethod
     def _finalize_unclosed_file(fs, where, *, text=False):
         # Write a multipart file without closing it, and finalize it in the
@@ -9020,7 +9034,7 @@ class TestS3File:
         def record_start(file, complete):
             started_in_collection.append(S3File._in_collection())
             start_close(file, complete)
-            if file not in closes and file._closed_later.is_set():
+            if file not in closes and file._closed_later not in _handed_over_closes:
                 # No thread could be started.
                 resolved.release()
 
@@ -9076,6 +9090,7 @@ class TestS3File:
             ("last reference in pool", False),
         ],
     )
+    @pytest.mark.usefixtures("handed_over_closes_end")
     def test_finalized_unclosed_file(self, where, text):
         # GH-1364: an unclosed file is committed when it is finalized. Only a
         # file whose last reference is dropped in a user thread is committed
@@ -9110,6 +9125,7 @@ class TestS3File:
         # wrapper closes the file before the finalizer of the file runs.
         assert len(finalization.closes) == (0 if where == "last reference" else 1)
 
+    @pytest.mark.usefixtures("handed_over_closes_end")
     def test_finalized_unclosed_file_with_finalized_buffer(self, caplog):
         # GH-1364: an unclosed file whose buffer the collector finalized
         # first is discarded, instead of committed without the buffered data.
@@ -9148,6 +9164,7 @@ class TestS3File:
         return start
 
     @pytest.mark.parametrize("finalizing", [False, True])
+    @pytest.mark.usefixtures("handed_over_closes_end")
     def test_finalized_unclosed_file_without_thread(self, caplog, finalizing):
         # GH-1364: if no thread can be started for the close of a finalized
         # file, it is left unclosed, and its data uncommitted, rather than
@@ -9188,6 +9205,7 @@ class TestS3File:
         ("method", "autocommit"),
         [("close", True), ("close", False), ("commit", False), ("discard", False)],
     )
+    @pytest.mark.usefixtures("handed_over_closes_end")
     def test_close_handed_over_is_waited_for(self, method, autocommit):
         # GH-1364: a close of a file that the finalizer of its text wrapper
         # hands over during a collection is waited for by a later close(),
@@ -9251,6 +9269,7 @@ class TestS3File:
             assert self._uploaded_object(fs, b"") == b"abcdefg"
 
     @pytest.mark.parametrize("where", ["collection", "pool"])
+    @pytest.mark.usefixtures("handed_over_closes_end")
     def test_close_handed_over_is_not_waited_for(self, where):
         # GH-1364: where a handed-over close of a file cannot be waited for,
         # during a collection, whose end starts it, or in the thread of the
@@ -9316,9 +9335,13 @@ class TestS3File:
             shutdown_bounded(fs._request_pool)
         assert self._uploaded_object(fs, b"") == b"abcdefg"
 
-    def test_close_handed_over_not_started_is_not_waited_for(self):
+    @pytest.mark.usefixtures("handed_over_closes_end")
+    @pytest.mark.parametrize("method", ["close", "commit"])
+    def test_close_handed_over_not_started(self, method):
         # GH-1364: when no thread could be started for a handed-over close,
-        # a later close() of the file closes it instead of waiting forever.
+        # a later close() or commit() of the file closes it first, instead of
+        # waiting forever, or completing the upload, as at the end of a
+        # transaction, without the data that the close uploads.
         fs = self._make_append_fs(b"")
 
         class Closer:
@@ -9337,22 +9360,25 @@ class TestS3File:
                 "start_new_thread",
                 self._start_new_thread_unless_closing(_thread.start_new_thread),
             ):
-                f = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4)
+                f = S3File(
+                    fs, "s3://bucket/key.txt", mode="wb", block_size=4, autocommit=method == "close"
+                )
                 f.write(b"abcde")
+                f.write(b"fg")
                 Closer(f)
                 gc.collect()
             assert not f.closed
-            # A daemon thread, so that a close that waits forever does not
+            # A daemon thread, so that a call that waits forever does not
             # keep the process alive.
-            closer = threading.Thread(target=f.close, daemon=True)
-            closer.start()
-            closer.join(EVENT_TIMEOUT)
-            assert not closer.is_alive()
+            caller = threading.Thread(target=getattr(f, method), daemon=True)
+            caller.start()
+            caller.join(EVENT_TIMEOUT)
+            assert not caller.is_alive()
         finally:
             gc.enable()
             shutdown_bounded(fs._request_pool)
         assert f.closed
-        assert self._uploaded_object(fs, b"") == b"abcde"
+        assert self._uploaded_object(fs, b"") == b"abcdefg"
 
     @pytest.mark.parametrize("autocommit", [True, False])
     def test_upload_chunk_multipart(self, autocommit):

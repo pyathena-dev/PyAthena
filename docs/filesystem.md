@@ -226,7 +226,7 @@ collection has ended, and returns before the file is closed. A later `close()`,
 `commit()`, or `discard()` of the file waits for that close to end. During a collection
 or in a thread of an `S3ThreadPool`, `close()` returns without waiting instead, and
 `commit()` and `discard()` raise `RuntimeError`. If no thread could be started for that
-close, a later `close()` closes the file.
+close, a later `close()`, `commit()`, or `discard()` of the file closes it first.
 
 A file opened in text mode is closed by its text wrapper when the wrapper is finalized.
 The wrapper writes its remaining text to the file in the thread that finalizes it, and

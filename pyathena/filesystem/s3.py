@@ -4444,16 +4444,17 @@ class S3File(AbstractBufferedFile):
         the pools take no more calls, so the close does not wait for a part
         queued behind it. If no thread can be started otherwise, the file is
         left unclosed rather than closed in this thread, where it could wait
-        forever.
+        forever, until a later :meth:`close`, :meth:`commit`, or
+        :meth:`discard` closes it (see :meth:`_wait_for_close_later`).
 
         Args:
             complete: Whether the written data is complete.
         """
         if self._inherited():
             # Handed over in the parent, which forked before the collection
-            # ended.
+            # ended. Its event, whose lock the fork may have copied held, is
+            # left alone.
             self.closed = True
-            self._end_close_later()
             return
         if sys.is_finalizing():
             self._close_collected(complete)
@@ -4466,7 +4467,8 @@ class S3File(AbstractBufferedFile):
                 f"s3://{self.bucket}/{self.key} was not closed, and no thread could be "
                 "started to close it when it was finalized; its data was not committed."
             )
-            self._end_close_later()
+            self._unstarted_close: bool | None = complete
+            _handed_over_closes.discard(self._closed_later)
 
     def _close_collected(self, complete: bool) -> None:
         """Close a finalized file, logging a failure instead of raising it.
@@ -4492,18 +4494,20 @@ class S3File(AbstractBufferedFile):
 
     def _end_close_later(self) -> None:
         """Mark the close that :meth:`_close_later` handed over as ended."""
-        self._closed_later.set()
         _handed_over_closes.discard(self._closed_later)
+        self._closed_later.set()
 
     @staticmethod
     def _wait_for_handed_over_closes() -> None:
         """Wait for the closes that run in threads of the ``_thread`` module.
 
         Registered with :mod:`atexit`, since the interpreter does not join
-        these threads when it exits.
+        these threads when it exits. Also waits for the closes that are
+        handed over while it waits.
         """
-        for closed in list(_handed_over_closes):
-            closed.wait()
+        while _handed_over_closes:
+            for closed in list(_handed_over_closes):
+                closed.wait()
 
     def _wait_for_close_later(self) -> bool:
         """Wait for a close that :meth:`_close_later` handed over to end.
@@ -4511,11 +4515,12 @@ class S3File(AbstractBufferedFile):
         It is not waited for in the thread that runs it, during a
         collection, whose end starts it, or in a thread of an
         :class:`S3ThreadPool`, since it may wait for a request queued behind
-        that thread.
+        that thread. A close for which no thread could be started is run
+        here instead, where it can be waited for.
 
         Returns:
-            False if a handed-over close runs and cannot be waited for in
-            this thread; otherwise True.
+            False if a handed-over close has not ended and cannot be waited
+            for in this thread; otherwise True.
         """
         closed_later = getattr(self, "_closed_later", None)
         if (
@@ -4526,6 +4531,10 @@ class S3File(AbstractBufferedFile):
             return True
         if S3File._in_collection() or S3ThreadPool.in_pool_thread():
             return False
+        unstarted = getattr(self, "_unstarted_close", None)
+        if unstarted is not None:
+            self._unstarted_close = None
+            self._close_collected(unstarted)
         closed_later.wait()
         return True
 
