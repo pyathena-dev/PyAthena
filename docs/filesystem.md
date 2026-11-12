@@ -475,8 +475,9 @@ error persists is sent up to 40 times before the operation raises the error. The
 of the policy, which add up to 127 seconds plus jitter, come on top of botocore's own.
 
 A request body given as a stream, such as `S3Core.put_object(path, Body=file)`, is sent
-from the position where the call found it on each attempt of the policy. A stream that
-cannot seek is sent without the retries of the policy.
+from the position where the call found it on each attempt of the policy. A stream whose
+position cannot be read with `tell()` and restored with `seek()` is sent without the
+retries of the policy.
 
 ## Object metadata, tags, and ACLs
 

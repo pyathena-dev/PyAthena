@@ -177,11 +177,13 @@ class TestS3Core:
                 core.head_object(S3Path("bucket", "key"))
             stubber.assert_no_pending_responses()
 
-    @pytest.mark.parametrize("seekable", [True, False])
-    def test_call_retries_stream_body(self, seekable):
-        # GH-1375: each attempt of the policy sends a stream body from where
-        # the call found it, after the previous attempt has read it to its
-        # end; a stream that cannot seek is sent once.
+    @pytest.mark.parametrize("bound", [False, True], ids=["request", "partial"])
+    @pytest.mark.parametrize("seekable", [True, False], ids=["seekable", "unseekable"])
+    def test_call_retries_stream_body(self, seekable, bound):
+        # GH-1375: each attempt of the policy sends a stream body, given to the
+        # call or bound by a partial, from where the call found it, after the
+        # previous attempt has read it to its end; a stream that cannot seek
+        # is sent once.
         client = boto3.client(
             "s3",
             region_name="us-east-1",
@@ -209,12 +211,17 @@ class TestS3Core:
         core = S3Core(client, retry_config=RetryConfig(attempt=2, multiplier=0))
         body = io.BytesIO(b"--data") if seekable else _UnseekableStream(b"--data")
         body.read(2)
+        if bound:
+            method = functools.partial(client.put_object, Bucket="bucket", Key="key", Body=body)
+            request = {}
+        else:
+            method, request = "put_object", {"Bucket": "bucket", "Key": "key", "Body": body}
         if seekable:
-            core.put_object(S3Path("bucket", "key"), Body=body)
+            core.call(method, **request)
             assert sent == [b"data", b"data"]
         else:
             with pytest.raises(OSError, match="Try again"):
-                core.put_object(S3Path("bucket", "key"), Body=body)
+                core.call(method, **request)
             assert sent == [b"data"]
 
     def test_default_retry_config(self):

@@ -664,10 +664,12 @@ class S3Core:
         A callable whose ``__name__`` is not that of a client method is sent
         without them.
 
-        A ``Body`` that is a stream is sent from the position where the call
-        found it on each attempt of the policy. One that cannot seek is sent
-        once, without the retries of the policy, since a retry would send only
-        the rest of the stream.
+        A ``Body`` that is a stream, given to the call or bound by a
+        ``functools.partial``, is sent from the position where the call found
+        it on each attempt of the policy. One whose position cannot be read
+        with ``tell()`` and restored with ``seek()`` is sent once, without the
+        retries of the policy, since a retry would send only the rest of the
+        stream.
 
         Args:
             method: The name of the client method, or the method itself.
@@ -689,15 +691,17 @@ class S3Core:
             retry state, which keeps the error in a reference cycle.
         """
         func = getattr(self._client, method) if isinstance(method, str) else method
+        # The keywords that the partials bind; those of an outer one win.
+        target = func
+        bound: dict[str, Any] = {}
+        while isinstance(target, functools.partial):
+            bound = {**target.keywords, **bound}
+            target = target.func
         if self._request_kwargs:
-            target, bound = func, set(request)
-            while isinstance(target, functools.partial):
-                bound.update(target.keywords)
-                target = target.func
             params = self.operation_params(getattr(target, "__name__", ""), self._request_kwargs)
-            request.update({k: v for k, v in params.items() if k not in bound})
+            request.update({k: v for k, v in params.items() if k not in request and k not in bound})
         config, send = self._retry_config, func
-        body = request.get("Body")
+        body = request["Body"] if "Body" in request else bound.get("Body")
         if body is not None and hasattr(body, "read"):
             try:
                 position = body.tell()
