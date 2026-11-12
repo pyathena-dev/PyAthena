@@ -232,7 +232,9 @@ first.
 
 A file opened in text mode is closed by its text wrapper when the wrapper is finalized.
 The wrapper writes its remaining text to the file in the thread that finalizes it, and
-then closes the file there, or as above during a collection.
+then closes the file there, or as above during a collection. That write waits as any
+write does, so in a thread of an `S3ThreadPool` it can wait forever for a part of the
+file that is queued behind that thread.
 
 An interrupt, such as Ctrl+C, or a failure while a file reads ranges in parallel
 cancels the range reads that have not started, and the running ones make no further

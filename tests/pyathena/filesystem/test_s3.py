@@ -9286,6 +9286,7 @@ class TestS3File:
         fs = self._make_append_fs(b"")
         fs._request_pool = S3ThreadPool(1)
         release = threading.Event()
+        closed = []
         errors = []
         close_collected = S3File._close_collected
 
@@ -9297,10 +9298,11 @@ class TestS3File:
             try:
                 file.close()
                 # The close is left to the thread that runs it.
-                assert not file.closed
-                file.commit()
-            except RuntimeError as e:
-                errors.append(e)
+                closed.append(file.closed)
+                try:
+                    file.commit()
+                except RuntimeError as e:
+                    errors.append(e)
             finally:
                 release.set()
 
@@ -9330,6 +9332,7 @@ class TestS3File:
                 assert not collector.is_alive()
                 if where == "pool":
                     fs._request_pool.submit(close_and_commit, f).result(EVENT_TIMEOUT)
+                assert closed == [False]
                 assert len(errors) == 1
                 fs.core.complete_multipart_upload.assert_not_called()
 
