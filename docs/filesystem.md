@@ -325,7 +325,11 @@ the file is opened, or copied as parts when its upload starts, on the condition 
 ETag looked up when the file was opened. If the object was replaced before it is read or
 copied, the append raises `OSError`, and its multipart upload, if any, is aborted. The
 write of the appended object is not conditional, so it replaces an object written after
-the existing object was read or copied. A key that is only a prefix of other keys has no object: reading it raises
+the existing object was read or copied. The appended object keeps the attributes of the
+existing object that neither the call nor the `s3_additional_kwargs` of the filesystem
+give: its system-defined metadata, such as `ContentType`, its user-defined metadata, its
+storage class, and its encryption, unless they give any encryption parameter, such as
+`ServerSideEncryption`. It does not keep the object lock of the existing object. A key that is only a prefix of other keys has no object: reading it raises
 `FileNotFoundError`, and appending, exclusive creation (`"xb"`), and `pipe`/`put` with
 `mode="create"` write a new object.
 

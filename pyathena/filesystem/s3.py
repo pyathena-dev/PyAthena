@@ -3560,6 +3560,26 @@ class S3FileSystem(AbstractFileSystem):
         return self._core.call(method, **kwargs)
 
 
+# The parameters of the encryption of a written object, kept from an appended
+# object as a whole.
+_ENCRYPTION_PARAMS = frozenset(
+    [
+        "ServerSideEncryption",
+        "SSEKMSKeyId",
+        "SSEKMSEncryptionContext",
+        "BucketKeyEnabled",
+        "SSECustomerAlgorithm",
+        "SSECustomerKey",
+        "SSECustomerKeyMD5",
+    ]
+)
+# The object lock of an appended object, which the rewritten object does not
+# keep.
+_OBJECT_LOCK_PARAMS = frozenset(
+    ["ObjectLockMode", "ObjectLockRetainUntilDate", "ObjectLockLegalHoldStatus"]
+)
+
+
 @dataclass
 class S3FileTarget:
     """The object that a file reads or writes, resolved when it is opened.
@@ -3580,8 +3600,12 @@ class S3FileTarget:
         key: The key of the object.
         version_id: The version that is read, if any.
         request_kwargs: The parameters of the S3 requests of the file, with
-            the conditions above and, in append mode, the metadata of the
-            existing object, which the rewritten object keeps.
+            the conditions above and, in append mode, the attributes of the
+            existing object that the request parameters (those of the call
+            and of the filesystem) do not give, which the rewritten object
+            keeps: its system-defined and user-defined metadata, storage
+            class, and encryption, unless they give any encryption
+            parameter. Its object lock is not kept.
         details: The object that is read or appended, or an empty dictionary.
         size: The size of the object that is read, if known.
         appended: The existing object in append mode, if any.
@@ -3723,7 +3747,16 @@ class S3FileTarget:
                     # is not.
                     condition = {"IfMatch": etag} if etag else {}
                     append_data = fs.cat_file(path, **condition, **lookup_kwargs)
-                kwargs.update(appended.to_api_repr())
+                # The attributes of the object looked up are kept where the
+                # caller gives none: the encryption as a whole, so that its
+                # fields are not combined with another encryption, and
+                # without the object lock, which the caller sets.
+                inherited = appended.to_api_repr()
+                if _ENCRYPTION_PARAMS.intersection(kwargs):
+                    inherited = {k: v for k, v in inherited.items() if k not in _ENCRYPTION_PARAMS}
+                for k, v in inherited.items():
+                    if k not in _OBJECT_LOCK_PARAMS:
+                        kwargs.setdefault(k, v)
                 # The part copies read the object looked up, with the
                 # parameters that authorize the access to it under the names
                 # of the copy source; a caller's values are kept.
