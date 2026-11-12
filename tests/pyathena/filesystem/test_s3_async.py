@@ -1851,17 +1851,25 @@ class TestAioS3FileSystem:
 
         return call
 
-    @pytest.mark.parametrize("shutdown", [False, True])
     @pytest.mark.parametrize(
-        "method", ["_cat", "_cat_ranges", "_pipe", "_put", "_get", "_copy", "_mv"]
+        ("method", "cancellation"),
+        [
+            (method, cancellation)
+            for method in ["_cat", "_cat_ranges", "_pipe", "_put", "_get", "_copy", "_mv"]
+            for cancellation in ["batch", "calls_first", "shutdown"]
+            # asyncio.gather() cancels the copies of _mv() again.
+            if (method, cancellation) != ("_mv", "calls_first")
+        ],
     )
-    def test_batch_cancelled_waits_for_calls(self, tmp_path, method, shutdown):
+    def test_batch_cancelled_waits_for_calls(self, tmp_path, method, cancellation):
         # GH-1337: a cancelled batch coroutine cancels its per-object calls,
         # which make no further request, and raises once they have ended.
         # fsspec's batch coroutines left them running after the
-        # cancellation. When the shutdown of the event loop at the end of
-        # asyncio.run() cancels the batch and its calls together, a call is
-        # not cancelled again, which would stop its wait.
+        # cancellation. A call whose task is already being cancelled, as the
+        # shutdown of the event loop at the end of asyncio.run() cancels
+        # every task, possibly before the batch handles its own
+        # cancellation (calls_first), is not cancelled again, which would
+        # stop its wait.
         fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
         state = {"started": 0, "ended": 0, "stopped": 0}
@@ -1887,24 +1895,33 @@ class TestAioS3FileSystem:
             "_copy": lambda: fs._copy(sources, destinations),
             "_mv": lambda: fs._mv(sources, destinations),
         }
-        returned = threading.Event()
-        returned_while_held = []
+        # The calls that had ended when the batch finished, recorded in the
+        # event loop.
+        ended_when_done = []
 
-        def release_once_stopped():
-            # The shutdown: asyncio.run() must not return while the stopped
-            # calls are held.
+        def release_once_stopped(task):
+            # The shutdown: the stopped calls are held until the batch has
+            # finished, which it must not before they end, or for 0.5 s.
             poll_until(lambda: state["stopped"] == 2, "the calls were not stopped")
-            returned_while_held.append(returned.wait(0.1))
+            deadline = time.monotonic() + 0.5
+            while not task.done() and time.monotonic() < deadline:
+                time.sleep(0.01)
             release.set()
 
         async def main():
             task = asyncio.ensure_future(batches[method]())
+            task.add_done_callback(lambda _: ended_when_done.append(state["ended"]))
             await wait_until(lambda: state["started"] == 2)
-            if shutdown:
+            if cancellation == "shutdown":
                 # asyncio.run() cancels the batch and its calls once main()
                 # has returned.
-                threading.Thread(target=release_once_stopped, daemon=True).start()
+                threading.Thread(target=release_once_stopped, args=(task,), daemon=True).start()
                 return
+            if cancellation == "calls_first":
+                current = asyncio.current_task()
+                for call in asyncio.all_tasks() - {current, task}:
+                    call.cancel()
+                await wait_until(lambda: state["stopped"] == 2)
             task.cancel()
             await wait_until(lambda: state["stopped"] == 2)
             done, _ = await asyncio.wait([task], timeout=0.1)
@@ -1912,15 +1929,13 @@ class TestAioS3FileSystem:
             release.set()
             with pytest.raises(asyncio.CancelledError):
                 await await_bounded(task)
-            assert state["ended"] == 2
 
         try:
             run_bounded(main)
-            returned.set()
         finally:
             release.set()
         assert state == {"started": 2, "ended": 2, "stopped": 2}
-        assert returned_while_held == ([False] if shutdown else [])
+        assert ended_when_done == [2]
 
     @pytest.mark.parametrize("method", ["_pipe", "_put", "_get"])
     def test_batch_failure_waits_for_calls(self, tmp_path, method):
@@ -2015,6 +2030,99 @@ class TestAioS3FileSystem:
             "upload_part",
             "abort_multipart_upload",
         ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stage", ["before_open", "last_part", "discard_queued"])
+    async def test_transaction_put_file_cancelled_twice(self, tmp_path, stage):
+        # GH-1337: a second cancellation of a _put_file() in a transaction
+        # returns without a further wait, and the transaction does not commit
+        # the file, whether the write opens it only afterwards (before_open),
+        # still runs its last part (last_part), or has ended and its discard
+        # waits for a thread of the filesystem (discard_queued).
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=1 if stage == "discard_queued" else None,
+            skip_instance_cache=True,
+        )
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        local = tmp_path / "local"
+        local.write_bytes(bytes(2 * block_size if stage == "last_part" else 1))
+        state = {"started": 0, "ended": 0, "stopped": 0}
+        release = threading.Event()
+        held = self._held_until_stopped(state, release)
+        requests = []
+
+        def call(method, **request):
+            requests.append(method.__name__)
+            if method.__name__ == "create_multipart_upload":
+                return {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+            if method.__name__ == "upload_part" and request["PartNumber"] == 2:
+                held()
+            return {"ETag": '"e"'}
+
+        class HeldCallback(Callback):
+            def set_size(self, size):
+                if stage == "before_open":
+                    held()
+
+            def relative_update(self, inc=1):
+                if stage == "discard_queued":
+                    held()
+
+        fs._sync_fs._call = fs._sync_fs._core.call = call
+        blocker_started = threading.Event()
+        blocker_release = threading.Event()
+
+        def blocker(*args, **kwargs):
+            blocker_started.set()
+            blocker_release.wait(EVENT_TIMEOUT)
+            return {}
+
+        fs._sync_fs.info = blocker
+        try:
+            with fs.transaction:
+                task = asyncio.ensure_future(
+                    fs._put_file(
+                        str(local),
+                        "s3://bucket/key",
+                        callback=HeldCallback(),
+                        block_size=block_size,
+                        max_workers=1,
+                    )
+                )
+                await wait_until(lambda: state["started"] == 1)
+                if stage == "discard_queued":
+                    # Takes the only thread once the write has ended.
+                    info = asyncio.ensure_future(fs._info("s3://bucket/other"))
+                    await asyncio.sleep(0.1)
+                task.cancel()
+                await wait_until(lambda: state["stopped"] == 1)
+                if stage == "discard_queued":
+                    release.set()
+                    assert await asyncio.to_thread(blocker_started.wait, EVENT_TIMEOUT)
+                    # The file has been dropped and its discard queued.
+                    await wait_until(lambda: not fs.transaction.files)
+                task.cancel()
+                # While the write or the queued discard is still held.
+                with pytest.raises(asyncio.CancelledError):
+                    await await_bounded(task, timeout=2)
+                if stage != "discard_queued":
+                    # The write ends while the transaction is still open.
+                    release.set()
+                    await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
+            blocker_release.set()
+            if stage == "discard_queued":
+                await info
+                await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
+        finally:
+            release.set()
+            blocker_release.set()
+        assert "complete_multipart_upload" not in requests
+        assert "put_object" not in requests
+        if stage == "last_part":
+            assert requests[-1] == "abort_multipart_upload"
 
     @pytest.mark.asyncio
     async def test_put_pipe_return_values(self, tmp_path):

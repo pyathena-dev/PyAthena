@@ -1986,14 +1986,18 @@ class TestS3FileSystem:
 
     @staticmethod
     def _moves(fs):
-        # The CopyObject requests, as (CopySource, Key), and the objects of
-        # the DeleteObjects requests that the filesystem sent.
+        # The CopyObject requests, as (CopySource, Key) sorted by Key, since
+        # the copies run in parallel, and the objects of the DeleteObjects
+        # requests that the filesystem sent.
         calls = fs._call.call_args_list
-        copies = [
-            (c.kwargs["CopySource"], c.kwargs["Key"])
-            for c in calls
-            if c.args[0] is fs._client.copy_object
-        ]
+        copies = sorted(
+            (
+                (c.kwargs["CopySource"], c.kwargs["Key"])
+                for c in calls
+                if c.args[0] is fs._client.copy_object
+            ),
+            key=lambda copy: copy[1],
+        )
         deletes = [
             c.kwargs["Delete"]["Objects"] for c in calls if c.args[0] is fs._client.delete_objects
         ]
