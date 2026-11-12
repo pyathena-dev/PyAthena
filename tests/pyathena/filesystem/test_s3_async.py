@@ -2278,7 +2278,7 @@ class TestAioS3FileSystem:
             max_workers=4,
             skip_instance_cache=True,
         )
-        self._serve_keys(fs, {f"dir/{i}" for i in range(files)})
+        serve_s3_keys(fs._sync_fs, {f"dir/{i}" for i in range(files)})
         windows = []
 
         def get_file(rpath, lpath, **get_kwargs):
@@ -2301,7 +2301,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        self._serve_keys(fs, {"key"})
+        serve_s3_keys(fs._sync_fs, {"key"})
         monkeypatch.chdir(tmp_path)
 
         await fs._get(rpath, ["download.txt"])
