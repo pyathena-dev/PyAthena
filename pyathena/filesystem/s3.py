@@ -3147,8 +3147,18 @@ class S3FileSystem(AbstractFileSystem):
     ):
         """Download an S3 file to local filesystem.
 
-        Downloads a file from S3 to the local filesystem with progress tracking.
-        Reads the file in chunks to handle large files efficiently.
+        The object is read in waves of parallel range requests of the block
+        size, at most ``max_workers`` of them at once, but no more than the
+        request pool of the filesystem runs, and the bodies of each wave are
+        written in order before the next wave is read, so that at most one
+        wave of bodies is held (see :meth:`S3File._download`). The reads are
+        conditional on the version and the ETag of the object looked up when
+        the download starts, as with ``open()``, so that an object replaced
+        during the download fails it instead of mixing two objects, unless
+        the download reads a version other than ``null``, which a
+        replacement does not change. A failed
+        download leaves the part written so far in a local file ``lpath``,
+        as fsspec's ``AbstractFileSystem.get_file()`` does.
 
         As with fsspec's ``AbstractFileSystem.get_file()``, a directory
         ``rpath`` creates the local directory ``lpath``, and the parent
@@ -3158,9 +3168,16 @@ class S3FileSystem(AbstractFileSystem):
             rpath: S3 source path (s3://bucket/key).
             lpath: Local destination path, or a file-like object to write to.
                 Not needed when ``outfile`` is given.
-            callback: Progress callback for tracking download progress.
+            callback: Progress callback for tracking download progress, with
+                the size of the object.
             outfile: A file-like object to write to instead of ``lpath``.
-            **kwargs: Additional S3 parameters passed to open().
+            **kwargs: The arguments of ``open()``, such as ``block_size``,
+                ``max_workers``, ``version_id``, and ``s3_additional_kwargs``,
+                and additional S3 parameters. ``cache_type`` and
+                ``cache_options`` are not used, since no data cache reads the
+                object. With ``compression``, the object is decompressed into
+                the destination, read one block at a time through ``open()``,
+                and the size of the callback is unknown.
         """
         path_version_id = S3Path.parse(self._strip_protocol(rpath)).version_id
         if outfile is None and isfilelike(lpath):
@@ -3176,17 +3193,37 @@ class S3FileSystem(AbstractFileSystem):
             os.makedirs(lpath, exist_ok=True)
             return
 
+        # The codec, if any, as fsspec's open() resolves it, with "infer"
+        # from the key without the version.
+        codec = get_compression(
+            S3Path.parse(self._strip_protocol(rpath)).key, kwargs.pop("compression", None)
+        )
+        if codec is None:
+            # No data cache: the object is read in ranges, and a cache
+            # constructed when the file is opened, such as "all", would read
+            # the whole object.
+            kwargs.pop("cache_options", None)
+            kwargs["cache_type"] = "none"
         # The remote file is opened first so that no local file is created
         # when open() finds no object at the path.
         with contextlib.ExitStack() as stack:
             remote = stack.enter_context(self.open(rpath, "rb", **kwargs))
+            reader: Any = None
+            if codec is not None:
+                # As fsspec's open() wraps the file, but closed with it.
+                reader = stack.enter_context(compr[codec](remote, mode="r"))
             if outfile is None:
                 # Not abspath(), which would resolve ".." before symlinks.
                 if parent := os.path.dirname(lpath):
                     os.makedirs(parent, exist_ok=True)
                 outfile = stack.enter_context(open(lpath, "wb"))
-            callback.set_size(remote.size)
-            while data := remote.read(remote.blocksize):
+            if reader is None:
+                callback.set_size(remote.size)
+                remote._download(outfile, callback)
+                return
+            # The size of the decompressed data is unknown.
+            callback.set_size(None)
+            while data := reader.read(remote.blocksize):
                 # A block read when the stop came is not written.
                 raise_if_stopped(f"write the contents of {rpath}")
                 outfile.write(data)
@@ -4802,6 +4839,67 @@ class S3File(AbstractBufferedFile):
         """
         raise_if_stopped(f"read {path.uri}")
         return self.fs.core.get_object(path, range_, **kwargs)
+
+    def _download(self, outfile: Any, callback: Callback) -> None:
+        """Write the whole object into a writable file with parallel range reads.
+
+        The object is read in waves of ranges of the block size, one wave of
+        at most ``max_workers`` ranges at a time, but no more than the request
+        pool of the filesystem runs at once, since the others would only wait
+        with their bodies held. Each wave is read with :meth:`S3Executor.map()
+        <pyathena.filesystem.s3_executor.S3Executor.map>`, and its bodies are
+        written in order, each dropped once written, before the next wave is
+        read, so that at most one wave of bodies is held. The reads carry the
+        version and the conditions of the file, and each checks the stop
+        scopes when it starts; a body read when a stop came is not written.
+
+        A failure or an interrupt while a wave is read is raised as
+        :meth:`S3Executor.map()` raises it. One while its bodies are written,
+        including a failure of the write or of the callback, drops the bodies
+        first, also from the completed frames of its traceback (see
+        :meth:`S3MapResult.release()
+        <pyathena.filesystem.s3_executor.S3MapResult.release>`).
+
+        Args:
+            outfile: The writable file-like object.
+            callback: Progress callback, updated with the size of each body
+                once it is written.
+
+        Raises:
+            concurrent.futures.CancelledError: If an enclosing stop scope has
+                been stopped.
+        """
+        size = cast(int, self.size)
+        window = min(self.max_workers, self.fs._request_pool.max_workers)
+        path = S3Path(self.bucket, self.key, self.version_id)
+        read = functools.partial(self._get_range, path, **self._get_request_kwargs("get_object"))
+        wave = window * self.blocksize
+        result: S3MapResult[bytes] | None = None
+        try:
+            for wave_start in range(0, size, wave):
+                wave_end = min(size, wave_start + wave)
+                # Assigned within the try block, so that an interrupt right
+                # after the wave was read still drops its bodies.
+                result = self._executor.map(
+                    read,
+                    [
+                        (start, min(start + self.blocksize, wave_end))
+                        for start in range(wave_start, wave_end, self.blocksize)
+                    ],
+                )
+                bodies = result.outcomes
+                for i in range(len(bodies)):
+                    # A body read when the stop came is not written.
+                    raise_if_stopped(f"write the contents of {self.path}")
+                    length = len(cast(bytes, bodies[i]))
+                    outfile.write(bodies[i])
+                    # Not kept while the next one is written or read.
+                    bodies[i] = b""
+                    callback.relative_update(length)
+        except BaseException as e:
+            if result is not None:
+                result.release(e)
+            raise
 
     @staticmethod
     def _get_ranges(

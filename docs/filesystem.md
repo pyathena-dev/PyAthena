@@ -134,8 +134,7 @@ and the error is raised once they have ended. A running multipart upload or copy
 no further part and is aborted instead of being completed, and a running download reads
 and writes no further block. A request already sent, such as the PutObject of a small
 object, runs to its end; a multipart copy that has been completed still copies its
-annotations. With `cache_type="background"`, a block that fsspec's cache prefetches in
-its own thread may still be read after the stop. The transfers that ended before the failure stay done, and their number is
+annotations. The transfers that ended before the failure stay done, and their number is
 not bounded by `batch_size`. `mv` deletes the sources only once every copy has
 succeeded. `on_error` of `cat`, `cat_ranges`, and `cp` keeps its fsspec meaning; with
 `on_error="omit"` or `"return"` of `cat`, `"return"` of `cat_ranges`, or `"ignore"` of
@@ -153,6 +152,18 @@ into it one after another, in order.
 
 `rm` deletes up to 1,000 objects per DeleteObjects request, `batch_size` requests at a
 time. Its `max_workers` argument is a deprecated alias of `batch_size`.
+
+`get` and `get_file` download each object in waves of parallel range reads of the block
+size: at most `max_workers` ranges at a time, and no more than the request pool runs at
+once. The ranges of a wave are written in order before the next wave is read, so a
+download holds at most one wave of data, `max_workers` × the block size. No data cache
+reads the object, so `cache_type` and `cache_options` do not apply. The range reads are
+conditional on the ETag, and the version, if any, of the object looked up when the
+download starts: an object replaced during the download fails it with `OSError`, unless
+the download reads a version other than `null`, which a replacement does not change. A
+failed download leaves the part written so far in the local file, as fsspec's
+`get_file` does. With `compression`, the object is decompressed into the destination,
+one block at a time.
 
 Writes with `pipe`/`pipe_file` issue a single PutObject request for data up to the
 block size (5 MiB by default); larger data is uploaded as a parallel multipart upload

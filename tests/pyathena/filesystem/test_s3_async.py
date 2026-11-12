@@ -2252,6 +2252,47 @@ class TestAioS3FileSystem:
         assert store == {"a", "b"}
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("files", "kwargs", "expected"),
+        [
+            # A single download keeps the max_workers of the filesystem.
+            (1, {}, None),
+            (2, {}, 2),
+            # More downloads than max_workers (4) get one range each.
+            (8, {}, 1),
+            (2, {"batch_size": 1}, None),
+            (2, {"batch_size": -1}, 2),
+            # A smaller max_workers of the caller is kept.
+            (2, {"max_workers": 1}, 1),
+        ],
+    )
+    async def test_get_window(self, tmp_path, files, kwargs, expected):
+        # GH-1323: as in S3FileSystem.get(), each download gets max(1,
+        # max_workers // n) parallel range reads, n being the downloads
+        # that run at once, so that a batch holds about max_workers bodies.
+        # Each download used to get max_workers of them.
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=4,
+            skip_instance_cache=True,
+        )
+        self._serve_keys(fs, {f"dir/{i}" for i in range(files)})
+        windows = []
+
+        def get_file(rpath, lpath, **get_kwargs):
+            windows.append(get_kwargs.get("max_workers"))
+
+        fs._sync_fs.get_file = get_file
+        await fs._get(
+            [f"s3://bucket/dir/{i}" for i in range(files)],
+            [str(tmp_path / str(i)) for i in range(files)],
+            **kwargs,
+        )
+        assert windows == [expected] * files
+
+    @pytest.mark.asyncio
     async def test_put_recursive_creates_no_directories(self, tmp_path):
         # GH-1337: a recursive _put() sends no request for the local
         # directories. fsspec's _put() created a directory for each, which

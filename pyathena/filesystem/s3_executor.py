@@ -162,6 +162,30 @@ class S3MapResult(Generic[T]):
     outcomes: list[T | BaseException]
     failure: BaseException | None
 
+    def release(self, error: BaseException) -> None:
+        """Drop the outcomes when the processing of the result fails, such as the bodies of reads.
+
+        The outcomes are cleared, and so are the completed frames of the
+        traceback of the error and of the errors chained to it
+        (``__cause__`` and ``__context__``), which can keep an outcome, such
+        as the argument of a write that wrapped its own failure;
+        :func:`traceback.clear_frames` skips the frames that are executing.
+        The caller drops its own references to the outcomes.
+
+        Args:
+            error: The error that the processing raises.
+        """
+        self.outcomes.clear()
+        seen: set[int] = set()
+        errors: list[BaseException] = [error]
+        while errors:
+            current = errors.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            traceback.clear_frames(current.__traceback__)
+            errors.extend(e for e in (current.__cause__, current.__context__) if e is not None)
+
 
 class _S3Batch(Generic[ItemT, T]):
     """The calls of one map of :class:`S3Executor`, and the state that they share.
