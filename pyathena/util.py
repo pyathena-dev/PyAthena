@@ -172,6 +172,9 @@ class RetryConfig:
         to 127 seconds plus jitter, which outlasts the metadata API throttling
         episodes observed under concurrent reflection. SDK retries configured
         on the boto3 client are a separate layer applied within each attempt.
+        The S3 filesystem also retries the transient S3 error codes with a
+        policy whose exceptions are the default ones (see
+        :class:`~pyathena.filesystem.s3_core.S3Core`).
         Recognized Glue error codes wrapped in Athena MetadataException are
         matched against exceptions in the same way as direct AWS error codes.
     """
@@ -203,6 +206,25 @@ class RetryConfig:
         self.exponential_base = exponential_base
 
 
+def _with_exceptions(config: RetryConfig, exceptions: Iterable[str]) -> RetryConfig:
+    """Copy a retry policy with other error codes to retry.
+
+    Args:
+        config: The retry policy to copy.
+        exceptions: The error codes that the copy retries.
+
+    Returns:
+        A new policy; ``config`` is unchanged.
+    """
+    return RetryConfig(
+        exceptions=exceptions,
+        attempt=config.attempt,
+        multiplier=config.multiplier,
+        max_delay=config.max_delay,
+        exponential_base=config.exponential_base,
+    )
+
+
 def _without_retries(config: RetryConfig, codes: Iterable[str]) -> RetryConfig:
     """Copy a retry policy without retrying ``codes``.
 
@@ -214,13 +236,7 @@ def _without_retries(config: RetryConfig, codes: Iterable[str]) -> RetryConfig:
         A new policy; ``config`` is unchanged.
     """
     excluded = set(codes)
-    return RetryConfig(
-        exceptions=[c for c in config.exceptions if c not in excluded],
-        attempt=config.attempt,
-        multiplier=config.multiplier,
-        max_delay=config.max_delay,
-        exponential_base=config.exponential_base,
-    )
+    return _with_exceptions(config, [c for c in config.exceptions if c not in excluded])
 
 
 def _get_error_code(ex: BaseException, unwrap_metadata: bool = False) -> str | None:

@@ -1577,7 +1577,8 @@ def stub_multipart_copy(
         stubber: The Stubber of the S3 client.
         fail_list: Deny the listing of the annotations; nothing is written
             then.
-        fail_part: Fail the second part copy; the upload is then aborted.
+        fail_part: Fail the second part copy with an error that is not
+            retried; the upload is then aborted.
         fail_abort: Deny that abort, with fail_part.
         fail_annotation: Fail the write of the first annotation; no
             other annotation is copied then.
@@ -1655,7 +1656,7 @@ def stub_multipart_copy(
         }
         if fail_part and part_number == 2:
             stubber.add_client_error(
-                "upload_part_copy", "InternalError", "part failed", 500, expected_params=part
+                "upload_part_copy", "InvalidRequest", "part failed", 400, expected_params=part
             )
             abort = {**destination, "UploadId": "u"}
             if fail_abort:

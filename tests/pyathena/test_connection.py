@@ -528,7 +528,9 @@ class TestConnection:
         assert conn.client.meta.endpoint_url == "https://athena.us-east-1.amazonaws.com"
 
     def test_s3_filesystem_uses_connection_s3_client(self):
-        conn = _connection()
+        # A policy with the default codes gets a copy with the S3 codes
+        # (GH-1375); one with other codes is used as is.
+        conn = _connection(retry_config=RetryConfig(exceptions=["SlowDown"], attempt=3))
 
         fs = s3_filesystem(conn, skip_instance_cache=True)
 

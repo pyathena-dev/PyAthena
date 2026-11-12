@@ -2604,7 +2604,7 @@ class TestAioS3FileSystem:
 
     def test_client(self):
         # GH-1363: the requests go through the given client with the given retry
-        # policy, which retries SlowDown, unlike the default one.
+        # policy, whose two attempts fail with SlowDown.
         client = boto3.client(
             "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
         )

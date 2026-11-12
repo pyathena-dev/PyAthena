@@ -121,6 +121,68 @@ class TestS3Core:
         assert isinstance(e.value.__cause__, botocore.exceptions.ClientError)
         assert e.value.__cause__.response["Error"]["Code"] == code
 
+    @pytest.mark.parametrize(
+        ("status", "code"),
+        [
+            (503, "SlowDown"),
+            (503, "ServiceUnavailable"),
+            (500, "InternalError"),
+            (400, "RequestTimeout"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("exceptions", "attempts"),
+        [
+            (["ThrottlingException", "TooManyRequestsException"], 2),
+            (["TooManyRequestsException", "ThrottlingException"], 2),
+            (["ThrottlingException"], 1),
+        ],
+        ids=["default", "default-reordered", "configured"],
+    )
+    def test_call_retries_s3_errors(self, status, code, exceptions, attempts):
+        # GH-1375: a policy with the default codes also retries the transient
+        # S3 errors, in the attempts of the policy; one with other codes is
+        # used as given.
+        client = boto3.client(
+            "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
+        )
+        core = S3Core(
+            client, retry_config=RetryConfig(exceptions=exceptions, attempt=2, multiplier=0)
+        )
+        with Stubber(client) as stubber:
+            for _ in range(attempts):
+                stubber.add_client_error(
+                    "head_object",
+                    service_error_code=code,
+                    service_message="Try again",
+                    http_status_code=status,
+                )
+            with pytest.raises(OSError, match="Try again"):
+                core.head_object(S3Path("bucket", "key"))
+            stubber.assert_no_pending_responses()
+
+    def test_default_retry_config(self):
+        # GH-1375: without a policy, the requests retry the default codes and
+        # the transient S3 errors, with the attempts and waits of RetryConfig().
+        client = boto3.client(
+            "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
+        )
+        config = S3Core(client).retry_config
+        assert config.exceptions == (
+            "ThrottlingException",
+            "TooManyRequestsException",
+            "SlowDown",
+            "ServiceUnavailable",
+            "InternalError",
+            "RequestTimeout",
+        )
+        assert (config.attempt, config.multiplier, config.max_delay, config.exponential_base) == (
+            8,
+            1,
+            100,
+            2,
+        )
+
     def test_call_partial(self):
         # GH-1338: a functools.partial of a client method has no __name__; it
         # is sent with the request_kwargs of the method it wraps, and its

@@ -33,7 +33,14 @@ from pyathena.filesystem.s3_object import (
     S3PutObject,
 )
 from pyathena.filesystem.s3_path import S3Path
-from pyathena.util import RetryConfig, override, retry_api_call, unstoppable_retries
+from pyathena.util import (
+    THROTTLING_ERROR_CODES,
+    RetryConfig,
+    _with_exceptions,
+    override,
+    retry_api_call,
+    unstoppable_retries,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -573,6 +580,16 @@ class S3Core:
     BUCKET_ACLS: ClassVar[frozenset[str]] = frozenset(
         {"private", "public-read", "public-read-write", "authenticated-read"}
     )
+    # https://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html
+    #: The S3 error codes of transient failures (status 503, 500, and 400),
+    #: which botocore's retry modes also retry. A retry policy with the
+    #: default codes retries them too.
+    RETRY_ERROR_CODES: ClassVar[tuple[str, ...]] = (
+        "SlowDown",
+        "ServiceUnavailable",
+        "InternalError",
+        "RequestTimeout",
+    )
 
     def __init__(
         self,
@@ -585,12 +602,19 @@ class S3Core:
         Args:
             client: The boto3 S3 client to send the requests with.
             retry_config: The retry policy of the requests; defaults to
-                ``RetryConfig()``.
+                ``RetryConfig()``. If its ``exceptions`` are the default codes
+                (``THROTTLING_ERROR_CODES``), in any order, the requests are
+                sent with a copy that also retries ``RETRY_ERROR_CODES``.
             request_kwargs: Parameters sent with every operation that accepts
                 them, such as ``{"RequestPayer": "requester"}``.
         """
         self._client = client
-        self._retry_config = retry_config if retry_config else RetryConfig()
+        retry_config = retry_config if retry_config else RetryConfig()
+        if set(retry_config.exceptions) == set(THROTTLING_ERROR_CODES):
+            retry_config = _with_exceptions(
+                retry_config, (*retry_config.exceptions, *self.RETRY_ERROR_CODES)
+            )
+        self._retry_config = retry_config
         self._request_kwargs = dict(request_kwargs) if request_kwargs else {}
 
     @property
@@ -600,7 +624,7 @@ class S3Core:
 
     @property
     def retry_config(self) -> RetryConfig:
-        """The retry policy of the requests."""
+        """The retry policy of the requests, with ``RETRY_ERROR_CODES`` if they were added."""
         return self._retry_config
 
     @property
