@@ -822,15 +822,18 @@ fs = S3FileSystem(
 
 botocore also reads them from the `AWS_REQUEST_CHECKSUM_CALCULATION` and `AWS_RESPONSE_CHECKSUM_VALIDATION` environment variables and from the shared AWS config file.
 
-With `request_checksum_calculation="when_supported"`, the client computes a CRC32 checksum of the body of every PutObject and UploadPart request and sends it with the request.
+A PutObject or UploadPart request that sets a checksum algorithm or value, such as `ChecksumAlgorithm="SHA256"` or `ChecksumSHA256`, carries that checksum with either setting.
+For the other PutObject and UploadPart requests, `request_checksum_calculation="when_supported"` makes the client compute a CRC32 checksum of the body and send it with the request.
 S3 checks the received data against it and stores it with an object written by PutObject.
 With `"when_required"`, the client computes checksums only for the operations that require one, such as DeleteObjects.
-A PutObject or UploadPart request then includes the SHA-256 hash of its body in its signature, which S3 also checks against the received data, unless the client sends unsigned requests, such as `S3FileSystem(anon=True)`, or its `s3` options set `payload_signing_enabled` to `False`.
-A request that sets a checksum algorithm, such as `ChecksumAlgorithm="SHA256"`, carries that checksum with either setting.
+Those PutObject and UploadPart requests then include the SHA-256 hash of their body in their signature, which S3 also checks against the received data.
+They do not if they set `ContentMD5`, which S3 checks instead, if the client sends unsigned requests, such as `S3FileSystem(anon=True)`, or if its `s3` options set `payload_signing_enabled` to `False`.
 
-With `response_checksum_validation="when_supported"`, the client requests the checksum of the object with every GetObject request and validates the body it reads against a full-object checksum in the response.
+With `response_checksum_validation="when_supported"`, the client requests the checksum of the object with every GetObject request.
+It validates the body it reads when the response carries a full-object checksum of an algorithm that botocore supports, and reads the body without validation otherwise, such as with the composite checksum of an object uploaded in parts.
+botocore supports CRC32, SHA-1, SHA-256, and SHA-512, and with `botocore[crt]` also CRC32C, CRC64NVME, XXHASH64, XXHASH3, and XXHASH128.
+S3 calculates a CRC64NVME checksum for an object uploaded without a checksum.
 S3 returns no checksum for a byte range, so the range reads of `S3FileSystem`, such as those of its files and of `get()`, are not validated with either setting.
-botocore validates CRC32, SHA-1, SHA-256, and SHA-512 checksums; the others, such as the CRC64NVME checksum that S3 calculates for an object uploaded without a checksum, require `botocore[crt]`.
 With `"when_required"`, the client validates only the responses to requests that set `ChecksumMode="ENABLED"`.
 Over HTTPS, TLS protects the data in transit with either setting.
 
