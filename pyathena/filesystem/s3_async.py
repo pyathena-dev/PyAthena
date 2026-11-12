@@ -48,8 +48,6 @@ from pyathena.filesystem.s3_writer import _S3WriteSession, _S3WriteState
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from fsspec.transaction import Transaction
-
     from pyathena.connection import Connection
 
 _logger = logging.getLogger(__name__)
@@ -120,29 +118,30 @@ class _S3BatchTasks:
 class _S3TransactionWrite:
     """A write of a file of an ``AioS3FileSystem`` transaction, which a cancellation discards.
 
-    Once the write is cancelled, its file is dropped from the transaction,
-    also if it is opened only afterwards, so that the transaction cannot
-    commit it, and it is discarded once the write has ended: by the thread
-    of the write if the write was still running when it was cancelled, and
-    otherwise by the cancelled coroutine, after :meth:`cancel`.
+    The write opens its file with :meth:`open`, which adds it to the
+    transaction unless the write has been cancelled. Once the write is
+    cancelled, its file is dropped from the transaction, so that the
+    transaction cannot commit it, and it is discarded once the write has
+    ended: by the thread of the write if the write was still running when
+    it was cancelled, and otherwise by the cancelled coroutine, after
+    :meth:`cancel`.
 
     Args:
-        transaction: The transaction of the filesystem.
-        write: The write, which calls the callable that it receives with
-            the file once it has opened it.
+        fs: The filesystem, which is in a transaction.
+        write: The write, which opens its file with the callable that it
+            receives, which takes the arguments of ``open()``.
     """
 
-    def __init__(
-        self, transaction: Transaction, write: Callable[[Callable[[S3File], None]], None]
-    ) -> None:
+    def __init__(self, fs: AioS3FileSystem, write: Callable[[Callable[..., S3File]], None]) -> None:
         """Initialize the write.
 
         Args:
-            transaction: The transaction of the filesystem.
-            write: The write, which calls the callable that it receives with
-                the file once it has opened it.
+            fs: The filesystem, which is in a transaction.
+            write: The write, which opens its file with the callable that it
+                receives, which takes the arguments of ``open()``.
         """
-        self._transaction = transaction
+        self._fs = fs
+        self._transaction = fs.transaction
         self._write = write
         self._lock = threading.Lock()
         self._files: list[S3File] = []
@@ -152,13 +151,37 @@ class _S3TransactionWrite:
     def run(self) -> None:
         """Run the write, and discard its file if it was cancelled while running."""
         try:
-            self._write(self._opened)
+            self._write(self.open)
         finally:
             with self._lock:
                 self._ended = True
                 cancelled = self._cancelled
             if cancelled:
                 self.discard()
+
+    def open(self, path: str, mode: str, **kwargs) -> S3File:
+        """Open the file of the write, which joins the transaction unless the write was cancelled.
+
+        Args:
+            path: S3 path (s3://bucket/key) of the file.
+            mode: The binary write mode of the file.
+            **kwargs: The other arguments of ``open()``, except
+                ``compression``. With ``autocommit=True``, as with
+                ``open()``, the file commits when it is closed and does not
+                join the transaction.
+
+        Returns:
+            The file.
+        """
+        autocommit = kwargs.pop("autocommit", False)
+        file = self._fs._open(self._fs._strip_protocol(path), mode, autocommit=autocommit, **kwargs)
+        with self._lock:
+            self._files.append(file)
+            # Under the lock, so that a cancellation either finds the file
+            # in the transaction or keeps it out.
+            if not autocommit and not self._cancelled:
+                self._transaction.files.append(file)
+        return file
 
     def cancel(self) -> bool:
         """Drop the file of the write from the transaction.
@@ -170,11 +193,10 @@ class _S3TransactionWrite:
         """
         with self._lock:
             self._cancelled = True
-            files = list(self._files)
-            ended = self._ended
-        for file in files:
-            self._detach(file)
-        return ended
+            for file in self._files:
+                with contextlib.suppress(ValueError):
+                    self._transaction.files.remove(file)
+            return self._ended
 
     def discard(self) -> None:
         """Discard the file of the write.
@@ -189,27 +211,6 @@ class _S3TransactionWrite:
                 file.discard()
             except Exception:
                 _logger.exception(f"Failed to discard the cancelled write to s3://{file.path}.")
-
-    def _opened(self, file: S3File) -> None:
-        """Record the opened file, and drop it from the transaction if the write was cancelled.
-
-        Args:
-            file: The file, which ``open()`` has added to the transaction.
-        """
-        with self._lock:
-            self._files.append(file)
-            cancelled = self._cancelled
-        if cancelled:
-            self._detach(file)
-
-    def _detach(self, file: S3File) -> None:
-        """Drop a file from the transaction, if it is there.
-
-        Args:
-            file: The file.
-        """
-        with contextlib.suppress(ValueError):
-            self._transaction.files.remove(file)
 
 
 class AioS3FileSystem(AsyncFileSystem):
@@ -388,27 +389,34 @@ class AioS3FileSystem(AsyncFileSystem):
             return
         await self._thread_pool.run(self._sync_fs.pipe_file, path, value, mode=mode, **kwargs)
 
-    async def _write_in_transaction(
-        self, write: Callable[[Callable[[S3File], None]], None]
-    ) -> None:
+    async def _write_in_transaction(self, write: Callable[[Callable[..., S3File]], None]) -> None:
         """Run a write of a file of this filesystem's transaction in a thread of the filesystem.
 
-        A cancellation drops the file from the transaction, which would
+        A cancellation keeps the file out of the transaction, which would
         otherwise commit it, and discards it once the write has ended: a
         write whose last part was running when it was cancelled has nothing
         left that its stop would skip. See :class:`_S3TransactionWrite`.
+        After a repeated cancellation, the discard runs without being waited
+        for.
 
         Args:
-            write: The write, which calls the callable that it receives with
-                the file once it has opened it.
+            write: The write, which opens its file with the callable that it
+                receives, which takes the arguments of ``open()``.
         """
-        transaction_write = _S3TransactionWrite(self.transaction, write)
+        task = asyncio.current_task()
+        cancellations = task.cancelling() if task is not None else 0
+        transaction_write = _S3TransactionWrite(self, write)
         try:
             await self._thread_pool.run(transaction_write.run)
         except asyncio.CancelledError:
             if transaction_write.cancel():
-                # A repeated cancellation does not stop the discard.
-                await self._thread_pool.run_shielded(transaction_write.discard)
+                if task is not None and task.cancelling() > cancellations + 1:
+                    # A repeated cancellation, which stopped the wait for the
+                    # write, does not wait for the discard either.
+                    self._thread_pool.submit(transaction_write.discard)
+                else:
+                    # A repeated cancellation does not stop the discard.
+                    await self._thread_pool.run_shielded(transaction_write.discard)
             raise
 
     def _pipe_file_in_transaction(
@@ -416,7 +424,7 @@ class AioS3FileSystem(AsyncFileSystem):
         path: str,
         value: bytes | bytearray | memoryview,
         mode: str,
-        opened: Callable[[S3File], None],
+        open_file: Callable[..., S3File],
         **kwargs,
     ) -> None:
         """Write bytes into the path as a file of this filesystem's transaction.
@@ -428,7 +436,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 opened in ``xb`` mode: raise FileExistsError when the object
                 already exists, including one created before the
                 transaction is committed, which is not replaced.
-            opened: Called with the file once it is opened.
+            open_file: Opens the file, with the arguments of ``open()``.
             **kwargs: Additional parameters passed to ``open()``, except
                 ``compression``, with which the value is compressed before
                 it is written, as in :meth:`S3FileSystem.pipe_file`.
@@ -446,9 +454,7 @@ class AioS3FileSystem(AsyncFileSystem):
         block_size = kwargs.get("block_size") or self._sync_fs.default_block_size
         # The size in bytes; the length of a memoryview counts its items.
         self.core.check_multipart_upload_size(memoryview(value).nbytes, block_size)
-        file = self.open(path, "xb" if mode == "create" else "wb", **kwargs)
-        opened(file)
-        file._write_and_close(value)
+        open_file(path, "xb" if mode == "create" else "wb", **kwargs)._write_and_close(value)
 
     async def _put_file(
         self,
@@ -477,7 +483,7 @@ class AioS3FileSystem(AsyncFileSystem):
         rpath: str,
         callback,
         mode: str,
-        opened: Callable[[S3File], None],
+        open_file: Callable[..., S3File],
         **kwargs,
     ) -> None:
         """Upload a local file as a file of this filesystem's transaction.
@@ -493,7 +499,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 opened in ``xb`` mode: raise FileExistsError when the object
                 already exists, including one created before the
                 transaction is committed, which is not replaced.
-            opened: Called with the file once it is opened.
+            open_file: Opens the file, with the arguments of ``open()``.
             **kwargs: Additional S3 parameters (e.g., ContentType, StorageClass).
                 The ``block_size``, ``max_workers``, and ``s3_additional_kwargs``
                 parameters of ``open()`` are also accepted.
@@ -523,15 +529,13 @@ class AioS3FileSystem(AsyncFileSystem):
 
         # See S3FileSystem.put_file.
         with open(lpath, "rb") as local:
-            file = self.open(
+            open_file(
                 rpath,
                 "xb" if mode == "create" else "wb",
                 block_size=block_size,
                 max_workers=max_workers,
                 s3_additional_kwargs=s3_additional_kwargs,
-            )
-            opened(file)
-            file._write_file_and_close(local, callback)
+            )._write_file_and_close(local, callback)
         self.invalidate_cache(rpath)
 
     async def _get_file(self, rpath: str, lpath: str, callback=_DEFAULT_CALLBACK, **kwargs) -> None:

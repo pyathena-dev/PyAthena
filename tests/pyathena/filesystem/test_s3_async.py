@@ -1667,7 +1667,7 @@ class TestAioS3FileSystem:
         fs._sync_fs.core.MULTIPART_UPLOAD_MAX_PARTS = 3
         fs._sync_fs.default_block_size = 4
         fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
-        fs.open = mock.MagicMock()
+        fs._open = mock.MagicMock()
         local = tmp_path / "local"
         local.write_bytes(b"a" * 13)
 
@@ -1676,7 +1676,7 @@ class TestAioS3FileSystem:
                 fs.pipe_file("s3://bucket/k1", b"a" * 13, **kwargs)
             with pytest.raises(ValueError, match="in 3 parts with a block size of 4 bytes"):
                 fs.put_file(str(local), "s3://bucket/k2", **kwargs)
-        fs.open.assert_not_called()
+        fs._open.assert_not_called()
         fs._sync_fs._call.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1899,12 +1899,13 @@ class TestAioS3FileSystem:
         # event loop.
         ended_when_done = []
 
-        def release_once_stopped(task):
-            # The shutdown: the stopped calls are held until the batch has
-            # finished, which it must not before they end, or for 0.5 s.
+        def release_once_stopped():
+            # The shutdown: the stopped calls are held until the end of the
+            # batch has been recorded, which must not happen before they end,
+            # or for 0.5 s.
             poll_until(lambda: state["stopped"] == 2, "the calls were not stopped")
             deadline = time.monotonic() + 0.5
-            while not task.done() and time.monotonic() < deadline:
+            while not ended_when_done and time.monotonic() < deadline:
                 time.sleep(0.01)
             release.set()
 
@@ -1915,7 +1916,7 @@ class TestAioS3FileSystem:
             if cancellation == "shutdown":
                 # asyncio.run() cancels the batch and its calls once main()
                 # has returned.
-                threading.Thread(target=release_once_stopped, args=(task,), daemon=True).start()
+                threading.Thread(target=release_once_stopped, daemon=True).start()
                 return
             if cancellation == "calls_first":
                 current = asyncio.current_task()
@@ -2032,18 +2033,21 @@ class TestAioS3FileSystem:
         ]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("stage", ["before_open", "last_part", "discard_queued"])
+    @pytest.mark.parametrize("stage", ["before_open", "last_part", "discard_queued", "write_ended"])
     async def test_transaction_put_file_cancelled_twice(self, tmp_path, stage):
         # GH-1337: a second cancellation of a _put_file() in a transaction
         # returns without a further wait, and the transaction does not commit
         # the file, whether the write opens it only afterwards (before_open),
-        # still runs its last part (last_part), or has ended and its discard
-        # waits for a thread of the filesystem (discard_queued).
+        # still runs its last part (last_part), has ended and its discard
+        # waits for a thread of the filesystem (discard_queued), or ends just
+        # before the second cancellation, which then interrupts the wait for
+        # the write (write_ended).
+        queued = stage in ("discard_queued", "write_ended")
         fs = AioS3FileSystem(
             key="dummy",
             secret="dummy",
             region_name="us-east-1",
-            max_workers=1 if stage == "discard_queued" else None,
+            max_workers=1 if queued else None,
             skip_instance_cache=True,
         )
         block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
@@ -2068,16 +2072,18 @@ class TestAioS3FileSystem:
                     held()
 
             def relative_update(self, inc=1):
-                if stage == "discard_queued":
+                if queued:
                     held()
 
         fs._sync_fs._call = fs._sync_fs._core.call = call
         blocker_started = threading.Event()
         blocker_release = threading.Event()
+        blocker_ended = threading.Event()
 
         def blocker(*args, **kwargs):
             blocker_started.set()
             blocker_release.wait(EVENT_TIMEOUT)
+            blocker_ended.set()
             return {}
 
         fs._sync_fs.info = blocker
@@ -2093,7 +2099,7 @@ class TestAioS3FileSystem:
                     )
                 )
                 await wait_until(lambda: state["started"] == 1)
-                if stage == "discard_queued":
+                if queued:
                     # Takes the only thread once the write has ended.
                     info = asyncio.ensure_future(fs._info("s3://bucket/other"))
                     await asyncio.sleep(0.1)
@@ -2103,17 +2109,32 @@ class TestAioS3FileSystem:
                     release.set()
                     assert await asyncio.to_thread(blocker_started.wait, EVENT_TIMEOUT)
                     # The file has been dropped and its discard queued.
-                    await wait_until(lambda: not fs.transaction.files)
-                task.cancel()
+                    await wait_until(lambda: not fs.transaction.files, timeout=2)
+                    task.cancel()
+                elif stage == "write_ended":
+
+                    def end_write_then_cancel():
+                        # In one callback of the event loop, so that the task
+                        # is cancelled again before it sees the end of the
+                        # write, once the only thread has taken the next call.
+                        release.set()
+                        assert blocker_started.wait(EVENT_TIMEOUT)
+                        task.cancel()
+
+                    asyncio.get_running_loop().call_soon(end_write_then_cancel)
+                else:
+                    task.cancel()
                 # While the write or the queued discard is still held.
                 with pytest.raises(asyncio.CancelledError):
                     await await_bounded(task, timeout=2)
-                if stage != "discard_queued":
+                # The queued discard was not what ended the task.
+                assert not blocker_ended.is_set()
+                if not queued:
                     # The write ends while the transaction is still open.
                     release.set()
                     await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
             blocker_release.set()
-            if stage == "discard_queued":
+            if queued:
                 await info
                 await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
         finally:
@@ -2217,10 +2238,10 @@ class TestAioS3FileSystem:
     @pytest.mark.parametrize(("mode", "open_mode"), [("overwrite", "wb"), ("create", "xb")])
     def test_put_file_in_transaction_open_parameters(self, tmp_path, mode, open_mode):
         # GH-969: in a transaction, the open() parameters of put_file() go to
-        # open(), and the other parameters, also in s3_additional_kwargs, to
+        # the file, and the other parameters, also in s3_additional_kwargs, to
         # S3. GH-972: fsspec's mode argument selects the mode of the file.
         fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
-        fs.open = mock.MagicMock()
+        fs._open = mock.MagicMock()
         lpath = tmp_path / "data.csv"
         lpath.write_bytes(b"a")
 
@@ -2236,17 +2257,19 @@ class TestAioS3FileSystem:
             # Without them, the file gets the defaults of the filesystem.
             fs.put_file(str(lpath), "s3://bucket/key", mode=mode)
 
-        assert fs.open.call_args_list == [
+        assert fs._open.call_args_list == [
             mock.call(
-                "s3://bucket/key",
+                "bucket/key",
                 open_mode,
+                autocommit=False,
                 block_size=S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE,
                 max_workers=2,
                 s3_additional_kwargs={"StorageClass": "STANDARD_IA", "ContentType": "text/csv"},
             ),
             mock.call(
-                "s3://bucket/key",
+                "bucket/key",
                 open_mode,
+                autocommit=False,
                 block_size=fs._sync_fs.default_block_size,
                 max_workers=fs._sync_fs.max_workers,
                 s3_additional_kwargs={"ContentType": "text/csv"},
