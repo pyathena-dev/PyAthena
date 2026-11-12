@@ -1151,6 +1151,71 @@ class S3FileSystem(AbstractFileSystem):
             kwargs["prefix"] = stem
         return super().glob(stringify_path(path), maxdepth=maxdepth, **kwargs)
 
+    def tree(
+        self,
+        path: str | os.PathLike[str] = "/",
+        recursion_limit: int = 2,
+        max_display: int = 25,
+        display_size: bool = False,
+        prefix: str = "",
+        is_last: bool = True,
+        first: bool = True,
+        indent_size: int = 4,
+    ) -> str:
+        """Return a tree of the paths below a path, as fsspec's ``tree()`` does.
+
+        Args:
+            path: The root path, as a string or an ``os.PathLike``.
+            recursion_limit: Maximum depth of the tree.
+            max_display: Maximum number of entries shown per directory.
+            display_size: Whether to show the sizes of the files.
+            prefix: The prefix of each line.
+            is_last: Whether the path is the last entry of its directory.
+            first: Whether the path is the root of the tree.
+            indent_size: Number of spaces per level.
+
+        Returns:
+            The tree as a string.
+        """
+        return cast(
+            str,
+            super().tree(
+                stringify_path(path),
+                recursion_limit=recursion_limit,
+                max_display=max_display,
+                display_size=display_size,
+                prefix=prefix,
+                is_last=is_last,
+                first=first,
+                indent_size=indent_size,
+            ),
+        )
+
+    def get_mapper(
+        self,
+        root: str | os.PathLike[str] = "",
+        check: bool = False,
+        create: bool = False,
+        missing_exceptions=None,
+    ):
+        """Return a key/value store at a path, as fsspec's ``get_mapper()`` does.
+
+        Args:
+            root: The root path of the store, as a string or an ``os.PathLike``.
+            check: Whether to check that the root is writable.
+            create: Whether to create the root if it does not exist.
+            missing_exceptions: The exceptions that mean a missing key.
+
+        Returns:
+            The ``fsspec.mapping.FSMap`` of the root.
+        """
+        return super().get_mapper(
+            stringify_path(root),
+            check=check,
+            create=create,
+            missing_exceptions=missing_exceptions,
+        )
+
     def unstrip_protocol(self, name: str | os.PathLike[str]) -> str:
         """Add the protocol to a path, as fsspec's ``unstrip_protocol()`` does.
 
@@ -2430,7 +2495,8 @@ class S3FileSystem(AbstractFileSystem):
                 of a dict name the same object, or ``batch_size`` is neither
                 positive, -1, nor None.
         """
-        path = stringify_path(path)
+        if not isinstance(path, dict):
+            path = stringify_path(path)
         limit = self._batch_limit(batch_size)
         if isinstance(path, str):
             self.pipe_file(self._strip_protocol(path), value, **kwargs)

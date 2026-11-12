@@ -1747,6 +1747,31 @@ class LocalBucketFileSystem(DirFileSystem):
         """Do nothing, as PyAthena's filesystems release their idle threads here."""
 
 
+class OpaquePath:
+    """An ``os.PathLike`` path whose ``str()`` is not the path.
+
+    A method that uses ``str()`` of a path instead of converting it as an
+    ``os.PathLike`` fails with it, as with any ``os.PathLike`` class that
+    does not define ``__str__``.
+    """
+
+    def __init__(self, path):
+        """Initialize the path.
+
+        Args:
+            path: The path string.
+        """
+        self._path = path
+
+    def __fspath__(self):
+        """Return the path string.
+
+        Returns:
+            The path string.
+        """
+        return self._path
+
+
 def serve_s3_keys(fs, keys):
     """Answer the S3 requests of a filesystem from a set of keys of "bucket".
 

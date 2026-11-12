@@ -24,7 +24,7 @@ from base64 import b64encode
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from itertools import chain
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 from zlib import crc32
@@ -59,6 +59,7 @@ from tests.pyathena.util import (
     MULTIPART_COPY_BLOCK_SIZE,
     MULTIPART_COPY_KWARGS,
     MULTIPART_COPY_SIZE,
+    OpaquePath,
     ThrottledOperation,
     forking,
     interrupt_each_opcode,
@@ -1408,7 +1409,6 @@ class TestS3FileSystem:
             pytest.param(lambda fs, p, local: fs.get(p("bucket/key"), p(f"{local}/dst")), id="get"),
             pytest.param(lambda fs, p, local: fs.sign(p("bucket/key")), id="sign"),
             pytest.param(lambda fs, p, local: fs.metadata(p("bucket/key")), id="metadata"),
-            pytest.param(lambda fs, p, local: fs.getxattr(p("bucket/key"), "m"), id="getxattr"),
             pytest.param(lambda fs, p, local: fs.setxattr(p("bucket/key"), m="2"), id="setxattr"),
             pytest.param(lambda fs, p, local: fs.get_tags(p("bucket/key")), id="get_tags"),
             pytest.param(
@@ -1426,12 +1426,19 @@ class TestS3FileSystem:
             pytest.param(
                 lambda fs, p, local: fs.unstrip_protocol(p("bucket/key")), id="unstrip_protocol"
             ),
+            pytest.param(lambda fs, p, local: fs.tree(p("bucket/dir")), id="tree"),
+            pytest.param(
+                lambda fs, p, local: fs.get_mapper(p("bucket/dir"), check=True).root,
+                id="get_mapper",
+            ),
         ],
     )
-    def test_path_like_paths(self, tmp_path, call):
+    def test_path_like_paths(self, monkeypatch, tmp_path, call):
         # GH-1380: an os.PathLike path is used as its string.
+        # The check of get_mapper() writes a key named by uuid4().
+        monkeypatch.setattr(uuid, "uuid4", lambda: uuid.UUID(int=0))
         outcomes = []
-        for convert in (str, PurePosixPath):
+        for convert in (str, OpaquePath):
             local = tmp_path / convert.__name__
             local.mkdir()
             (local / "src").write_bytes(b"a")

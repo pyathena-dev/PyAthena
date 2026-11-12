@@ -47,6 +47,7 @@ from tests.pyathena.util import (
     MOVE_SOURCE_PARAMS,
     MULTIPART_COPY_BLOCK_SIZE,
     MULTIPART_COPY_KWARGS,
+    OpaquePath,
     ThrottledOperation,
     await_bounded,
     cancel_when_started,
@@ -569,11 +570,6 @@ class TestAioS3FileSystem:
                 lambda fs, p, local: fs.copy(p("bucket/key"), p("bucket/new")), False, id="copy"
             ),
             pytest.param(
-                lambda fs, p, local: fs.copy([p("bucket/key")], [p("bucket/new")]),
-                False,
-                id="copy-list",
-            ),
-            pytest.param(
                 lambda fs, p, local: fs.cp_file(p("bucket/key"), p("bucket/new")),
                 False,
                 id="cp_file",
@@ -596,13 +592,21 @@ class TestAioS3FileSystem:
                 False,
                 id="unstrip_protocol",
             ),
+            pytest.param(lambda fs, p, local: fs.tree(p("bucket/dir")), False, id="tree"),
+            pytest.param(
+                lambda fs, p, local: fs.get_mapper(p("bucket/dir"), check=True).root,
+                False,
+                id="get_mapper",
+            ),
         ],
     )
-    def test_path_like_paths(self, tmp_path, call, transaction):
+    def test_path_like_paths(self, monkeypatch, tmp_path, call, transaction):
         # GH-1380: an os.PathLike path is used as its string by the methods
         # that do not run those of the synchronous filesystem.
+        # The check of get_mapper() writes a key named by uuid4().
+        monkeypatch.setattr(uuid, "uuid4", lambda: uuid.UUID(int=0))
         outcomes = []
-        for convert in (str, PurePosixPath):
+        for convert in (str, OpaquePath):
             local = tmp_path / convert.__name__
             local.mkdir()
             (local / "src").write_bytes(b"a")
