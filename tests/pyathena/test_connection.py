@@ -10,7 +10,6 @@ import inspect
 import os
 import re
 import threading
-from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from inspect import signature
@@ -50,7 +49,7 @@ from pyathena.spark.async_cursor import AsyncSparkCursor
 from pyathena.spark.common import SparkBaseCursor
 from pyathena.spark.cursor import SparkCursor
 from pyathena.util import RetryConfig
-from tests.pyathena.util import EVENT_TIMEOUT, answered_requests
+from tests.pyathena.util import EVENT_TIMEOUT, RawBody, answered_requests
 
 # Cursors whose arraysize is the GetQueryResults page size, capped at 1000.
 PAGED_CURSORS = [Cursor, DictCursor, AsyncCursor, AsyncDictCursor, AioCursor, AioDictCursor]
@@ -150,29 +149,6 @@ class RecordingCursor(Cursor):
         super().__init__(**kwargs)
 
 
-class _RawBody:
-    """The raw body of a botocore HTTP response."""
-
-    def __init__(self, body: bytes) -> None:
-        """Initialize the body.
-
-        Args:
-            body: The bytes of the response body.
-        """
-        self._body = body
-
-    def stream(self, **_: Any) -> Iterator[bytes]:
-        """Yield the body.
-
-        Args:
-            **_: The streaming options, which are ignored.
-
-        Yields:
-            The bytes of the body.
-        """
-        yield self._body
-
-
 def _sts_credentials(access_key_id: str, expiration: datetime) -> tuple[str, datetime]:
     """Describe the credentials of an STS response.
 
@@ -229,7 +205,7 @@ class _STSResponder:
             f"<Expiration>{expiration.strftime('%Y-%m-%dT%H:%M:%SZ')}</Expiration>"
             f"</Credentials></{action}Result></{action}Response>"
         )
-        return AWSResponse(request.url, 200, {}, _RawBody(xml.encode()))
+        return AWSResponse(request.url, 200, {}, RawBody(xml.encode()))
 
 
 def _connection(**kwargs: Any) -> Connection[Any]:
@@ -592,7 +568,7 @@ class TestConnection:
             signed_with.append(re.search(r"Credential=([^/]+)/", authorization).group(1))
             # Athena answers in JSON, S3 in XML.
             body = b"{}" if "athena" in request.url else b"<ListAllMyBucketsResult/>"
-            return AWSResponse(request.url, 200, {}, _RawBody(body))
+            return AWSResponse(request.url, 200, {}, RawBody(body))
 
         with contextlib.closing(
             _connection(botocore_session=sts.botocore_session, **kwargs)

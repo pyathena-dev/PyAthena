@@ -664,6 +664,11 @@ class S3Core:
         A callable whose ``__name__`` is not that of a client method is sent
         without them.
 
+        A ``Body`` that is a stream is sent from the position where the call
+        found it on each attempt of the policy. One that cannot seek is sent
+        once, without the retries of the policy, since a retry would send only
+        the rest of the stream.
+
         Args:
             method: The name of the client method, or the method itself.
             **request: The request parameters, sent as given.
@@ -691,8 +696,20 @@ class S3Core:
                 target = target.func
             params = self.operation_params(getattr(target, "__name__", ""), self._request_kwargs)
             request.update({k: v for k, v in params.items() if k not in bound})
+        config, send = self._retry_config, func
+        body = request.get("Body")
+        if body is not None and hasattr(body, "read"):
+            try:
+                position = body.tell()
+                body.seek(position)
+            except (AttributeError, OSError, ValueError):
+                config = _with_exceptions(config, ())
+            else:
+                # Each attempt calls the client again, which sends the stream
+                # from its current position, where the last attempt left it.
+                send = functools.partial(self._send_rewound, func, body, position)
         try:
-            response = retry_api_call(func, config=self._retry_config, logger=_logger, **request)
+            response = retry_api_call(send, config=config, logger=_logger, **request)
         except BaseException as e:
             # clear_frames() skips this frame, which is still executing.
             traceback.clear_frames(e.__traceback__)
@@ -702,6 +719,22 @@ class S3Core:
                 raise ValueError(str(e)) from e
             raise
         return cast(dict[str, Any], response)
+
+    @staticmethod
+    def _send_rewound(func: Callable[..., Any], body: Any, position: int, **request) -> Any:
+        """Rewind the stream body of a request and send the request.
+
+        Args:
+            func: The client method.
+            body: The stream that the request sends as its ``Body``.
+            position: The position to rewind the stream to.
+            **request: The request parameters.
+
+        Returns:
+            The response.
+        """
+        body.seek(position)
+        return func(**request)
 
     def head_object(self, path: S3Path, **params) -> S3Metadata:
         """Look up an object, or a version of it, with HeadObject.
