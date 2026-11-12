@@ -19,6 +19,7 @@ from typing import Any
 from botocore.config import Config
 
 from pyathena import connect
+from pyathena.filesystem import s3_filesystem
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.util import parse_output_location
@@ -237,8 +238,8 @@ def filesystem(settings: Settings, case: Case, session_: Any, connection: Any) -
         fs.connect()
         return fs
     filesystem_class = AioS3FileSystem if case.api == "aio" else S3FileSystem
-    return filesystem_class(
-        connection=connection, max_workers=case.max_workers, skip_instance_cache=True
+    return s3_filesystem(
+        connection, filesystem_class, max_workers=case.max_workers, skip_instance_cache=True
     )
 
 

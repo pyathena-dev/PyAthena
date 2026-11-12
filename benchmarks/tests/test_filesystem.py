@@ -296,7 +296,7 @@ class TestRunFilesystem:
     def s3_client(self, monkeypatch):
         """Replace the connection and filesystems; the fake client answers HeadObject."""
         client = FakeS3Client(10)
-        connection = SimpleNamespace(s3_client=client, close=lambda: None)
+        connection = SimpleNamespace(s3_client=client, retry_config=None, close=lambda: None)
         monkeypatch.setattr("pyathena_bench.filesystem.connect", lambda **kwargs: connection)
         for name in ("S3FileSystem", "AioS3FileSystem"):
             monkeypatch.setattr(
