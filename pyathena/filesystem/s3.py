@@ -1127,6 +1127,31 @@ class S3FileSystem(AbstractFileSystem):
             return {f.name: f for f in files}
         return [f.name for f in files]
 
+    def glob(self, path, maxdepth=None, **kwargs):
+        """Find the paths that match a glob pattern.
+
+        As fsspec's ``glob()``, except that only the keys that start with the
+        part of the last path component before the first wildcard are listed,
+        as with fsspec's asynchronous ``_glob()``.
+
+        Args:
+            path: S3 glob pattern.
+            maxdepth: Maximum depth of the paths below the literal part of the
+                pattern, at least 1.
+            **kwargs: Additional arguments passed to ``find``, such as
+                ``detail``.
+
+        Returns:
+            The matching paths, or a dictionary of them and their objects with
+            ``detail=True``.
+        """
+        stripped = self._strip_protocol(path)
+        wildcards = [i for i in (stripped.find(c) for c in "*?[") if i >= 0]
+        stem = stripped[: min(wildcards)].rpartition("/")[2] if wildcards else ""
+        if stem and "prefix" not in kwargs:
+            kwargs["prefix"] = stem
+        return super().glob(path, maxdepth=maxdepth, **kwargs)
+
     def expand_path(self, path, recursive=False, maxdepth=None, **kwargs) -> list[str]:
         """Expand glob patterns and directories into the paths they match.
 
@@ -1288,18 +1313,35 @@ class S3FileSystem(AbstractFileSystem):
             TypeError: If both ``batch_size`` and ``max_workers`` are given.
             OSError: If S3 could not delete some of the objects.
         """
+        max_workers = self._delete_batch_limit(batch_size, kwargs)
+        paths = self._delete_paths(path, recursive=recursive, maxdepth=maxdepth)
+        self._delete_objects(paths, max_workers=max_workers, **kwargs)
+
+    def _delete_batch_limit(self, batch_size: int | None, kwargs: dict[str, Any]) -> int:
+        """Return the number of DeleteObjects requests of ``rm()`` to send at once.
+
+        Args:
+            batch_size: The ``batch_size`` argument of ``rm()``.
+            kwargs: The other arguments of ``rm()``, from which its deprecated
+                alias ``max_workers`` is removed.
+
+        Returns:
+            The number of requests.
+
+        Raises:
+            ValueError: If the number is neither positive, -1, nor None.
+            TypeError: If both ``batch_size`` and ``max_workers`` are given.
+        """
         if "max_workers" in kwargs:
             if batch_size is not None:
                 raise TypeError("rm() got both batch_size and its alias max_workers.")
             warnings.warn(
                 "The max_workers argument of rm() is deprecated; use batch_size.",
                 DeprecationWarning,
-                stacklevel=2,
+                stacklevel=3,
             )
             batch_size = kwargs.pop("max_workers")
-        max_workers = self._batch_limit(batch_size)
-        paths = self._delete_paths(path, recursive=recursive, maxdepth=maxdepth)
-        self._delete_objects(paths, max_workers=max_workers, **kwargs)
+        return self._batch_limit(batch_size)
 
     def _delete_paths(
         self, path: str | list[str], recursive: bool = False, maxdepth: int | None = None
@@ -2671,32 +2713,7 @@ class S3FileSystem(AbstractFileSystem):
                 ``batch_size`` is neither positive, -1, nor None.
         """
         limit = self._batch_limit(batch_size)
-        if isinstance(lpath, list) and isinstance(rpath, list):
-            pairs = [(lp, self._strip_protocol(rp)) for lp, rp in zip(lpath, rpath, strict=False)]
-        else:
-            # As fsspec's put() pairs them.
-            source_is_str = isinstance(lpath, str)
-            if source_is_str:
-                lpath = make_path_posix(lpath)
-            local = LocalFileSystem()
-            lpaths = local.expand_path(lpath, recursive=recursive, maxdepth=maxdepth, **kwargs)
-            if source_is_str and (not recursive or maxdepth is not None):
-                # A string source without recursion does not copy directories.
-                lpaths = [p for p in lpaths if not (trailing_sep(p) or local.isdir(p))]
-                if not lpaths:
-                    return
-            dest_is_dir = isinstance(rpath, str) and (trailing_sep(rpath) or self.isdir(rpath))
-            rpath = (
-                self._strip_protocol(rpath)
-                if isinstance(rpath, str)
-                else [self._strip_protocol(p) for p in rpath]
-            )
-            exists = source_is_str and (
-                (has_magic(lpath) and len(lpaths) == 1)
-                or (not has_magic(lpath) and dest_is_dir and not trailing_sep(lpath))
-            )
-            rpaths = other_paths(lpaths, rpath, exists=exists, flatten=not source_is_str)
-            pairs = list(zip(lpaths, rpaths, strict=True))
+        pairs = self._put_pairs(lpath, rpath, recursive=recursive, maxdepth=maxdepth, **kwargs)
         if not pairs:
             return
         if len({rp for _, rp in pairs}) != len(pairs):
@@ -2718,6 +2735,49 @@ class S3FileSystem(AbstractFileSystem):
 
         locked.set_size(len(pairs))
         self._run_batch(put_pair, pairs, concurrency)
+
+    def _put_pairs(
+        self, lpath, rpath, recursive=False, maxdepth=None, **kwargs
+    ) -> list[tuple[str, str]]:
+        """Pair the local sources of ``put()`` with their S3 destinations as fsspec does.
+
+        Args:
+            lpath: Local source path, glob pattern, or list of them.
+            rpath: S3 destination path, or list of paths when ``lpath`` is a
+                list.
+            recursive: Whether to include the directories with their contents.
+            maxdepth: Maximum depth of a recursive copy.
+            **kwargs: Additional arguments passed to the ``expand_path()`` of
+                the local filesystem.
+
+        Returns:
+            The local paths, including the directories of a recursive copy,
+            with their destinations without the protocol.
+        """
+        if isinstance(lpath, list) and isinstance(rpath, list):
+            return [(lp, self._strip_protocol(rp)) for lp, rp in zip(lpath, rpath, strict=False)]
+        source_is_str = isinstance(lpath, str)
+        if source_is_str:
+            lpath = make_path_posix(lpath)
+        local = LocalFileSystem()
+        lpaths = local.expand_path(lpath, recursive=recursive, maxdepth=maxdepth, **kwargs)
+        if source_is_str and (not recursive or maxdepth is not None):
+            # A string source without recursion does not copy directories.
+            lpaths = [p for p in lpaths if not (trailing_sep(p) or local.isdir(p))]
+            if not lpaths:
+                return []
+        dest_is_dir = isinstance(rpath, str) and (trailing_sep(rpath) or self.isdir(rpath))
+        rpath = (
+            self._strip_protocol(rpath)
+            if isinstance(rpath, str)
+            else [self._strip_protocol(p) for p in rpath]
+        )
+        exists = source_is_str and (
+            (has_magic(lpath) and len(lpaths) == 1)
+            or (not has_magic(lpath) and dest_is_dir and not trailing_sep(lpath))
+        )
+        rpaths = other_paths(lpaths, rpath, exists=exists, flatten=not source_is_str)
+        return list(zip(lpaths, rpaths, strict=True))
 
     def put_file(
         self,

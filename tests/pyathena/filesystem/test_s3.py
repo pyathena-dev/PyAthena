@@ -1056,6 +1056,17 @@ class TestS3FileSystem:
         expected = [p.lstrip("/") for p in memory.glob(f"/bucket/{pattern}", maxdepth=maxdepth)]
         assert sorted(fs.glob(f"s3://bucket/{pattern}", maxdepth=maxdepth)) == expected
 
+    def test_glob_lists_stem_prefix(self):
+        # GH-1337: glob() lists only the keys that start with the stem before
+        # the first wildcard, as fsspec's asynchronous glob does, which
+        # AioS3FileSystem used before it expanded its paths with this
+        # filesystem. It listed every key of the directory.
+        fs = self._make_fs()
+        self._serve_keys(fs, self.FIND_KEYS)
+
+        assert fs.glob("s3://bucket/dir/s*") == ["bucket/dir/sub"]
+        assert [c.kwargs["Prefix"] for c in fs._call.call_args_list] == ["dir/s"]
+
     def test_find_withdirs_omits_bucket(self):
         fs = self._make_fs()
         self._serve_keys(fs, self.FIND_KEYS)

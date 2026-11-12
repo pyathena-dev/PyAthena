@@ -40,6 +40,7 @@ from tests.pyathena.util import (
     overlapping_calls,
     poll_until,
     retried,
+    run_bounded,
     run_in_forked_child,
     shutdown_bounded,
     sigint_when,
@@ -155,10 +156,13 @@ class TestS3ThreadPool:
             task = asyncio.ensure_future(run(work))
             await asyncio.to_thread(operation.started.wait, EVENT_TIMEOUT)
             task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
+            # Lets the cancellation reach the task, which waits for a running
+            # call unless it runs shielded.
+            await asyncio.sleep(0.1)
             operation.release.set()
             started = time.monotonic()
+            with pytest.raises(asyncio.CancelledError):
+                await task
             assert await asyncio.to_thread(finished.wait, EVENT_TIMEOUT)
             return time.monotonic() - started
 
@@ -169,6 +173,42 @@ class TestS3ThreadPool:
             pool.shutdown()
 
         assert operation.calls == (3 if shielded else 1)
+
+    @pytest.mark.parametrize("cancellations", [1, 2])
+    def test_run_cancelled_waits_for_call(self, cancellations):
+        # GH-1337: a cancelled task raises once its running call has ended,
+        # so that nothing that the call does, such as the commit of a write,
+        # follows the cancellation. The task used to raise at once. A second
+        # cancellation stops the wait.
+        release = threading.Event()
+        started = threading.Event()
+        ended = threading.Event()
+        pool = S3ThreadPool(1)
+
+        def work():
+            started.set()
+            release.wait(EVENT_TIMEOUT)
+            ended.set()
+
+        async def main():
+            task = asyncio.ensure_future(pool.run(work))
+            assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+            for _ in range(cancellations):
+                task.cancel()
+                done, _ = await asyncio.wait([task], timeout=0.1)
+            # Done before the call has ended only after the second one.
+            assert bool(done) == (cancellations == 2)
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await await_bounded(task)
+            if cancellations == 1:
+                assert ended.is_set()
+
+        try:
+            run_bounded(main)
+        finally:
+            release.set()
+            pool.shutdown()
 
     def test_run_cancelled_after_return(self):
         # GH-1203: a cancellation that arrives after the call has returned does
