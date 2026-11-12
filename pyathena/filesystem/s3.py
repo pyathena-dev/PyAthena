@@ -29,7 +29,7 @@ from fsspec.compression import compr
 from fsspec.core import get_compression
 from fsspec.implementations.local import LocalFileSystem, make_path_posix, trailing_sep
 from fsspec.spec import AbstractBufferedFile
-from fsspec.utils import check_contained, isfilelike, other_paths, tokenize
+from fsspec.utils import check_contained, isfilelike, other_paths, stringify_path, tokenize
 
 import pyathena
 from pyathena.connection import Connection
@@ -1134,7 +1134,7 @@ class S3FileSystem(AbstractFileSystem):
         as with fsspec's asynchronous ``_glob()``.
 
         Args:
-            path: S3 glob pattern.
+            path: S3 glob pattern, as a string or an ``os.PathLike``.
             maxdepth: Maximum depth of the paths below the literal part of the
                 pattern, at least 1.
             **kwargs: Additional arguments passed to ``find``, such as
@@ -1149,7 +1149,36 @@ class S3FileSystem(AbstractFileSystem):
         stem = stripped[: min(wildcards)].rpartition("/")[2] if wildcards else ""
         if stem and "prefix" not in kwargs:
             kwargs["prefix"] = stem
-        return super().glob(path, maxdepth=maxdepth, **kwargs)
+        return super().glob(stringify_path(path), maxdepth=maxdepth, **kwargs)
+
+    def unstrip_protocol(self, name: str) -> str:
+        """Add the protocol to a path, as fsspec's ``unstrip_protocol()`` does.
+
+        Args:
+            name: The path, as a string or an ``os.PathLike``.
+
+        Returns:
+            The path with the ``s3://`` protocol.
+        """
+        return cast(str, super().unstrip_protocol(stringify_path(name)))
+
+    @staticmethod
+    def _stringify_paths(path: Any) -> Any:
+        """Convert an ``os.PathLike`` path, or those of a list, to strings.
+
+        The paths are converted with fsspec's ``stringify_path``, as
+        ``_strip_protocol()`` converts them, but their slashes are kept.
+
+        Args:
+            path: A path or a list of paths.
+
+        Returns:
+            The path or the list of paths, with the ``os.PathLike`` ones
+            converted. Other values are returned unchanged.
+        """
+        if isinstance(path, list):
+            return [stringify_path(p) for p in path]
+        return stringify_path(path)
 
     def expand_path(self, path, recursive=False, maxdepth=None, **kwargs) -> list[str]:
         """Expand glob patterns and directories into the paths they match.
@@ -1282,6 +1311,7 @@ class S3FileSystem(AbstractFileSystem):
             TypeError: If kwargs has ``bucket``, ``key`` or ``version_id``,
                 or ``Bucket``, ``Key`` or ``VersionId``, which the path gives.
         """
+        path = stringify_path(path)
         s3_path = S3Path.parse(path)
         if not s3_path.key:
             return
@@ -1317,6 +1347,7 @@ class S3FileSystem(AbstractFileSystem):
             TypeError: If both ``batch_size`` and ``max_workers`` are given.
             OSError: If S3 could not delete some of the objects.
         """
+        path = self._stringify_paths(path)
         max_workers = self._delete_batch_limit(batch_size, kwargs)
         paths = self._delete_paths(path, recursive=recursive, maxdepth=maxdepth)
         self._delete_objects(paths, max_workers=max_workers, **kwargs)
@@ -1769,6 +1800,7 @@ class S3FileSystem(AbstractFileSystem):
             ValueError: If the path has a version ID, is a bucket, or exists
                 while ``truncate`` is False.
         """
+        path = stringify_path(path)
         s3_path = S3Path.parse(path)
         if s3_path.version_id:
             raise ValueError("Cannot touch the file with the version specified.")
@@ -1831,6 +1863,7 @@ class S3FileSystem(AbstractFileSystem):
                 Also if ``batch_size`` is neither positive, -1, nor None.
             OSError: If bucket versioning cannot be read.
         """
+        path1, path2 = self._stringify_paths(path1), self._stringify_paths(path2)
         if path1 == path2:
             return
         limit = self._batch_limit(batch_size)
@@ -2029,6 +2062,7 @@ class S3FileSystem(AbstractFileSystem):
                 ``batch_size`` is neither positive, -1, nor None.
             OSError: If bucket versioning cannot be read for the checks.
         """
+        path1, path2 = self._stringify_paths(path1), self._stringify_paths(path2)
         if on_error is None:
             on_error = "ignore" if recursive else "raise"
         limit = self._batch_limit(batch_size)
@@ -2100,6 +2134,7 @@ class S3FileSystem(AbstractFileSystem):
                 ``lpath``, two sources have the same destination, or
                 ``batch_size`` is neither positive, -1, nor None.
         """
+        rpath = self._stringify_paths(rpath)
         limit = self._batch_limit(batch_size)
         root = make_path_posix(lpath) if isinstance(lpath, (str, os.PathLike)) else lpath
         pairs = self._copy_pairs(
@@ -2209,6 +2244,7 @@ class S3FileSystem(AbstractFileSystem):
             A directory ``path1``, which recursive ``copy()`` passes along
             with the files under it, is skipped.
         """
+        path1, path2 = stringify_path(path1), stringify_path(path2)
         self._copy_file(path1, path2, **kwargs)
 
     def _copy_file(self, path1: str, path2: str, **kwargs) -> bool:
@@ -2386,6 +2422,7 @@ class S3FileSystem(AbstractFileSystem):
                 of a dict name the same object, or ``batch_size`` is neither
                 positive, -1, nor None.
         """
+        path = stringify_path(path)
         limit = self._batch_limit(batch_size)
         if isinstance(path, str):
             self.pipe_file(self._strip_protocol(path), value, **kwargs)
@@ -2639,6 +2676,7 @@ class S3FileSystem(AbstractFileSystem):
             FileNotFoundError: If the path has no key or the key does not
                 exist.
         """
+        path = stringify_path(path)
         s3_path = S3Path.parse(path)
         if not s3_path.key:
             raise FileNotFoundError(path)
@@ -2714,6 +2752,7 @@ class S3FileSystem(AbstractFileSystem):
             ValueError: If two sources have the same destination, or
                 ``batch_size`` is neither positive, -1, nor None.
         """
+        lpath, rpath = self._stringify_paths(lpath), self._stringify_paths(rpath)
         limit = self._batch_limit(batch_size)
         pairs = self._put_pairs(lpath, rpath, recursive=recursive, maxdepth=maxdepth, **kwargs)
         if not pairs:
@@ -2818,6 +2857,7 @@ class S3FileSystem(AbstractFileSystem):
             the method returns without performing any operation. Bucket-only
             destinations (without key) are also not supported.
         """
+        rpath = stringify_path(rpath)
         if os.path.isdir(lpath):
             # No support for directory uploads.
             return
@@ -2953,6 +2993,7 @@ class S3FileSystem(AbstractFileSystem):
             ...     client_method="put_object"
             ... )
         """
+        path = stringify_path(path)
         client_method = kwargs.pop("client_method", "get_object")
         return self.core.generate_presigned_url(
             S3Path.parse(path), client_method, expiration, **kwargs
@@ -2971,6 +3012,7 @@ class S3FileSystem(AbstractFileSystem):
             system-defined metadata (content type, encryption settings,
             etc.) as typed properties.
         """
+        path = stringify_path(path)
         s3_path = S3Path.parse(path)
         if not s3_path.key:
             raise ValueError("Cannot get metadata of a bucket.")
@@ -2988,6 +3030,7 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The value of the attribute, or None if the attribute is not set.
         """
+        path = stringify_path(path)
         return self.metadata(path, **kwargs).get(attr_name)
 
     def setxattr(self, path: str, copy_kwargs: dict[str, Any] | None = None, **kw_args) -> None:
@@ -3029,6 +3072,7 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             ValueError: If the path is a bucket or has a version ID.
         """
+        path = stringify_path(path)
         s3_path = S3Path.parse(path)
         if not s3_path.key:
             raise ValueError("Cannot set metadata of a bucket.")
@@ -3056,6 +3100,7 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             Dictionary mapping tag keys to tag values.
         """
+        path = stringify_path(path)
         s3_path = S3Path.parse(path)
         if not s3_path.key:
             raise ValueError("Cannot get tags of a bucket.")
@@ -3077,6 +3122,7 @@ class S3FileSystem(AbstractFileSystem):
                 'm' will merge in new tags with existing tags, which incurs
                 two remote calls.
         """
+        path = stringify_path(path)
         s3_path = S3Path.parse(path)
         if not s3_path.key:
             raise ValueError("Cannot put tags of a bucket.")
@@ -3104,6 +3150,7 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs: Additional parameters passed to the PutObjectAcl or
                 PutBucketAcl API.
         """
+        path = stringify_path(path)
         s3_path = S3Path.parse(path)
         # Validate before any ACL is applied so that a recursive call cannot
         # partially apply object ACLs and then fail on the bucket ACL.
@@ -3165,6 +3212,7 @@ class S3FileSystem(AbstractFileSystem):
             List of S3MultipartUpload instances describing the in-progress
             multipart uploads.
         """
+        path = stringify_path(path)
         s3_path = S3Path.parse(path)
         # S3 matches Prefix as a plain string, so the uploads are filtered to
         # the key itself and the keys under it.
@@ -3202,6 +3250,7 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             List of S3ObjectVersion instances describing the versions.
         """
+        path = stringify_path(path)
         s3_path = S3Path.parse(path)
         # S3 matches Prefix as a plain string, so the versions are filtered to
         # the key itself or the keys under it.

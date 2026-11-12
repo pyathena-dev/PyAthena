@@ -24,7 +24,7 @@ from base64 import b64encode
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from itertools import chain
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest import mock
 from zlib import crc32
@@ -67,6 +67,7 @@ from tests.pyathena.util import (
     poll_until,
     retried,
     run_in_forked_child,
+    serve_s3_keys,
     shutdown_bounded,
     sigint_when,
     stub_move_with_source_params,
@@ -1379,6 +1380,69 @@ class TestS3FileSystem:
         )
         assert isinstance(fs, S3FileSystem)
         assert not fs.async_impl
+
+    @pytest.mark.parametrize(
+        "call",
+        [
+            pytest.param(lambda fs, p, local: fs.rm_file(p("bucket/key")), id="rm_file"),
+            pytest.param(lambda fs, p, local: fs.rm(p("bucket/key")), id="rm"),
+            pytest.param(lambda fs, p, local: fs.rm([p("bucket/key")]), id="rm-list"),
+            pytest.param(lambda fs, p, local: fs.touch(p("bucket/new")), id="touch"),
+            pytest.param(lambda fs, p, local: fs.mv(p("bucket/key"), p("bucket/new")), id="mv"),
+            pytest.param(lambda fs, p, local: fs.copy(p("bucket/key"), p("bucket/new")), id="copy"),
+            pytest.param(
+                lambda fs, p, local: fs.copy([p("bucket/key")], [p("bucket/new")]),
+                id="copy-list",
+            ),
+            pytest.param(
+                lambda fs, p, local: fs.cp_file(p("bucket/key"), p("bucket/new")), id="cp_file"
+            ),
+            pytest.param(lambda fs, p, local: fs.pipe(p("bucket/new"), b"x"), id="pipe"),
+            pytest.param(lambda fs, p, local: fs.cat_file(p("bucket/key")), id="cat_file"),
+            pytest.param(lambda fs, p, local: fs.glob(p("bucket/dir/*")), id="glob"),
+            pytest.param(
+                lambda fs, p, local: fs.put_file(p(f"{local}/src"), p("bucket/new")),
+                id="put_file",
+            ),
+            pytest.param(lambda fs, p, local: fs.put(p(f"{local}/src"), p("bucket/new")), id="put"),
+            pytest.param(lambda fs, p, local: fs.get(p("bucket/key"), p(f"{local}/dst")), id="get"),
+            pytest.param(lambda fs, p, local: fs.sign(p("bucket/key")), id="sign"),
+            pytest.param(lambda fs, p, local: fs.metadata(p("bucket/key")), id="metadata"),
+            pytest.param(lambda fs, p, local: fs.getxattr(p("bucket/key"), "m"), id="getxattr"),
+            pytest.param(lambda fs, p, local: fs.setxattr(p("bucket/key"), m="2"), id="setxattr"),
+            pytest.param(lambda fs, p, local: fs.get_tags(p("bucket/key")), id="get_tags"),
+            pytest.param(
+                lambda fs, p, local: fs.put_tags(p("bucket/key"), {"a": "2"}), id="put_tags"
+            ),
+            pytest.param(lambda fs, p, local: fs.chmod(p("bucket/key"), "private"), id="chmod"),
+            pytest.param(
+                lambda fs, p, local: [vars(u) for u in fs.list_multipart_uploads(p("bucket/dir"))],
+                id="list_multipart_uploads",
+            ),
+            pytest.param(
+                lambda fs, p, local: [vars(v) for v in fs.object_version_info(p("bucket/key"))],
+                id="object_version_info",
+            ),
+            pytest.param(
+                lambda fs, p, local: fs.unstrip_protocol(p("bucket/key")), id="unstrip_protocol"
+            ),
+        ],
+    )
+    def test_path_like_paths(self, tmp_path, call):
+        # GH-1380: an os.PathLike path is used as its string.
+        outcomes = []
+        for convert in (str, PurePosixPath):
+            local = tmp_path / convert.__name__
+            local.mkdir()
+            (local / "src").write_bytes(b"a")
+            fs = S3FileSystem(
+                key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+            )
+            store, requests = serve_s3_keys(fs, {"key", "dir/a"})
+            result = call(fs, convert, local)
+            files = sorted(f.relative_to(local).as_posix() for f in local.rglob("*"))
+            outcomes.append((result, sorted(map(repr, requests)), sorted(store), files))
+        assert outcomes[1] == outcomes[0]
 
     def test_requester_pays(self):
         # GH-969: RequestPayer is sent only with the operations that accept

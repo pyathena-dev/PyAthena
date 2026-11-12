@@ -4,7 +4,6 @@ import collections
 import contextlib
 import gc
 import gzip
-import io
 import os
 import threading
 import time
@@ -13,7 +12,6 @@ import uuid
 import warnings
 import weakref
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, wait
-from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from types import SimpleNamespace
 from unittest import mock
@@ -60,6 +58,7 @@ from tests.pyathena.util import (
     retried,
     run_bounded,
     run_in_forked_child,
+    serve_s3_keys,
     shutdown_bounded,
     stub_move_with_source_params,
     stub_multipart_copy,
@@ -393,83 +392,6 @@ class TestAioS3FileSystem:
 
         assert info == {"name": "bucket/key"}
 
-    @staticmethod
-    def _serve_keys(fs, keys):
-        # Answer the S3 requests of the filesystem from a set of keys of
-        # "bucket", which is returned, and record them by operation name. The
-        # requests may come from several threads at once.
-        store = set(keys)
-        requests = []
-        lock = threading.Lock()
-
-        def call(method, **request):
-            with lock:
-                return answer(method if isinstance(method, str) else method.__name__, request)
-
-        def answer(name, request):
-            requests.append((name, request))
-            key = request.get("Key")
-            if name == "head_bucket" and request["Bucket"] != "bucket":
-                raise FileNotFoundError(request["Bucket"])
-            if name == "head_object":
-                if key not in store:
-                    raise FileNotFoundError(key)
-                return {
-                    "ContentLength": 2,
-                    "ETag": '"e"',
-                    "LastModified": datetime(2026, 1, 1, tzinfo=UTC),
-                    "Metadata": {"m": "1"},
-                }
-            if name == "get_object":
-                return {"Body": io.BytesIO(b"aa"), "ContentLength": 2, "ETag": '"e"'}
-            if name == "list_objects_v2":
-                prefix, delimiter = request.get("Prefix", ""), request.get("Delimiter")
-                listed = sorted(k for k in list(store) if k.startswith(prefix))
-                directories = sorted(
-                    {
-                        prefix + k[len(prefix) :].split(delimiter)[0] + delimiter
-                        for k in listed
-                        if delimiter and delimiter in k[len(prefix) :]
-                    }
-                )
-                files = [k for k in listed if not delimiter or delimiter not in k[len(prefix) :]]
-                return {
-                    "Contents": [{"Key": k, "Size": 2, "ETag": '"e"'} for k in files],
-                    "CommonPrefixes": [{"Prefix": d} for d in directories],
-                    "KeyCount": len(files) + len(directories),
-                }
-            if name == "copy_object" and request["CopySource"]["Key"] not in store:
-                raise FileNotFoundError(request["CopySource"]["Key"])
-            if name in {"put_object", "copy_object"}:
-                store.add(key)
-                return {"ETag": '"e"'}
-            if name == "delete_object":
-                store.discard(key)
-            if name == "delete_objects":
-                deleted = [o["Key"] for o in request["Delete"]["Objects"]]
-                store.difference_update(deleted)
-                return {"Deleted": [{"Key": k} for k in deleted]}
-            if name == "get_object_tagging":
-                return {"TagSet": [{"Key": "a", "Value": "1"}]}
-            if name == "list_object_versions":
-                return {
-                    "Versions": [{"Key": "key", "VersionId": "v1", "IsLatest": False}],
-                    "DeleteMarkers": [{"Key": "key", "VersionId": "m1", "IsLatest": True}],
-                }
-            if name == "list_multipart_uploads":
-                return {"Uploads": [{"Key": "dir/a", "UploadId": "u1"}]}
-            return {}
-
-        def generate_presigned_url(*args, **kwargs):
-            # Signing sends no request, so its arguments are recorded as one.
-            with lock:
-                requests.append(("generate_presigned_url", {"args": args, **kwargs}))
-            return "https://signed"
-
-        fs._sync_fs._call = fs._sync_fs._core.call = call
-        fs._sync_fs.core.generate_presigned_url = generate_presigned_url
-        return store, requests
-
     @pytest.mark.parametrize(
         ("method", "sync_method", "args", "kwargs"),
         [
@@ -604,7 +526,7 @@ class TestAioS3FileSystem:
                 allow_bucket_deletion=True,
                 skip_instance_cache=True,
             )
-            store, requests = self._serve_keys(fs, keys)
+            store, requests = serve_s3_keys(fs._sync_fs, keys)
             (tmp_path / run).mkdir()
             local = {
                 "local-source": str(source),
@@ -635,6 +557,65 @@ class TestAioS3FileSystem:
         assert outcomes[0][1], "no request was sent"
         assert outcomes[1] == outcomes[0]
 
+    @pytest.mark.parametrize(
+        ("call", "transaction"),
+        [
+            pytest.param(lambda fs, p, local: fs.rm(p("bucket/key")), False, id="rm"),
+            pytest.param(lambda fs, p, local: fs.rm([p("bucket/key")]), False, id="rm-list"),
+            pytest.param(
+                lambda fs, p, local: fs.mv(p("bucket/key"), p("bucket/new")), False, id="mv"
+            ),
+            pytest.param(
+                lambda fs, p, local: fs.copy(p("bucket/key"), p("bucket/new")), False, id="copy"
+            ),
+            pytest.param(
+                lambda fs, p, local: fs.copy([p("bucket/key")], [p("bucket/new")]),
+                False,
+                id="copy-list",
+            ),
+            pytest.param(
+                lambda fs, p, local: fs.cp_file(p("bucket/key"), p("bucket/new")),
+                False,
+                id="cp_file",
+            ),
+            pytest.param(lambda fs, p, local: fs.pipe(p("bucket/new"), b"x"), False, id="pipe"),
+            pytest.param(lambda fs, p, local: fs.glob(p("bucket/dir/*")), False, id="glob"),
+            pytest.param(
+                lambda fs, p, local: fs.put(p(f"{local}/src"), p("bucket/new")), False, id="put"
+            ),
+            pytest.param(
+                lambda fs, p, local: fs.put_file(p(f"{local}/src"), p("bucket/new")),
+                True,
+                id="put_file-transaction",
+            ),
+            pytest.param(
+                lambda fs, p, local: fs.get(p("bucket/key"), p(f"{local}/dst")), False, id="get"
+            ),
+            pytest.param(
+                lambda fs, p, local: fs.unstrip_protocol(p("bucket/key")),
+                False,
+                id="unstrip_protocol",
+            ),
+        ],
+    )
+    def test_path_like_paths(self, tmp_path, call, transaction):
+        # GH-1380: an os.PathLike path is used as its string by the methods
+        # that do not run those of the synchronous filesystem.
+        outcomes = []
+        for convert in (str, PurePosixPath):
+            local = tmp_path / convert.__name__
+            local.mkdir()
+            (local / "src").write_bytes(b"a")
+            fs = AioS3FileSystem(
+                key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+            )
+            store, requests = serve_s3_keys(fs._sync_fs, {"key", "dir/a"})
+            with fs.transaction if transaction else contextlib.nullcontext():
+                result = call(fs, convert, local)
+            files = sorted(f.relative_to(local).as_posix() for f in local.rglob("*"))
+            outcomes.append((result, sorted(map(repr, requests)), sorted(store), files))
+        assert outcomes[1] == outcomes[0]
+
     @pytest.mark.parametrize("path", ["s3://bucket/dir", None])
     def test_invalidate_cache(self, path):
         # invalidate_cache() clears the listings that the asynchronous methods
@@ -648,7 +629,7 @@ class TestAioS3FileSystem:
             listings_expiry_time=None,
             skip_instance_cache=True,
         )
-        _, requests = self._serve_keys(fs, {"dir/a"})
+        _, requests = serve_s3_keys(fs._sync_fs, {"dir/a"})
 
         fs.ls("s3://bucket/dir")
         fs.ls("s3://bucket/dir")
@@ -2255,7 +2236,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        store, _ = self._serve_keys(fs, set())
+        store, _ = serve_s3_keys(fs._sync_fs, set())
         local = tmp_path / "local"
         local.write_bytes(b"a")
 
@@ -2272,7 +2253,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        store, requests = self._serve_keys(fs, set())
+        store, requests = serve_s3_keys(fs._sync_fs, set())
         (tmp_path / "src" / "sub").mkdir(parents=True)
         (tmp_path / "src" / "a").write_bytes(b"a")
         (tmp_path / "src" / "sub" / "b").write_bytes(b"b")
@@ -2289,7 +2270,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        self._serve_keys(fs, {"dir/a1", "dir/b1"})
+        serve_s3_keys(fs._sync_fs, {"dir/a1", "dir/b1"})
 
         assert await fs._expand_path("s3://bucket/dir", recursive=True, prefix="a") == [
             "bucket/dir",
@@ -2329,7 +2310,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        _, requests = self._serve_keys(fs, {"key"})
+        _, requests = serve_s3_keys(fs._sync_fs, {"key"})
 
         await fs._cp_file(
             "s3://bucket/key", "s3://bucket/dst", recursive=True, maxdepth=1, on_error="ignore"
@@ -2397,7 +2378,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        store, requests = self._serve_keys(fs, {"b"})
+        store, requests = serve_s3_keys(fs._sync_fs, {"b"})
 
         await fs._copy("s3://bucket/b?versionId=v1", "s3://bucket/d/", RequestPayer="requester")
         assert [r for name, r in requests if name == "copy_object"] == [

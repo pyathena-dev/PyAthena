@@ -27,7 +27,7 @@ from fsspec.asyn import AbstractAsyncStreamedFile, AsyncFileSystem, sync
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
 from fsspec.implementations.local import LocalFileSystem, make_path_posix
-from fsspec.utils import check_contained
+from fsspec.utils import check_contained, stringify_path
 
 from pyathena.aio.util import create_in_thread
 from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem, S3FileTarget
@@ -487,6 +487,7 @@ class AioS3FileSystem(AsyncFileSystem):
         **kwargs,
     ) -> None:
         _S3BatchTasks.track()
+        rpath = stringify_path(rpath)
         if self._intrans:
             # See _pipe_file.
             await self._write_in_transaction(
@@ -607,6 +608,7 @@ class AioS3FileSystem(AsyncFileSystem):
             TypeError: If both ``batch_size`` and ``max_workers`` are given.
             OSError: If S3 could not delete some of the objects.
         """
+        path = self._sync_fs._stringify_paths(path)
         max_workers = self._sync_fs._delete_batch_limit(batch_size, kwargs)
         paths = await self._thread_pool.run(
             self._sync_fs._delete_paths, path, recursive=recursive, maxdepth=maxdepth
@@ -697,6 +699,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 no object at its key, which is not copied, does not conflict.
             OSError: If bucket versioning cannot be read.
         """
+        path1, path2 = self._sync_fs._stringify_paths(path1), self._sync_fs._stringify_paths(path2)
         if path1 == path2:
             return
         source_params = self.core.copy_source_params(kwargs)
@@ -769,6 +772,7 @@ class AioS3FileSystem(AsyncFileSystem):
             batch_size: Number of copies to run at the same time.
             **kwargs: Additional S3 copy parameters passed to ``_cp_file()``.
         """
+        path1, path2 = self._sync_fs._stringify_paths(path1), self._sync_fs._stringify_paths(path2)
         sources = [path1] if isinstance(path1, (str, os.PathLike)) else path1
         if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
             pairs = await self._thread_pool.run(
@@ -812,6 +816,7 @@ class AioS3FileSystem(AsyncFileSystem):
             ValueError: If a source with a version ID is paired, and a
                 destination lies outside ``lpath``.
         """
+        rpath = self._sync_fs._stringify_paths(rpath)
         sources = [rpath] if isinstance(rpath, (str, os.PathLike)) else rpath
         if isinstance(lpath, (str, os.PathLike)) and any(S3Path.has_version_id(p) for p in sources):
             root = make_path_posix(lpath)
@@ -849,9 +854,10 @@ class AioS3FileSystem(AsyncFileSystem):
         has no directories, and creating one checks or creates the bucket.
 
         Args:
-            lpath: Local source path, glob pattern, or list of them.
+            lpath: Local source path, glob pattern, or list of them, as
+                strings or ``os.PathLike`` objects.
             rpath: S3 destination path, or list of paths when ``lpath`` is a
-                list.
+                list, as strings or ``os.PathLike`` objects.
             recursive: Whether to copy the directories with their contents.
             callback: Progress callback.
             batch_size: Number of uploads to run at the same time.
@@ -861,6 +867,7 @@ class AioS3FileSystem(AsyncFileSystem):
         Returns:
             The return values of the ``_put_file()`` calls, as in fsspec.
         """
+        lpath, rpath = self._sync_fs._stringify_paths(lpath), self._sync_fs._stringify_paths(rpath)
         pairs = await self._thread_pool.run(
             self._sync_fs._put_pairs, lpath, rpath, recursive=recursive, maxdepth=maxdepth, **kwargs
         )
@@ -892,7 +899,7 @@ class AioS3FileSystem(AsyncFileSystem):
             The return values of the ``_pipe_file()`` calls, as in fsspec.
         """
         return await _S3BatchTasks().run(
-            super()._pipe(path, value, batch_size=batch_size, **kwargs)
+            super()._pipe(stringify_path(path), value, batch_size=batch_size, **kwargs)
         )
 
     async def _cat(self, path, recursive=False, on_error="raise", batch_size=None, **kwargs):
@@ -981,6 +988,7 @@ class AioS3FileSystem(AsyncFileSystem):
             ValueError: If trying to copy to a versioned file or copy buckets.
         """
         _S3BatchTasks.track()
+        path1, path2 = stringify_path(path1), stringify_path(path2)
         await self._copy_file(path1, path2, **kwargs)
 
     async def _copy_file(self, path1: str, path2: str, **kwargs) -> bool:
@@ -1184,6 +1192,30 @@ class AioS3FileSystem(AsyncFileSystem):
         if detail:
             return {f.name: f for f in files}
         return [f.name for f in files]
+
+    async def _glob(self, path, maxdepth=None, **kwargs):
+        """Find the paths that a glob pattern matches, as fsspec's ``_glob()`` does.
+
+        Args:
+            path: The glob pattern, as a string or an ``os.PathLike``.
+            maxdepth: Maximum depth of a ``**`` pattern.
+            **kwargs: Additional arguments passed to ``_find()``.
+
+        Returns:
+            The matching paths, or a dict of their info with ``detail=True``.
+        """
+        return await super()._glob(stringify_path(path), maxdepth=maxdepth, **kwargs)
+
+    def unstrip_protocol(self, name: str) -> str:
+        """Add the protocol to a path, as fsspec's ``unstrip_protocol()`` does.
+
+        Args:
+            name: The path, as a string or an ``os.PathLike``.
+
+        Returns:
+            The path with the ``s3://`` protocol.
+        """
+        return cast(str, super().unstrip_protocol(stringify_path(name)))
 
     async def _expand_path(self, path, recursive=False, maxdepth=None, **kwargs) -> list[str]:
         """Expand glob patterns and directories into the paths they match.
