@@ -207,10 +207,11 @@ Close a file returned by `open` explicitly or with a `with` block. A file that i
 closed is closed when it is finalized, which commits its written data unless
 `autocommit` is False:
 
-- When it is finalized during a pass of the cyclic garbage collector, or in a thread of
-  an `S3ThreadPool`, such as the request pool of a filesystem, it is closed in a new
-  thread after the finalization returns. If no thread can be started, the file is left
-  unclosed and its multipart upload incomplete.
+- When it is finalized during a pass of the cyclic garbage collector, it is closed in a
+  new thread that starts once the collection has ended. When it is finalized in a
+  thread of an `S3ThreadPool`, such as the request pool of a filesystem, it is closed
+  in a new thread. If no thread can be started, the file is left unclosed and its
+  multipart upload incomplete.
 - When its last reference is dropped elsewhere, it is closed before that returns.
 - During interpreter finalization, it is closed in the finalizing thread instead of a
   new thread. The request pools take no more calls then, so a file with data left to
@@ -219,8 +220,15 @@ closed is closed when it is finalized, which commits its written data unless
 If the garbage collector finalizes the write buffer of a file before the file, the data
 of the file is not committed, and its multipart upload is aborted.
 
-A file opened in text mode writes its remaining text to the file in the thread that
-finalizes it, before the file is closed.
+`close()` called during a pass of the cyclic garbage collector, such as by another
+finalizer, closes the file in the same way, in a new thread that starts once the
+collection has ended, and returns before the file is closed. A later `close()`,
+`commit()`, or `discard()` of the file waits for that close to end, unless it is
+called during a collection.
+
+A file opened in text mode is closed by its text wrapper when the wrapper is finalized.
+The wrapper writes its remaining text to the file in the thread that finalizes it, and
+then closes the file there, or as above during a collection.
 
 An interrupt, such as Ctrl+C, or a failure while a file reads ranges in parallel
 cancels the range reads that have not started, and the running ones make no further
