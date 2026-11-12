@@ -207,14 +207,17 @@ Close a file returned by `open` explicitly or with a `with` block. A file that i
 closed is closed when it is finalized, which commits its written data unless
 `autocommit` is False:
 
-- When its last reference is dropped outside the threads of an `S3ThreadPool`, such as
-  the request pool of a filesystem, it is closed before that returns.
-- When the cyclic garbage collector finalizes it, or it is finalized in a thread of an
-  `S3ThreadPool`, it is closed in a new thread after the finalization returns. If the
-  collector has finalized its write buffer first, its data is not committed, and its
-  multipart upload is aborted. During interpreter finalization, the file is closed in
-  the finalizing thread instead. If a thread cannot be started otherwise, the file is
-  left unclosed and its multipart upload incomplete.
+- When it is finalized during a pass of the cyclic garbage collector, or in a thread of
+  an `S3ThreadPool`, such as the request pool of a filesystem, it is closed in a new
+  thread after the finalization returns. If no thread can be started, the file is left
+  unclosed and its multipart upload incomplete.
+- When its last reference is dropped elsewhere, it is closed before that returns.
+- During interpreter finalization, it is closed in the finalizing thread instead of a
+  new thread. The request pools take no more calls then, so a file with data left to
+  upload as a part is not committed, and its multipart upload is aborted.
+
+If the garbage collector finalizes the write buffer of a file before the file, the data
+of the file is not committed, and its multipart upload is aborted.
 
 A file opened in text mode writes its remaining text to the file in the thread that
 finalizes it, before the file is closed.
