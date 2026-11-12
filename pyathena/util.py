@@ -328,6 +328,16 @@ def unstoppable_retries() -> Iterator[None]:
         _RETRY_STOP_EVENTS.reset(token)
 
 
+def retries_stopped() -> bool:
+    """Return whether an event of the enclosing stop scopes is set.
+
+    Returns:
+        Whether an event of the enclosing :func:`stop_retries_on` scopes,
+        apart from those that :func:`unstoppable_retries` clears, is set.
+    """
+    return any(event.is_set() for event in _RETRY_STOP_EVENTS.get())
+
+
 def raise_if_stopped(operation: str) -> None:
     """Raise if an event of the enclosing stop scopes is set.
 
@@ -346,7 +356,7 @@ def raise_if_stopped(operation: str) -> None:
         concurrent.futures.CancelledError: If an event of the enclosing
             :func:`stop_retries_on` scopes is set.
     """
-    if any(event.is_set() for event in _RETRY_STOP_EVENTS.get()):
+    if retries_stopped():
         raise CancelledError(f"Stopped before it could {operation}.")
 
 

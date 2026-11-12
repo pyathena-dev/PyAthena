@@ -498,10 +498,14 @@ class S3Executor(metaclass=ABCMeta):
     async def run(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:
         """Run a blocking call in the executor and wait for it.
 
-        Cancelling the waiting task cancels a call that has not started, and
-        stops the retries of the AWS API calls that a running call makes, as
-        :func:`~pyathena.aio.util.run_in_thread` does; the call itself keeps
-        running until it returns or raises.
+        Cancelling the waiting task cancels a call that has not started. A
+        running call makes no further attempt of its AWS API calls, as with
+        :func:`~pyathena.aio.util.run_in_thread`, and a write in it sends no
+        further part and does not commit (see
+        :func:`~pyathena.util.raise_if_stopped`); the task waits for the call
+        to end before it re-raises the cancellation, also when the event loop
+        shuts down with ``asyncio.run()``. A repeated cancellation stops that
+        wait, and the call then ends in the executor.
 
         Args:
             fn: The blocking callable.
@@ -531,12 +535,24 @@ class S3Executor(metaclass=ABCMeta):
                 with lock:
                     returned = True
 
+        # Created before it is scheduled, so that a cancellation while it is
+        # being scheduled can still cancel it or wait for it.
+        future: Future[T] = Future()
+        waiter = self.waiter(future)
         try:
-            return await asyncio.wrap_future(self.submit(call))
+            self.submit_to(future, call)
+            # Unlike awaiting the waiter, a cancellation of this task leaves
+            # the waiter to the wait below.
+            await asyncio.wait([waiter])
+            return waiter.result()
         except asyncio.CancelledError:
             with lock:
                 if not returned:
                     stop.set()
+            future.cancel()
+            # The states are also checked every second, as in map_async().
+            while not future.done():
+                await asyncio.wait([waiter], timeout=1.0)
             raise
 
     async def run_shielded(self, fn: Callable[..., T], *args: Any, **kwargs: Any) -> T:

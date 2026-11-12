@@ -1,5 +1,6 @@
 import array
 import asyncio
+import collections
 import contextlib
 import gc
 import gzip
@@ -11,8 +12,9 @@ import traceback
 import uuid
 import warnings
 import weakref
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
+from pathlib import PurePosixPath
 from types import SimpleNamespace
 from unittest import mock
 
@@ -21,7 +23,12 @@ from botocore.stub import Stubber
 from fsspec.callbacks import Callback
 
 from pyathena.filesystem.s3 import S3FileSystem
-from pyathena.filesystem.s3_async import AioS3File, AioS3FileSystem, AioS3StreamedFile
+from pyathena.filesystem.s3_async import (
+    AioS3File,
+    AioS3FileSystem,
+    AioS3StreamedFile,
+    _S3TransactionWrite,
+)
 from pyathena.filesystem.s3_core import S3Core, S3MultipartCopyPlan
 from pyathena.filesystem.s3_executor import S3ThreadPool, _S3PoolScope
 from pyathena.filesystem.s3_object import (
@@ -34,7 +41,7 @@ from pyathena.filesystem.s3_object import (
 )
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
-from pyathena.util import RetryConfig
+from pyathena.util import RetryConfig, raise_if_stopped, stop_retries_on
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
@@ -49,6 +56,7 @@ from tests.pyathena.util import (
     interrupt_each_opcode,
     mock_connection,
     overlapping_calls,
+    poll_until,
     retried,
     run_bounded,
     run_in_forked_child,
@@ -1665,7 +1673,7 @@ class TestAioS3FileSystem:
         fs._sync_fs.core.MULTIPART_UPLOAD_MAX_PARTS = 3
         fs._sync_fs.default_block_size = 4
         fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
-        fs.open = mock.MagicMock()
+        fs._open = mock.MagicMock()
         local = tmp_path / "local"
         local.write_bytes(b"a" * 13)
 
@@ -1674,7 +1682,7 @@ class TestAioS3FileSystem:
                 fs.pipe_file("s3://bucket/k1", b"a" * 13, **kwargs)
             with pytest.raises(ValueError, match="in 3 parts with a block size of 4 bytes"):
                 fs.put_file(str(local), "s3://bucket/k2", **kwargs)
-        fs.open.assert_not_called()
+        fs._open.assert_not_called()
         fs._sync_fs._call.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1780,13 +1788,563 @@ class TestAioS3FileSystem:
             await fs._rm("s3://bucket/dir", recursive=True, maxdepth=1, batch_size=10)
             stubber.assert_no_pending_responses()
 
+    @pytest.mark.asyncio
+    async def test_put_file_cancelled_stops_upload(self, tmp_path):
+        # GH-1337: a cancelled _put_file() sends no further part, does not
+        # complete the upload, aborts it, and raises once the abort has ended.
+        # The upload used to run on in its thread and commit.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        local = tmp_path / "local"
+        local.write_bytes(bytes(3 * block_size + 1))
+        started = threading.Event()
+        release = threading.Event()
+        requests = []
+
+        def call(method, **request):
+            name = method.__name__
+            requests.append(name)
+            if name == "create_multipart_upload":
+                return {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+            if name == "upload_part":
+                started.set()
+                release.wait(EVENT_TIMEOUT)
+                return {"ETag": '"e"'}
+            return {}
+
+        fs._sync_fs._call = fs._sync_fs._core.call = call
+        task = asyncio.ensure_future(
+            fs._put_file(str(local), "s3://bucket/key", block_size=block_size, max_workers=1)
+        )
+        try:
+            assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+            task.cancel()
+            done, _ = await asyncio.wait([task], timeout=0.1)
+            assert not done
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await await_bounded(task)
+        finally:
+            release.set()
+        assert requests == ["create_multipart_upload", "upload_part", "abort_multipart_upload"]
+
+    @staticmethod
+    def _held_until_stopped(state, release, result=None):
+        # Return a blocking call that records in state that it started, waits
+        # until a stop scope of its thread stops, records that, and then
+        # waits for release. A call that is never stopped ends after
+        # EVENT_TIMEOUT without being recorded as stopped.
+        lock = threading.Lock()
+
+        def call(*args, **kwargs):
+            with lock:
+                state["started"] += 1
+            deadline = time.monotonic() + EVENT_TIMEOUT
+            while time.monotonic() < deadline:
+                try:
+                    raise_if_stopped("continue")
+                except CancelledError:
+                    with lock:
+                        state["stopped"] += 1
+                    release.wait(EVENT_TIMEOUT)
+                    break
+                time.sleep(0.01)
+            with lock:
+                state["ended"] += 1
+            return result
+
+        return call
+
+    @pytest.mark.parametrize(
+        ("method", "cancellation"),
+        [
+            (method, cancellation)
+            for method in ["_cat", "_cat_ranges", "_pipe", "_put", "_get", "_copy", "_mv"]
+            for cancellation in ["batch", "calls_first", "shutdown"]
+            # asyncio.gather() cancels the copies of _mv() again.
+            if (method, cancellation) != ("_mv", "calls_first")
+        ],
+    )
+    def test_batch_cancelled_waits_for_calls(self, tmp_path, method, cancellation):
+        # GH-1337: a cancelled batch coroutine cancels its per-object calls,
+        # which make no further request, and raises once they have ended.
+        # fsspec's batch coroutines left them running after the
+        # cancellation. A call whose task is already being cancelled, as the
+        # shutdown of the event loop at the end of asyncio.run() cancels
+        # every task, possibly before the batch handles its own
+        # cancellation (calls_first), is not cancelled again, which would
+        # stop its wait.
+        fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        state = {"started": 0, "ended": 0, "stopped": 0}
+        release = threading.Event()
+        sources = ["s3://bucket/a", "s3://bucket/b"]
+        destinations = ["s3://bucket/c", "s3://bucket/d"]
+        local = [str(tmp_path / "a"), str(tmp_path / "b")]
+        held = self._held_until_stopped(state, release)
+        sync_fs.cat_file = self._held_until_stopped(state, release, b"")
+        sync_fs.pipe_file = sync_fs.put_file = sync_fs.get_file = held
+        sync_fs.info = self._held_until_stopped(
+            state, release, {"name": "bucket/a", "type": "file", "size": 0}
+        )
+        sync_fs._move_pairs = mock.MagicMock(
+            return_value=list(zip(sources, destinations, strict=True))
+        )
+        batches = {
+            "_cat": lambda: fs._cat(sources),
+            "_cat_ranges": lambda: fs._cat_ranges(sources, 0, 1),
+            "_pipe": lambda: fs._pipe(dict.fromkeys(sources, b"a")),
+            "_put": lambda: fs._put(local, sources),
+            "_get": lambda: fs._get(sources, local),
+            "_copy": lambda: fs._copy(sources, destinations),
+            "_mv": lambda: fs._mv(sources, destinations),
+        }
+        # The calls that had ended when the batch finished, recorded in the
+        # event loop.
+        ended_when_done = []
+
+        def release_once_stopped():
+            # The shutdown: the stopped calls are held until the end of the
+            # batch has been recorded, which must not happen before they end,
+            # or for 0.5 s.
+            poll_until(lambda: state["stopped"] == 2, "the calls were not stopped")
+            deadline = time.monotonic() + 0.5
+            while not ended_when_done and time.monotonic() < deadline:
+                time.sleep(0.01)
+            release.set()
+
+        async def main():
+            task = asyncio.ensure_future(batches[method]())
+            task.add_done_callback(lambda _: ended_when_done.append(state["ended"]))
+            await wait_until(lambda: state["started"] == 2)
+            if cancellation == "shutdown":
+                # asyncio.run() cancels the batch and its calls once main()
+                # has returned.
+                threading.Thread(target=release_once_stopped, daemon=True).start()
+                return
+            if cancellation == "calls_first":
+                current = asyncio.current_task()
+                for call in asyncio.all_tasks() - {current, task}:
+                    call.cancel()
+                await wait_until(lambda: state["stopped"] == 2)
+            task.cancel()
+            await wait_until(lambda: state["stopped"] == 2)
+            done, _ = await asyncio.wait([task], timeout=0.1)
+            assert not done
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await await_bounded(task)
+
+        try:
+            run_bounded(main)
+        finally:
+            release.set()
+        assert state == {"started": 2, "ended": 2, "stopped": 2}
+        assert ended_when_done == [2]
+
+    @pytest.mark.parametrize("method", ["_pipe", "_put", "_get"])
+    def test_batch_failure_waits_for_calls(self, tmp_path, method):
+        # GH-1337: when a per-object call of _pipe(), _put(), or _get() fails,
+        # fsspec cancels the others, which make no further request, and the
+        # failure is raised once they have ended. They used to run on, and
+        # commit, after the failure was raised.
+        fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        state = {"started": 0, "ended": 0, "stopped": 0}
+        release = threading.Event()
+        held = self._held_until_stopped(state, release)
+
+        def call(source, *args, **kwargs):
+            if source.endswith("/a"):
+                # Once the other call has started.
+                poll_until(lambda: state["started"] == 1, "the other call did not start")
+                raise ValueError("failed")
+            return held(source, *args, **kwargs)
+
+        sync_fs.pipe_file = sync_fs.put_file = sync_fs.get_file = call
+        sources = ["s3://bucket/b", "s3://bucket/a"]
+        local = [str(tmp_path / "b"), str(tmp_path / "a")]
+        batches = {
+            "_pipe": lambda: fs._pipe(dict.fromkeys(sources, b"a")),
+            "_put": lambda: fs._put(local, sources),
+            "_get": lambda: fs._get(sources, local),
+        }
+
+        async def main():
+            task = asyncio.ensure_future(batches[method]())
+            await wait_until(lambda: state["stopped"] == 1)
+            done, _ = await asyncio.wait([task], timeout=0.1)
+            assert not done
+            release.set()
+            with pytest.raises(ValueError, match="failed"):
+                await await_bounded(task)
+            assert state == {"started": 1, "ended": 1, "stopped": 1}
+
+        try:
+            run_bounded(main)
+        finally:
+            release.set()
+
+    @pytest.mark.asyncio
+    async def test_transaction_put_file_cancelled_is_discarded(self, tmp_path):
+        # GH-1337: a _put_file() in a transaction that is cancelled while its
+        # last part runs is discarded, and the transaction does not commit
+        # it. The part ended normally, so the write had nothing left to stop,
+        # and the file stayed in the transaction.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        local = tmp_path / "local"
+        local.write_bytes(bytes(2 * block_size))
+        started = threading.Event()
+        release = threading.Event()
+        requests = []
+
+        def call(method, **request):
+            name = method.__name__
+            requests.append(name)
+            if name == "create_multipart_upload":
+                return {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+            if name == "upload_part":
+                if request["PartNumber"] == 2:
+                    started.set()
+                    release.wait(EVENT_TIMEOUT)
+                return {"ETag": '"e"'}
+            return {}
+
+        fs._sync_fs._call = fs._sync_fs._core.call = call
+        try:
+            with fs.transaction:
+                task = asyncio.ensure_future(
+                    fs._put_file(
+                        str(local), "s3://bucket/key", block_size=block_size, max_workers=1
+                    )
+                )
+                assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+                task.cancel()
+                await asyncio.sleep(0.1)
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await await_bounded(task)
+        finally:
+            release.set()
+        assert requests == [
+            "create_multipart_upload",
+            "upload_part",
+            "upload_part",
+            "abort_multipart_upload",
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stage", ["before_open", "last_part", "write_ended", "returned"])
+    async def test_transaction_put_file_cancelled_late(self, tmp_path, stage):
+        # GH-1337: the transaction does not commit the file of a _put_file()
+        # whose task is cancelled, and a cancellation adds no wait for a
+        # discard behind other calls of the filesystem. The cases: cancelled
+        # twice before the write opens its file (before_open), while it runs
+        # its last part (last_part), or just after the write has ended, the
+        # second time (write_ended); and cancelled once after the write has
+        # returned (returned), whose file the coroutine discards.
+        queued = stage in ("write_ended", "returned")
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=1 if queued else None,
+            skip_instance_cache=True,
+        )
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        local = tmp_path / "local"
+        multipart = stage in ("last_part", "returned")
+        local.write_bytes(bytes(2 * block_size if multipart else 1))
+        state = {"started": 0, "ended": 0, "stopped": 0}
+        release = threading.Event()
+        held = self._held_until_stopped(state, release)
+        requests = []
+
+        def call(method, **request):
+            requests.append(method.__name__)
+            if method.__name__ == "create_multipart_upload":
+                return {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+            if (
+                stage == "last_part"
+                and method.__name__ == "upload_part"
+                and request["PartNumber"] == 2
+            ):
+                held()
+            return {"ETag": '"e"'}
+
+        class HeldCallback(Callback):
+            def set_size(self, size):
+                if stage == "before_open":
+                    held()
+
+            def relative_update(self, inc=1):
+                if stage == "write_ended":
+                    held()
+                elif stage == "returned" and state["started"] == 0:
+                    # Held without a stop, until the test releases it.
+                    state["started"] = 1
+                    release.wait(EVENT_TIMEOUT)
+
+        fs._sync_fs._call = fs._sync_fs._core.call = call
+        blocker_started = threading.Event()
+        blocker_release = threading.Event()
+        blocker_ended = threading.Event()
+
+        def blocker(*args, **kwargs):
+            blocker_started.set()
+            blocker_release.wait(EVENT_TIMEOUT)
+            blocker_ended.set()
+            return {}
+
+        fs._sync_fs.info = blocker
+        try:
+            with fs.transaction:
+                task = asyncio.ensure_future(
+                    fs._put_file(
+                        str(local),
+                        "s3://bucket/key",
+                        callback=HeldCallback(),
+                        block_size=block_size,
+                        max_workers=1,
+                    )
+                )
+                await wait_until(lambda: state["started"] == 1)
+                if queued:
+                    # Takes the only thread once the write has ended.
+                    info = asyncio.ensure_future(fs._info("s3://bucket/other"))
+                    await asyncio.sleep(0.1)
+                if stage != "returned":
+                    task.cancel()
+                    await wait_until(lambda: state["stopped"] == 1)
+                if queued:
+
+                    def end_write_then_cancel():
+                        # In one callback of the event loop, so that the task
+                        # is cancelled before it sees the end of the write,
+                        # once the only thread has taken the next call.
+                        release.set()
+                        assert blocker_started.wait(EVENT_TIMEOUT)
+                        task.cancel()
+
+                    asyncio.get_running_loop().call_soon(end_write_then_cancel)
+                else:
+                    task.cancel()
+                # While the write is held, or the next call holds the thread.
+                with pytest.raises(asyncio.CancelledError):
+                    await await_bounded(task, timeout=2)
+                assert not blocker_ended.is_set()
+                if not queued:
+                    # The write ends while the transaction is still open.
+                    release.set()
+                    await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
+            blocker_release.set()
+            if queued:
+                await info
+                await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
+        finally:
+            release.set()
+            blocker_release.set()
+        assert "complete_multipart_upload" not in requests
+        assert "put_object" not in requests
+        if multipart:
+            assert requests[-1] == "abort_multipart_upload"
+
+    @pytest.mark.asyncio
+    async def test_transaction_write_cancelled_before_it_joins(self, tmp_path):
+        # GH-1337: a _put_file() in a transaction that is cancelled twice
+        # before it opens its file never adds the file to the transaction,
+        # whose exit at any moment therefore commits nothing. The file used
+        # to join the transaction in open(), and to be dropped from it only
+        # afterwards.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        local = tmp_path / "local"
+        local.write_bytes(b"a")
+        state = {"started": 0, "ended": 0, "stopped": 0}
+        release = threading.Event()
+        held = self._held_until_stopped(state, release)
+        requests = []
+        joined = threading.Event()
+        proceed = threading.Event()
+
+        class HeldFiles(collections.deque):
+            def append(self, file):
+                # Holds the write once its file has joined the transaction.
+                super().append(file)
+                joined.set()
+                proceed.wait(EVENT_TIMEOUT)
+
+        class HeldCallback(Callback):
+            def set_size(self, size):
+                held()
+
+        def call(method, **request):
+            requests.append(method.__name__)
+            return {}
+
+        fs._sync_fs._call = fs._sync_fs._core.call = call
+        write_ended = threading.Event()
+        run = _S3TransactionWrite.run
+
+        def run_and_signal(transaction_write):
+            try:
+                run(transaction_write)
+            finally:
+                write_ended.set()
+
+        try:
+            with (
+                mock.patch.object(_S3TransactionWrite, "run", run_and_signal),
+                fs.transaction,
+            ):
+                fs.transaction.files = HeldFiles()
+                task = asyncio.ensure_future(
+                    fs._put_file(str(local), "s3://bucket/key", callback=HeldCallback())
+                )
+                await wait_until(lambda: state["started"] == 1)
+                task.cancel()
+                await wait_until(lambda: state["stopped"] == 1)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await await_bounded(task, timeout=2)
+                release.set()
+                # Exits once the file has joined, or once the write has ended.
+                await wait_until(lambda: joined.is_set() or write_ended.is_set())
+        finally:
+            proceed.set()
+            release.set()
+        await asyncio.to_thread(shutdown_bounded, fs._thread_pool)
+        assert not joined.is_set()
+        assert requests == []
+
+    @pytest.mark.asyncio
+    async def test_transaction_write_stopped_by_enclosing_scope(self):
+        # GH-1337: a transaction write that an enclosing stop scope, not a
+        # cancellation, has stopped raises instead of returning, since its
+        # file is discarded and left out of the transaction. The
+        # concurrent.futures.CancelledError of the stop reaches the coroutine
+        # as asyncio.CancelledError, which asyncio.wrap_future() converts it to.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        requests = []
+
+        def call(method, **request):
+            requests.append(method.__name__)
+            return {}
+
+        fs._sync_fs._call = fs._sync_fs._core.call = call
+        stop = threading.Event()
+        stop.set()
+        with fs.transaction:
+            with stop_retries_on(stop), pytest.raises(asyncio.CancelledError):
+                await fs._pipe_file("s3://bucket/key", b"a")
+            assert not fs.transaction.files
+        assert requests == []
+
+    @pytest.mark.asyncio
+    async def test_put_pipe_return_values(self, tmp_path):
+        # GH-1337: _put() and _pipe() return the values of their per-object
+        # calls, as fsspec's do, and _put() accepts a path-like destination.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = self._serve_keys(fs, set())
+        local = tmp_path / "local"
+        local.write_bytes(b"a")
+
+        assert await fs._pipe("s3://bucket/a", b"a") == [None]
+        assert await fs._put(str(local), PurePosixPath("bucket/b")) == [None]
+        assert store == {"a", "b"}
+
+    @pytest.mark.asyncio
+    async def test_put_recursive_creates_no_directories(self, tmp_path):
+        # GH-1337: a recursive _put() sends no request for the local
+        # directories. fsspec's _put() created a directory for each, which
+        # looked up the bucket, created it if it was missing and allowed, and
+        # otherwise raised PermissionError before any upload.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, requests = self._serve_keys(fs, set())
+        (tmp_path / "src" / "sub").mkdir(parents=True)
+        (tmp_path / "src" / "a").write_bytes(b"a")
+        (tmp_path / "src" / "sub" / "b").write_bytes(b"b")
+
+        await fs._put(f"{tmp_path}/src/", "s3://bucket/dst/", recursive=True)
+        assert store == {"dst/a", "dst/sub/b"}
+        assert [name for name, _ in requests] == ["put_object", "put_object"]
+
+    @pytest.mark.asyncio
+    async def test_expand_path_kwargs(self):
+        # GH-1337: the keyword arguments of _expand_path() reach the listing,
+        # as with S3FileSystem.expand_path(). fsspec's _expand_path() takes
+        # none, so they raised TypeError.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        self._serve_keys(fs, {"dir/a1", "dir/b1"})
+
+        assert await fs._expand_path("s3://bucket/dir", recursive=True, prefix="a") == [
+            "bucket/dir",
+            "bucket/dir/a1",
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("argument", ["batch_size", "max_workers"])
+    async def test_rm_batch_size(self, argument):
+        # GH-1337: batch_size of _rm() is the number of DeleteObjects requests
+        # sent at once, and max_workers its deprecated alias, as for
+        # S3FileSystem.rm(). batch_size was ignored, and max_workers was sent
+        # to DeleteObjects, which rejected it.
+        fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
+        overlap, state = overlapping_calls(2, timeout=0.2)
+        requests = []
+
+        def call(method, **request):
+            requests.append(request)
+            overlap()
+            return {}
+
+        fs._sync_fs._call = fs._sync_fs._core.call = call
+        with contextlib.ExitStack() as stack:
+            if argument == "max_workers":
+                stack.enter_context(pytest.warns(DeprecationWarning, match="use batch_size"))
+            await fs._rm(["s3://b1/a", "s3://b2/b"], **{argument: 1})
+        assert state["peak"] == 1
+        assert sorted(r["Bucket"] for r in requests) == ["b1", "b2"]
+        assert all(set(r) == {"Bucket", "Delete"} for r in requests)
+
+    @pytest.mark.asyncio
+    async def test_cp_file_fsspec_arguments(self):
+        # GH-1337: the recursive, maxdepth, and on_error arguments of
+        # _cp_file(), unused as with S3FileSystem.cp_file(), are not sent to
+        # CopyObject, which rejected them.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = self._serve_keys(fs, {"key"})
+
+        await fs._cp_file(
+            "s3://bucket/key", "s3://bucket/dst", recursive=True, maxdepth=1, on_error="ignore"
+        )
+        assert [r for name, r in requests if name == "copy_object"] == [
+            {"CopySource": {"Bucket": "bucket", "Key": "key"}, "Bucket": "bucket", "Key": "dst"}
+        ]
+
     @pytest.mark.parametrize(("mode", "open_mode"), [("overwrite", "wb"), ("create", "xb")])
     def test_put_file_in_transaction_open_parameters(self, tmp_path, mode, open_mode):
         # GH-969: in a transaction, the open() parameters of put_file() go to
-        # open(), and the other parameters, also in s3_additional_kwargs, to
+        # the file, and the other parameters, also in s3_additional_kwargs, to
         # S3. GH-972: fsspec's mode argument selects the mode of the file.
         fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
-        fs.open = mock.MagicMock()
+        fs._open = mock.MagicMock()
         lpath = tmp_path / "data.csv"
         lpath.write_bytes(b"a")
 
@@ -1802,17 +2360,19 @@ class TestAioS3FileSystem:
             # Without them, the file gets the defaults of the filesystem.
             fs.put_file(str(lpath), "s3://bucket/key", mode=mode)
 
-        assert fs.open.call_args_list == [
+        assert fs._open.call_args_list == [
             mock.call(
-                "s3://bucket/key",
+                "bucket/key",
                 open_mode,
+                autocommit=False,
                 block_size=S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE,
                 max_workers=2,
                 s3_additional_kwargs={"StorageClass": "STANDARD_IA", "ContentType": "text/csv"},
             ),
             mock.call(
-                "s3://bucket/key",
+                "bucket/key",
                 open_mode,
+                autocommit=False,
                 block_size=fs._sync_fs.default_block_size,
                 max_workers=fs._sync_fs.max_workers,
                 s3_additional_kwargs={"ContentType": "text/csv"},
@@ -1852,8 +2412,9 @@ class TestAioS3FileSystem:
 
     @pytest.mark.asyncio
     async def test_expand_path_glob_lists_stem_prefix(self):
-        # Unversioned globs keep fsspec's async expansion, which lists only
-        # the keys that start with the stem before the first wildcard.
+        # A glob lists only the keys that start with the stem before the
+        # first wildcard, as fsspec's async expansion, which _expand_path()
+        # used before GH-1337, does.
         fs = AioS3FileSystem(connection=mock_connection(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
         sync_fs._call = sync_fs._core.call = mock.MagicMock(

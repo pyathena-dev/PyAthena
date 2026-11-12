@@ -283,7 +283,7 @@ its coroutines run the blocking boto3 calls in threads that PyAthena owns, sized
 | **Blocking calls** | Caller's thread | Thread pool of the filesystem |
 | **Parallelism** | Request pool of the filesystem | `asyncio.gather` on a thread pool; requests in the request pool |
 | **File handles** | `S3File` with thread pool | `AioS3File` with thread pool; `AioS3StreamedFile` from `open_async()` |
-| **Bulk delete** | Request pool, `max_workers` requests at once | Request pool, `max_workers` requests at once |
+| **Bulk delete** | Request pool, `batch_size` requests at once | Request pool, `batch_size` requests at once |
 | **Multipart copy** | Request pool, `max_workers` requests per copy | Request pool, `max_workers` requests per copy |
 | **Best for** | Synchronous applications | Async frameworks (FastAPI, aiohttp, etc.) |
 
@@ -330,14 +330,26 @@ async with AioS3FileSystem(asynchronous=True) as fs:
 Cancelling a coroutine of the filesystem also stops the retries of the S3 requests that
 its call makes in these threads, including the part uploads and range reads that the
 call runs in parallel: no further attempt is made, and the wait before the next attempt
-ends. A request that has already been sent still runs to its end in its thread. The
-requests that run to their end after a cancellation keep their retries: the commit of a
-file, the CompleteMultipartUpload request of a multipart copy, and the aborts of
-multipart uploads.
-The range reads of a file from `open_async()`, the DeleteObjects requests of `_rm()`, and the annotation
-copies of a multipart copy are waited for before the cancellation is raised, also when
-the shutdown of the event loop at the end of `asyncio.run()` cancels the coroutine; a
-second cancellation stops that wait.
+ends. A write, such as one of `_put_file()` or `_pipe_file()`, sends no further part and
+aborts its multipart upload instead of completing it, and `_get_file()` reads and writes
+no further block. In a transaction, a cancelled `_put_file()` or `_pipe_file()` is
+discarded and left out of the commit. A request that has already been sent still runs to its end in its
+thread. The requests that run to their end after a cancellation keep their retries: the
+commit of a file, the CompleteMultipartUpload request of a multipart copy, and the
+aborts of multipart uploads.
+The call, the range reads of a file from `open_async()`, the DeleteObjects requests of
+`_rm()`, and the annotation copies of a multipart copy are waited for before the
+cancellation is raised, also when the shutdown of the event loop at the end of
+`asyncio.run()` cancels the coroutine; a second cancellation stops that wait.
+
+`_cat()`, `_cat_ranges()`, `_pipe()`, `_put()`, `_get()`, `_copy()`, and `_mv()` run the
+coroutines of their objects as tasks, `batch_size` of them at a time as in fsspec, except
+`_mv()`, which runs all its copies at once. Cancelling one of them cancels those tasks
+and waits for them before the cancellation is raised, also when the shutdown of the
+event loop cancels them together with the coroutine.
+A recursive `_put()` sends no request for the local directories. `_rm()` sends
+`batch_size` DeleteObjects requests at a time, `max_workers` by default and with `-1`; its
+`max_workers` argument is a deprecated alias of `batch_size`.
 
 ### Executor strategy
 
