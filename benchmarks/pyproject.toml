@@ -32,6 +32,10 @@ polars1 = ["polars>=1.39.0,<2"]
 polars2 = ["polars>=2,<3"]
 # The filesystem suite's s3fs API; aiobotocore pins botocore, so the group resolves apart.
 s3fs = ["s3fs>=2026.9.0"]
+# The filesystem and objects suites alone, without the DataFrame backends, for the
+# interpreters that lack their wheels, such as free-threaded builds; synced with
+# --only-group, which leaves out the project's dependencies.
+filesystem = ["PyAthena", "psutil>=7,<8", "s3fs>=2026.9.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
