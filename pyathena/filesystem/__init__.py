@@ -43,7 +43,9 @@ def s3_filesystem(
     """Create an S3 filesystem with the S3 client and retry policy of a connection.
 
     The filesystem borrows ``connection.s3_client``, which the connection
-    shares with its result sets, and uses ``connection.retry_config``.
+    shares with its result sets, and uses ``connection.retry_config``. A
+    policy with the default ``exceptions`` also retries the transient S3 error
+    codes (:attr:`~pyathena.filesystem.s3_core.S3Core.RETRY_ERROR_CODES`).
     Closing the filesystem does not close the client. A filesystem created
     this way cannot be pickled; see :class:`~pyathena.filesystem.s3.S3FileSystem`.
 

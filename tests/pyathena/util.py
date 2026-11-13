@@ -15,11 +15,13 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Iterator
 from concurrent.futures import Future, wait
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -46,6 +48,29 @@ from pyathena.util import RetryConfig, override, retry_api_call
 _queries = Environment(
     loader=FileSystemLoader(Path(__file__).parents[1].resolve() / "resources" / "queries")
 )
+
+
+class RawBody:
+    """The raw body of a botocore HTTP response."""
+
+    def __init__(self, body: bytes) -> None:
+        """Initialize the body.
+
+        Args:
+            body: The bytes of the response body.
+        """
+        self._body = body
+
+    def stream(self, **_: Any) -> Iterator[bytes]:
+        """Yield the body.
+
+        Args:
+            **_: The streaming options, which are ignored.
+
+        Yields:
+            The bytes of the body.
+        """
+        yield self._body
 
 
 # Seconds a test waits for an event from a helper thread before failing.
@@ -1577,7 +1602,8 @@ def stub_multipart_copy(
         stubber: The Stubber of the S3 client.
         fail_list: Deny the listing of the annotations; nothing is written
             then.
-        fail_part: Fail the second part copy; the upload is then aborted.
+        fail_part: Fail the second part copy with an error that is not
+            retried; the upload is then aborted.
         fail_abort: Deny that abort, with fail_part.
         fail_annotation: Fail the write of the first annotation; no
             other annotation is copied then.
@@ -1655,7 +1681,7 @@ def stub_multipart_copy(
         }
         if fail_part and part_number == 2:
             stubber.add_client_error(
-                "upload_part_copy", "InternalError", "part failed", 500, expected_params=part
+                "upload_part_copy", "InvalidRequest", "part failed", 400, expected_params=part
             )
             abort = {**destination, "UploadId": "u"}
             if fail_abort:

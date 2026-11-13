@@ -33,7 +33,14 @@ from pyathena.filesystem.s3_object import (
     S3PutObject,
 )
 from pyathena.filesystem.s3_path import S3Path
-from pyathena.util import RetryConfig, override, retry_api_call, unstoppable_retries
+from pyathena.util import (
+    THROTTLING_ERROR_CODES,
+    RetryConfig,
+    _with_exceptions,
+    override,
+    retry_api_call,
+    unstoppable_retries,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -573,6 +580,16 @@ class S3Core:
     BUCKET_ACLS: ClassVar[frozenset[str]] = frozenset(
         {"private", "public-read", "public-read-write", "authenticated-read"}
     )
+    # https://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html
+    #: The S3 error codes of transient failures (status 503, 500, and 400),
+    #: which botocore's retry modes also retry. A retry policy with the
+    #: default codes retries them too.
+    RETRY_ERROR_CODES: ClassVar[tuple[str, ...]] = (
+        "SlowDown",
+        "ServiceUnavailable",
+        "InternalError",
+        "RequestTimeout",
+    )
 
     def __init__(
         self,
@@ -585,12 +602,19 @@ class S3Core:
         Args:
             client: The boto3 S3 client to send the requests with.
             retry_config: The retry policy of the requests; defaults to
-                ``RetryConfig()``.
+                ``RetryConfig()``. If its ``exceptions`` are the default codes
+                (``THROTTLING_ERROR_CODES``), in any order, the requests are
+                sent with a copy that also retries ``RETRY_ERROR_CODES``.
             request_kwargs: Parameters sent with every operation that accepts
                 them, such as ``{"RequestPayer": "requester"}``.
         """
         self._client = client
-        self._retry_config = retry_config if retry_config else RetryConfig()
+        retry_config = retry_config if retry_config else RetryConfig()
+        if set(retry_config.exceptions) == set(THROTTLING_ERROR_CODES):
+            retry_config = _with_exceptions(
+                retry_config, (*retry_config.exceptions, *self.RETRY_ERROR_CODES)
+            )
+        self._retry_config = retry_config
         self._request_kwargs = dict(request_kwargs) if request_kwargs else {}
 
     @property
@@ -600,7 +624,7 @@ class S3Core:
 
     @property
     def retry_config(self) -> RetryConfig:
-        """The retry policy of the requests."""
+        """The retry policy of the requests, with ``RETRY_ERROR_CODES`` if they were added."""
         return self._retry_config
 
     @property
@@ -640,6 +664,13 @@ class S3Core:
         A callable whose ``__name__`` is not that of a client method is sent
         without them.
 
+        A ``Body`` that is a stream, given to the call or bound by a
+        ``functools.partial``, is sent from the position where the call found
+        it on each attempt of the policy. One whose position cannot be read
+        with ``tell()`` and restored with ``seek()`` is sent once, without the
+        retries of the policy, since a retry would send only the rest of the
+        stream.
+
         Args:
             method: The name of the client method, or the method itself.
             **request: The request parameters, sent as given.
@@ -660,15 +691,29 @@ class S3Core:
             retry state, which keeps the error in a reference cycle.
         """
         func = getattr(self._client, method) if isinstance(method, str) else method
+        # The keywords that the partials bind; those of an outer one win.
+        target = func
+        bound: dict[str, Any] = {}
+        while isinstance(target, functools.partial):
+            bound = {**target.keywords, **bound}
+            target = target.func
         if self._request_kwargs:
-            target, bound = func, set(request)
-            while isinstance(target, functools.partial):
-                bound.update(target.keywords)
-                target = target.func
             params = self.operation_params(getattr(target, "__name__", ""), self._request_kwargs)
-            request.update({k: v for k, v in params.items() if k not in bound})
+            request.update({k: v for k, v in params.items() if k not in request and k not in bound})
+        config, send = self._retry_config, func
+        body = request["Body"] if "Body" in request else bound.get("Body")
+        if body is not None and hasattr(body, "read"):
+            try:
+                position = body.tell()
+                body.seek(position)
+            except (AttributeError, OSError, ValueError):
+                config = _with_exceptions(config, ())
+            else:
+                # Each attempt calls the client again, which sends the stream
+                # from its current position, where the last attempt left it.
+                send = functools.partial(self._send_rewound, func, body, position)
         try:
-            response = retry_api_call(func, config=self._retry_config, logger=_logger, **request)
+            response = retry_api_call(send, config=config, logger=_logger, **request)
         except BaseException as e:
             # clear_frames() skips this frame, which is still executing.
             traceback.clear_frames(e.__traceback__)
@@ -678,6 +723,22 @@ class S3Core:
                 raise ValueError(str(e)) from e
             raise
         return cast(dict[str, Any], response)
+
+    @staticmethod
+    def _send_rewound(func: Callable[..., Any], body: Any, position: int, **request) -> Any:
+        """Rewind the stream body of a request and send the request.
+
+        Args:
+            func: The client method.
+            body: The stream that the request sends as its ``Body``.
+            position: The position to rewind the stream to.
+            **request: The request parameters.
+
+        Returns:
+            The response.
+        """
+        body.seek(position)
+        return func(**request)
 
     def head_object(self, path: S3Path, **params) -> S3Metadata:
         """Look up an object, or a version of it, with HeadObject.

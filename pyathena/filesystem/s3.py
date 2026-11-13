@@ -421,7 +421,9 @@ class S3FileSystem(AbstractFileSystem):
                 with. The filesystem does not close it. A filesystem with a
                 given client cannot be pickled.
             retry_config: The retry policy of the requests; defaults to
-                ``RetryConfig()``.
+                ``RetryConfig()``. A policy with the default ``exceptions``
+                also retries the transient S3 error codes
+                (:attr:`~pyathena.filesystem.s3_core.S3Core.RETRY_ERROR_CODES`).
             **kwargs: Passed to ``fsspec.AbstractFileSystem``; without
                 ``client`` or ``connection``, also s3fs-compatible client
                 arguments. ``requester_pays=True`` sends requester-pays

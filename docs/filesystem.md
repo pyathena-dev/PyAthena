@@ -500,6 +500,37 @@ Request parameters that botocore rejects before sending the request
 a `403` raises `PermissionError`: without the `s3:ListBucket` permission on the bucket,
 S3 also answers `403` for a key that does not exist.
 
+## Retries
+
+Each request is sent with a `pyathena.util.RetryConfig`: the `retry_config` of the
+filesystem, the retry policy of the connection for `s3_filesystem()`, or
+`RetryConfig()`. If the `exceptions` of the policy are the default codes
+(`THROTTLING_ERROR_CODES`), the requests also retry the S3 error codes `SlowDown`,
+`ServiceUnavailable`, `InternalError`, and `RequestTimeout`
+(`S3Core.RETRY_ERROR_CODES`), with the attempts and waits of the policy. That includes a
+policy that gives the default codes explicitly. A policy with other `exceptions` is used
+as given:
+
+```python
+from pyathena.util import RetryConfig
+
+# Retries only SlowDown, in up to 3 attempts.
+fs = S3FileSystem(retry_config=RetryConfig(exceptions=["SlowDown"], attempt=3))
+```
+
+botocore also retries these errors within each attempt, as the retry mode of the S3
+client sets (`retries` in its `botocore.config.Config`, or the `AWS_RETRY_MODE` and
+`AWS_MAX_ATTEMPTS` settings). Unless the maximum attempts are set, botocore sends a
+request up to 5 times in its default `legacy` mode, and up to 3 times in `standard` mode.
+So with the default policy (8 attempts) and botocore's default settings, a request whose
+error persists is sent up to 40 times before the operation raises the error. The waits
+of the policy, which add up to 127 seconds plus jitter, come on top of botocore's own.
+
+A request body given as a stream, such as `S3Core.put_object(path, Body=file)`, is sent
+from the position where the call found it on each attempt of the policy. A stream whose
+position cannot be read with `tell()` and restored with `seek()` is sent without the
+retries of the policy.
+
 ## Object metadata, tags, and ACLs
 
 ```python
@@ -652,11 +683,12 @@ metadata replacement requests with. It can also be built on a boto3 S3 client. E
 operation sends one request (one per page for the iterators and
 `list_object_annotations()`); `plan_multipart_copy()` and `copy_object_annotation()`,
 described below, send several, and `generate_presigned_url()` signs a URL locally
-without a request. The requests are sent with the retry policy. An operation raises
-`FileNotFoundError` for a missing bucket or multipart upload, or for a missing object or
-version that it reads, and caches nothing. `copy_object()` and `upload_part_copy()` with
-a source version that is a delete marker raise `OSError` with `EINVAL`, while the
-filesystem's `cp_file()` raises `FileNotFoundError` for it, as for a missing file.
+without a request. The requests are sent with the retry policy (see "Retries" above). An
+operation raises `FileNotFoundError` for a missing bucket or multipart upload, or for a
+missing object or version that it reads, and caches nothing. `copy_object()` and
+`upload_part_copy()` with a source version that is a delete marker raise `OSError` with
+`EINVAL`, while the filesystem's `cp_file()` raises `FileNotFoundError` for it, as for a
+missing file.
 Requests sent through `fs.core` do not invalidate the filesystem's cache: call
 `fs.invalidate_cache()` after a change, or make it through the filesystem.
 

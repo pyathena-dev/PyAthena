@@ -3717,8 +3717,8 @@ class TestS3FileSystem:
 
     def test_client(self):
         # GH-1363: the filesystem sends its requests with the given client and
-        # retry policy, which retries SlowDown, unlike the default one, and
-        # borrows the client: close() does not close it.
+        # retry policy, whose two attempts fail with SlowDown, and borrows the
+        # client: close() does not close it.
         client = boto3.client(
             "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
         )

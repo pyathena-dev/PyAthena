@@ -22,6 +22,8 @@ from urllib.parse import parse_qs, urlsplit
 import boto3
 import botocore.exceptions
 import pytest
+from botocore.awsrequest import AWSResponse
+from botocore.config import Config
 from botocore.response import StreamingBody
 from botocore.stub import Stubber
 
@@ -47,6 +49,7 @@ from tests.pyathena.util import (
     MULTIPART_COPY_BLOCK_SIZE,
     MULTIPART_COPY_KWARGS,
     MULTIPART_COPY_SIZE,
+    RawBody,
     ThrottledOperation,
     retried,
 )
@@ -55,6 +58,19 @@ MODIFIED = datetime(2026, 10, 4, tzinfo=UTC)
 TAGS = [{"Key": "team", "Value": "data"}]
 DIRECTORY_LOCATION = {"Type": "AvailabilityZone", "Name": "apne1-az4"}
 DIRECTORY_BUCKET = {"Type": "Directory", "DataRedundancy": "SingleAvailabilityZone"}
+
+
+class _UnseekableStream(io.RawIOBase):
+    """A stream that can be read but cannot seek, such as a pipe."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = io.BytesIO(data)
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        return self._data.readinto(buffer)
 
 
 def _make_core(region_name="us-east-1", **kwargs):
@@ -120,6 +136,115 @@ class TestS3Core:
         # an InvalidRange read.
         assert isinstance(e.value.__cause__, botocore.exceptions.ClientError)
         assert e.value.__cause__.response["Error"]["Code"] == code
+
+    @pytest.mark.parametrize(
+        ("status", "code"),
+        [
+            (503, "SlowDown"),
+            (503, "ServiceUnavailable"),
+            (500, "InternalError"),
+            (400, "RequestTimeout"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("exceptions", "attempts"),
+        [
+            (["ThrottlingException", "TooManyRequestsException"], 2),
+            (["TooManyRequestsException", "ThrottlingException"], 2),
+            (["ThrottlingException"], 1),
+        ],
+        ids=["default", "default-reordered", "configured"],
+    )
+    def test_call_retries_s3_errors(self, status, code, exceptions, attempts):
+        # GH-1375: a policy with the default codes also retries the transient
+        # S3 errors, in the attempts of the policy; one with other codes is
+        # used as given.
+        client = boto3.client(
+            "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
+        )
+        core = S3Core(
+            client, retry_config=RetryConfig(exceptions=exceptions, attempt=2, multiplier=0)
+        )
+        with Stubber(client) as stubber:
+            for _ in range(attempts):
+                stubber.add_client_error(
+                    "head_object",
+                    service_error_code=code,
+                    service_message="Try again",
+                    http_status_code=status,
+                )
+            with pytest.raises(OSError, match="Try again"):
+                core.head_object(S3Path("bucket", "key"))
+            stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize("bound", [False, True], ids=["request", "partial"])
+    @pytest.mark.parametrize("seekable", [True, False], ids=["seekable", "unseekable"])
+    def test_call_retries_stream_body(self, seekable, bound):
+        # GH-1375: each attempt of the policy sends a stream body, given to the
+        # call or bound by a partial, from where the call found it, after the
+        # previous attempt has read it to its end; a stream that cannot seek
+        # is sent once.
+        client = boto3.client(
+            "s3",
+            region_name="us-east-1",
+            aws_access_key_id="dummy",
+            aws_secret_access_key="dummy",
+            # With checksums when supported, botocore sends a stream in
+            # aws-chunked encoding, which also sends one that cannot seek.
+            config=Config(
+                retries={"total_max_attempts": 1}, request_checksum_calculation="when_supported"
+            ),
+        )
+        sent = []
+
+        def send(request, **kwargs):
+            # The request is answered here instead of over HTTP, after its
+            # body has been read as a send would. The body is a single chunk.
+            size, _, chunk = request.body.read().partition(b"\r\n")
+            sent.append(chunk[: int(size, 16)])
+            if len(sent) == 1:
+                error = b"<Error><Code>InternalError</Code><Message>Try again</Message></Error>"
+                return AWSResponse(request.url, 500, {}, RawBody(error))
+            return AWSResponse(request.url, 200, {"ETag": '"e"'}, RawBody(b""))
+
+        client.meta.events.register("before-send.s3.PutObject", send)
+        core = S3Core(client, retry_config=RetryConfig(attempt=2, multiplier=0))
+        body = io.BytesIO(b"--data") if seekable else _UnseekableStream(b"--data")
+        body.read(2)
+        if bound:
+            method = functools.partial(client.put_object, Bucket="bucket", Key="key", Body=body)
+            request = {}
+        else:
+            method, request = "put_object", {"Bucket": "bucket", "Key": "key", "Body": body}
+        if seekable:
+            core.call(method, **request)
+            assert sent == [b"data", b"data"]
+        else:
+            with pytest.raises(OSError, match="Try again"):
+                core.call(method, **request)
+            assert sent == [b"data"]
+
+    def test_default_retry_config(self):
+        # GH-1375: without a policy, the requests retry the default codes and
+        # the transient S3 errors, with the attempts and waits of RetryConfig().
+        client = boto3.client(
+            "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
+        )
+        config = S3Core(client).retry_config
+        assert config.exceptions == (
+            "ThrottlingException",
+            "TooManyRequestsException",
+            "SlowDown",
+            "ServiceUnavailable",
+            "InternalError",
+            "RequestTimeout",
+        )
+        assert (config.attempt, config.multiplier, config.max_delay, config.exponential_base) == (
+            8,
+            1,
+            100,
+            2,
+        )
 
     def test_call_partial(self):
         # GH-1338: a functools.partial of a client method has no __name__; it
