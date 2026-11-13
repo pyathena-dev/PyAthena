@@ -237,6 +237,7 @@ Each case sets the filesystem's `max_workers` and the S3 client's `max_pool_conn
 The `[filesystem]` section of `config.toml` sets the swept values, 8 and 40 workers and pools of 10 and 40 by default, and a `block_size` of 8 MiB.
 Its `clients` tables name sets of other botocore `Config` options of the S3 clients, passed the same way with every API; each is a case, and a name other than `default`, the only one by default, ends the case IDs, such as `filesystem-s3-sync-put-w8-p10-required`.
 The clients may not set `max_pool_connections`, which `pool_connections` sweeps.
+A run takes them from its `--config`, and a fleet worker from the queue's `config.toml`, so give `jobs` and `queue` the same configuration.
 For example, the upload checksum settings of #1325:
 
 ```toml
