@@ -1087,6 +1087,117 @@ class TestS3FileSystem:
         assert "bucket" not in fs.find("s3://bucket", maxdepth=1, withdirs=True)
         assert "bucket" not in fs.expand_path("s3://bucket/**", recursive=True)
 
+    # A directory named with a version ID query, and one named with an empty
+    # segment ("bucket/a/e/", whose common prefix is "a/e//").
+    TRAVERSAL_KEYS = ("a/dir?versionId=v1/z", "a/e//f")
+
+    @pytest.mark.parametrize(
+        ("keys", "call", "expected"),
+        [
+            pytest.param(
+                TRAVERSAL_KEYS,
+                lambda fs: sorted(fs.find("s3://bucket/a", maxdepth=3)),
+                ["bucket/a/dir?versionId=v1/z", "bucket/a/e//f"],
+                id="find-maxdepth",
+            ),
+            pytest.param(
+                TRAVERSAL_KEYS,
+                lambda fs: fs.find("s3://bucket/a", prefix="e//", withdirs=True),
+                ["bucket/a", "bucket/a/e//f"],
+                id="find-prefix-withdirs",
+            ),
+            pytest.param(
+                ("a//f", "a//x/y"),
+                lambda fs: sorted(fs.find("s3://bucket/a", prefix="/", withdirs=True)),
+                ["bucket/a", "bucket/a//f", "bucket/a//x", "bucket/a//x/y"],
+                id="find-prefix-slash-withdirs",
+            ),
+            pytest.param(
+                TRAVERSAL_KEYS,
+                lambda fs: list(fs.walk("s3://bucket/a")),
+                [
+                    ("bucket/a", ["dir?versionId=v1", "e"], []),
+                    ("bucket/a/dir?versionId=v1", [], ["z"]),
+                    ("bucket/a/e", [""], []),
+                    ("bucket/a/e/", [], ["f"]),
+                ],
+                id="walk",
+            ),
+            pytest.param(
+                # The folder marker of the directory "bucket/a/e/" is its key
+                # "a/e//", which is named "" as the marker of a directory is.
+                ("a/e//", "a/e//f"),
+                lambda fs: list(fs.walk("s3://bucket/a/e")),
+                [("bucket/a/e", [""], []), ("bucket/a/e/", [], ["", "f"])],
+                id="walk-folder-marker",
+            ),
+            pytest.param(
+                TRAVERSAL_KEYS,
+                lambda fs: fs.tree("s3://bucket/a", recursion_limit=3),
+                ("s3://bucket/a\n├── dir?versionId=v1\n│   └── z\n└── e\n    └── \n        └── f"),
+                id="tree",
+            ),
+        ],
+    )
+    def test_traversal_lists_listed_prefixes(self, keys, call, expected):
+        # GH-1401: a listed directory is listed by its common prefix, not by
+        # parsing its name, which may end in a version ID query or in an
+        # empty segment.
+        fs = self._make_fs()
+        self._serve_keys(fs, keys)
+        assert call(fs) == expected
+
+    def test_invalidation_reaches_listed_directories(self):
+        # GH-1401: invalidating a path evicts the cached listings of the
+        # directories above it, also of a directory named with a version ID
+        # query; only the path itself may name a version.
+        fs = self._make_fs()
+        keys = self._serve_keys(fs, ("a/dir?versionId=v1/old",))
+        assert fs.find("s3://bucket/a", maxdepth=3) == ["bucket/a/dir?versionId=v1/old"]
+
+        keys.add("a/dir?versionId=v1/new/file?x=1")
+        fs.invalidate_cache("s3://bucket/a/dir?versionId=v1/new/file?x=1")
+        assert sorted(fs.find("s3://bucket/a", maxdepth=3)) == [
+            "bucket/a/dir?versionId=v1/new/file?x=1",
+            "bucket/a/dir?versionId=v1/old",
+        ]
+
+    def test_walk_versions_lists_listed_prefixes(self):
+        # GH-1401: walk(versions=True) lists the versions under a listed
+        # directory by its common prefix too.
+        fs = self._make_fs()
+        fs.version_aware = True
+        listings = {
+            "a/": {"CommonPrefixes": [{"Prefix": "a/dir?versionId=v1/"}]},
+            "a/dir?versionId=v1/": {
+                "Versions": [{"Key": "a/dir?versionId=v1/z", "VersionId": "v2", "IsLatest": True}]
+            },
+        }
+        fs._call.side_effect = lambda method, **kwargs: listings[kwargs["Prefix"]]
+
+        assert list(fs.walk("s3://bucket/a", versions=True)) == [
+            ("bucket/a", ["dir?versionId=v1"], []),
+            ("bucket/a/dir?versionId=v1", [], ["z?versionId=v2"]),
+        ]
+
+    def test_walk_skips_failed_listings_below_the_path(self):
+        # GH-1401: as in fsspec, on_error applies to the listing of the walked
+        # path, and a directory below it whose listing fails is skipped.
+        fs = self._make_fs()
+        self._serve_keys(fs, ("a/b/c", "a/d/e"))
+        serve = fs._call.side_effect
+
+        def call(method, **kwargs):
+            if method is fs._client.list_objects_v2 and kwargs["Prefix"] == "a/b/":
+                raise PermissionError("a/b/")
+            return serve(method, **kwargs)
+
+        fs._call.side_effect = call
+        assert list(fs.walk("s3://bucket/a", on_error="raise")) == [
+            ("bucket/a", ["b", "d"], []),
+            ("bucket/a/d", [], ["e"]),
+        ]
+
     def test_find_directory_without_extra_requests(self):
         fs = self._make_fs()
         self._serve_keys(fs, self.FIND_KEYS)

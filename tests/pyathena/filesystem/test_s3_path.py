@@ -55,6 +55,10 @@ class TestS3Path:
     def test_parse(self, path, expected):
         assert S3Path.parse(path) == expected
 
+    def test_empty_key_is_the_bucket(self):
+        # GH-1401: an empty key names the bucket, which the path prints as.
+        assert S3Path("bucket", "") == S3Path("bucket")
+
     @pytest.mark.parametrize(
         "path",
         [
