@@ -1139,6 +1139,21 @@ class TestS3FileSystem:
         self._serve_keys(fs, keys)
         assert call(fs) == expected
 
+    def test_invalidation_reaches_listed_directories(self):
+        # GH-1401: invalidating a path evicts the cached listings of the
+        # directories above it, also of a directory named with a version ID
+        # query; only the path itself may name a version.
+        fs = self._make_fs()
+        keys = self._serve_keys(fs, ("a/dir?versionId=v1/old",))
+        assert fs.find("s3://bucket/a", maxdepth=3) == ["bucket/a/dir?versionId=v1/old"]
+
+        keys.add("a/dir?versionId=v1/new/file?x=1")
+        fs.invalidate_cache("s3://bucket/a/dir?versionId=v1/new/file?x=1")
+        assert sorted(fs.find("s3://bucket/a", maxdepth=3)) == [
+            "bucket/a/dir?versionId=v1/new/file?x=1",
+            "bucket/a/dir?versionId=v1/old",
+        ]
+
     def test_walk_versions_lists_listed_prefixes(self):
         # GH-1401: walk(versions=True) lists the versions under a listed
         # directory by its common prefix too.

@@ -1466,10 +1466,10 @@ class S3FileSystem(AbstractFileSystem):
 
     def _walk_tree(
         self,
-        path,
-        maxdepth=None,
-        topdown=True,
-        on_error="omit",
+        path: str,
+        maxdepth: int | None = None,
+        topdown: bool = True,
+        on_error: Any = "omit",
         directory: S3Object | None = None,
         yield_failed: bool = False,
         **kwargs,
@@ -1481,8 +1481,8 @@ class S3FileSystem(AbstractFileSystem):
                 ``directory``.
             maxdepth: Maximum number of levels to walk, at least 1.
             topdown: Whether to yield a directory before those below it.
-            on_error: What to do with an error of a listing, as in
-                :meth:`walk`.
+            on_error: What to do with an error of the listing of the path,
+                as in :meth:`walk`.
             directory: The listed directory to walk, or None to list
                 ``path`` with ``ls()``.
             yield_failed: Whether to yield a directory whose listing failed
@@ -1500,14 +1500,7 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError("maxdepth must be at least 1")
         detail = kwargs.pop("detail", False)
         try:
-            if directory is None:
-                listing = cast(list[S3Object], self.ls(path, detail=True, **kwargs))
-            else:
-                listing = self._ls_directory(
-                    directory,
-                    refresh=kwargs.get("refresh", False),
-                    versions=kwargs.get("versions", False),
-                )
+            listing = self._walk_listing(path, directory, **kwargs)
         except (FileNotFoundError, OSError) as e:
             if on_error == "raise":
                 raise
@@ -1516,26 +1509,7 @@ class S3FileSystem(AbstractFileSystem):
             if yield_failed:
                 yield path, {} if detail else [], {} if detail else []
             return
-
-        dirs: dict[str, S3Object] = {}
-        files: dict[str, S3Object] = {}
-        for info in listing:
-            name = info.name
-            is_directory = info.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
-            if name.startswith(path + "/"):
-                # The rest of the name, which an empty segment or the folder
-                # marker of the path (its key followed by "/") leaves empty.
-                (dirs if is_directory else files)[name[len(path) + 1 :]] = info
-                continue
-            # As in fsspec, for an entry not named below the path, such as the
-            # object that ls() returns for the path itself.
-            pathname = name.rstrip("/")
-            if is_directory and pathname != path:
-                dirs[pathname.rsplit("/", 1)[-1]] = info
-            elif pathname == path:
-                files[""] = info
-            else:
-                files[pathname.rsplit("/", 1)[-1]] = info
+        dirs, files = self._walk_entries(path, listing)
         names: Any = dirs if detail else list(dirs)
         listed: Any = files if detail else list(files)
 
@@ -1561,6 +1535,66 @@ class S3FileSystem(AbstractFileSystem):
             )
         if not topdown:
             yield path, names, listed
+
+    def _walk_listing(self, path: str, directory: S3Object | None, **kwargs) -> list[S3Object]:
+        """List a directory of a walk.
+
+        Args:
+            path: The path to list, without the protocol, when ``directory``
+                is None.
+            directory: The listed directory to list by its key prefix, or
+                None.
+            **kwargs: Additional arguments passed to ``ls()``, of which a
+                listed directory uses ``refresh`` and ``versions``.
+
+        Returns:
+            The entries of the directory.
+
+        Raises:
+            FileNotFoundError: If nothing exists at the path, or nothing is
+                listed under the directory.
+        """
+        if directory is None:
+            return cast(list[S3Object], self.ls(path, detail=True, **kwargs))
+        return self._ls_directory(
+            directory, refresh=kwargs.get("refresh", False), versions=kwargs.get("versions", False)
+        )
+
+    @staticmethod
+    def _walk_entries(
+        path: str, listing: list[S3Object]
+    ) -> tuple[dict[str, S3Object], dict[str, S3Object]]:
+        """Name the directories and files of a walked directory.
+
+        An entry named below the path is named by the rest of its name, which
+        an empty segment, or the folder marker of the path (its key followed
+        by ``/``), leaves empty. Another entry, such as the object that
+        ``ls()`` returns for the path itself, is named as fsspec's ``walk()``
+        names it.
+
+        Args:
+            path: The path of the walked directory.
+            listing: The entries of the directory.
+
+        Returns:
+            The directories and the files, by name.
+        """
+        dirs: dict[str, S3Object] = {}
+        files: dict[str, S3Object] = {}
+        for info in listing:
+            name = info.name
+            is_directory = info.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
+            if name.startswith(path + "/"):
+                (dirs if is_directory else files)[name[len(path) + 1 :]] = info
+                continue
+            pathname = name.rstrip("/")
+            if is_directory and pathname != path:
+                dirs[pathname.rsplit("/", 1)[-1]] = info
+            elif pathname == path:
+                files[""] = info
+            else:
+                files[pathname.rsplit("/", 1)[-1]] = info
+        return dirs, files
 
     def glob(self, path, maxdepth=None, **kwargs):
         """Find the paths that match a glob pattern.
@@ -3885,7 +3919,10 @@ class S3FileSystem(AbstractFileSystem):
         spelling that :meth:`S3Path.parse <pyathena.filesystem.s3_path.S3Path.parse>`
         accepts, and also the object path without the version, because deleting
         or copying a version can change the
-        current version of the object.
+        current version of the object. Only the path itself is parsed for a
+        version: its parent paths are directories, named as they are listed,
+        such as ``bucket/a/dir?versionId=v1`` for the key
+        ``a/dir?versionId=v1/x``.
         A path that ends in slashes is invalidated both with and without
         them, since lookups strip them while a key such as ``dir//`` is
         listed in the directory ``bucket/dir/``.
@@ -3913,30 +3950,34 @@ class S3FileSystem(AbstractFileSystem):
             path: The path without the protocol, as described in
                 :meth:`invalidate_cache`.
         """
+        base, version_id = S3Path.split_version_id(path)
+        cache_paths: list[str] = []
+        if version_id:
+            cache_paths.extend(
+                f"{base}?{name}={version_id}"
+                for name in ("versionId", "versionID", "versionid", "version_id")
+            )
+            # Continue with the path without the version, keeping a trailing
+            # slash of its key.
+            path = base
+        # Only the path itself may name a version. Its parents are
+        # directories, named as they are listed, such as
+        # "bucket/a/dir?versionId=v1" for the key "a/dir?versionId=v1/x", so
+        # one segment is removed at a time without parsing them; _parent()
+        # would also strip the slash of "bucket/dir/" (from "dir//x").
         while path:
-            base, version_id = S3Path.split_version_id(path)
-            cache_paths = [path]
-            if version_id:
-                cache_paths.extend(
-                    f"{base}?{name}={version_id}"
-                    for name in ("versionId", "versionID", "versionid", "version_id")
-                )
-            for cache_path in cache_paths:
-                # _ls_dirs caches listings under (path, delimiter), and
-                # lookups with parameters are cached under
-                # (path, _LOOKUPS_CACHE_KEY).
-                for cache_key in (
-                    cache_path,
-                    (cache_path, "/"),
-                    (cache_path, ""),
-                    (cache_path, _LOOKUPS_CACHE_KEY),
-                ):
-                    self._evict_cache(cache_key)
-            # A version-qualified path continues with the path without the
-            # version, keeping a trailing slash of its key. Otherwise, one
-            # segment is removed; _parent() would also strip the slash of
-            # "bucket/dir/" (from "dir//x").
-            path = base if version_id else path.rpartition("/")[0]
+            cache_paths.append(path)
+            path = path.rpartition("/")[0]
+        for cache_path in cache_paths:
+            # _ls_prefix caches listings under (name, delimiter), and lookups
+            # with parameters are cached under (path, _LOOKUPS_CACHE_KEY).
+            for cache_key in (
+                cache_path,
+                (cache_path, "/"),
+                (cache_path, ""),
+                (cache_path, _LOOKUPS_CACHE_KEY),
+            ):
+                self._evict_cache(cache_key)
 
     def _evict_cache(self, key: str | tuple[str, str]) -> None:
         """Remove a dircache entry if it exists.
