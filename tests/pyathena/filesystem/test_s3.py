@@ -1079,6 +1079,48 @@ class TestS3FileSystem:
         assert "bucket" not in fs.find("s3://bucket", maxdepth=1, withdirs=True)
         assert "bucket" not in fs.expand_path("s3://bucket/**", recursive=True)
 
+    # A directory named with a version ID query, and one named with an empty
+    # segment ("bucket/a/e/", whose common prefix is "a/e//").
+    TRAVERSAL_KEYS = ("a/dir?versionId=v1/z", "a/e//f")
+
+    @pytest.mark.parametrize(
+        ("call", "expected"),
+        [
+            pytest.param(
+                lambda fs: sorted(fs.find("s3://bucket/a", maxdepth=3)),
+                ["bucket/a/dir?versionId=v1/z", "bucket/a/e//f"],
+                id="find-maxdepth",
+            ),
+            pytest.param(
+                lambda fs: fs.find("s3://bucket/a", prefix="e//", withdirs=True),
+                ["bucket/a", "bucket/a/e//f"],
+                id="find-prefix-withdirs",
+            ),
+            pytest.param(
+                lambda fs: list(fs.walk("s3://bucket/a")),
+                [
+                    ("bucket/a", ["dir?versionId=v1", "e"], []),
+                    ("bucket/a/dir?versionId=v1", [], ["z"]),
+                    ("bucket/a/e", [""], []),
+                    ("bucket/a/e/", [], ["f"]),
+                ],
+                id="walk",
+            ),
+            pytest.param(
+                lambda fs: fs.tree("s3://bucket/a", recursion_limit=3),
+                ("s3://bucket/a\n├── dir?versionId=v1\n│   └── z\n└── e\n    └── \n        └── f"),
+                id="tree",
+            ),
+        ],
+    )
+    def test_traversal_lists_listed_prefixes(self, call, expected):
+        # GH-1401: a listed directory is listed by its common prefix, not by
+        # parsing its name, which may end in a version ID query or in an
+        # empty segment.
+        fs = self._make_fs()
+        self._serve_keys(fs, self.TRAVERSAL_KEYS)
+        assert call(fs) == expected
+
     def test_find_directory_without_extra_requests(self):
         fs = self._make_fs()
         self._serve_keys(fs, self.FIND_KEYS)

@@ -1276,6 +1276,64 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return await super()._glob(stringify_path(path), maxdepth=maxdepth, **kwargs)
 
+    def walk(self, path, maxdepth=None, topdown=True, on_error="omit", **kwargs):
+        """Walk the directories below a path, as fsspec's ``walk()`` does.
+
+        Runs :meth:`S3FileSystem.walk`, which lists a listed directory by its
+        key prefix rather than by its name.
+
+        Args:
+            path: The path to walk.
+            maxdepth: Maximum number of levels to walk, at least 1 (None for
+                unlimited).
+            topdown: Whether to yield a directory before the directories
+                below it.
+            on_error: ``"omit"``, ``"raise"``, or a callable that receives the
+                error of a listing.
+            **kwargs: Additional arguments passed to ``ls()``.
+
+        Yields:
+            Tuples of a directory path, its directories, and its files.
+        """
+        yield from self._sync_fs.walk(
+            path, maxdepth=maxdepth, topdown=topdown, on_error=on_error, **kwargs
+        )
+
+    async def _walk(self, path, maxdepth=None, topdown=True, on_error="omit", **kwargs):
+        """Walk the directories below a path, as fsspec's ``_walk()`` does.
+
+        Runs the walk of :meth:`S3FileSystem.walk` one directory at a time in
+        the threads of the filesystem. As in fsspec's ``_walk()``, a directory
+        whose listing fails with ``on_error`` other than ``"raise"`` is
+        yielded with no entries.
+
+        Args:
+            path: The path to walk.
+            maxdepth: Maximum number of levels to walk, at least 1 (None for
+                unlimited).
+            topdown: Whether to yield a directory before the directories
+                below it.
+            on_error: ``"omit"``, ``"raise"``, or a callable that receives the
+                error of a listing.
+            **kwargs: Additional arguments passed to ``ls()``.
+
+        Yields:
+            Tuples of a directory path, its directories, and its files.
+        """
+        walker = self._sync_fs._walk_tree(
+            path,
+            maxdepth=maxdepth,
+            topdown=topdown,
+            on_error=on_error,
+            yield_failed=True,
+            **kwargs,
+        )
+        try:
+            while (step := await self._thread_pool.run(next, walker, None)) is not None:
+                yield step
+        finally:
+            walker.close()
+
     def tree(
         self,
         path: str | os.PathLike[str] = "/",
@@ -1288,6 +1346,9 @@ class AioS3FileSystem(AsyncFileSystem):
         indent_size: int = 4,
     ) -> str:
         """Return a tree of the paths below a path, as fsspec's ``tree()`` does.
+
+        Runs :meth:`S3FileSystem.tree`, which lists a listed directory by its
+        key prefix rather than by its name.
 
         Args:
             path: The root path, as a string or an ``os.PathLike``.
@@ -1302,18 +1363,15 @@ class AioS3FileSystem(AsyncFileSystem):
         Returns:
             The tree as a string.
         """
-        return cast(
-            str,
-            super().tree(
-                stringify_path(path),
-                recursion_limit=recursion_limit,
-                max_display=max_display,
-                display_size=display_size,
-                prefix=prefix,
-                is_last=is_last,
-                first=first,
-                indent_size=indent_size,
-            ),
+        return self._sync_fs.tree(
+            path,
+            recursion_limit=recursion_limit,
+            max_display=max_display,
+            display_size=display_size,
+            prefix=prefix,
+            is_last=is_last,
+            first=first,
+            indent_size=indent_size,
         )
 
     def get_mapper(

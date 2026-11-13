@@ -625,6 +625,31 @@ class TestAioS3FileSystem:
         assert outcomes[0][0] is not None or outcomes[0][1]
         assert outcomes[1] == outcomes[0]
 
+    @pytest.mark.asyncio
+    async def test_walks_list_listed_prefixes(self):
+        # GH-1401: the walks and the tree list a listed directory by its
+        # common prefix, as those of S3FileSystem do, not by parsing its name.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, {"a/dir?versionId=v1/z", "a/e//f"})
+        expected = [
+            ("bucket/a", ["dir?versionId=v1", "e"], []),
+            ("bucket/a/dir?versionId=v1", [], ["z"]),
+            ("bucket/a/e", [""], []),
+            ("bucket/a/e/", [], ["f"]),
+        ]
+
+        assert [step async for step in fs._walk("s3://bucket/a")] == expected
+        assert list(fs.walk("s3://bucket/a")) == expected
+        assert fs.tree("bucket/a", recursion_limit=2) == (
+            "bucket/a\n├── dir?versionId=v1\n│   └── z\n└── e\n    └── "
+        )
+        # As in fsspec, _walk() yields a path whose listing fails with no entries.
+        assert [step async for step in fs._walk("s3://bucket/missing")] == [
+            ("bucket/missing", [], [])
+        ]
+
     @pytest.mark.parametrize("path", ["s3://bucket/dir", None])
     def test_invalidate_cache(self, path):
         # invalidate_cache() clears the listings that the asynchronous methods

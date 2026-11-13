@@ -290,8 +290,11 @@ a negative `start` and no `end`, and raises `FileNotFoundError` for other ranges
 
 A directory is named after its key prefix without the last slash. A key with an empty
 segment, such as `dir//x`, therefore lies in the directory `dir/`, which `ls` of `dir`
-lists and `find` descends into. Since `ls` drops a trailing slash, `ls` of `dir/` lists
-`dir`, and `walk` does not descend into `dir/`.
+lists and `find`, `walk`, and `tree` descend into. Since `ls` drops a trailing slash,
+`ls` of `dir/` lists `dir`. `walk` yields the directory under its name `dir/`, and names
+it `""` among the directories of `dir`. `find`, `walk`, and `tree` also descend into a
+directory whose name ends in a version ID query, such as `dir?versionId=v1` for the key
+`dir?versionId=v1/x`, while `ls` of that name looks up version `v1` of `dir`.
 
 S3 request parameters, such as `ContentType`, `ServerSideEncryption`, or `RequestPayer`,
 can be given to `open`, `pipe`, and `put` as keyword arguments or in

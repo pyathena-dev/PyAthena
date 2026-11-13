@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 import warnings
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -232,6 +232,59 @@ class _S3LockedCallback(Callback):
         """
         with self._lock:
             return self._callback.call(hook_name, **kwargs)
+
+
+class _S3TreeListing:
+    """The listings of one ``tree()`` of an ``S3FileSystem``.
+
+    fsspec's ``tree()`` lists each directory with ``ls()`` of its name, which
+    a version ID query or an empty segment at the end of the name changes.
+    This object runs fsspec's ``tree()`` in place of the filesystem: a
+    directory that a listing of the same ``tree()`` returned is listed by
+    its key prefix (see :meth:`S3FileSystem._directory_prefix`), and any
+    other path with ``ls()``.
+    """
+
+    def __init__(self, fs: S3FileSystem) -> None:
+        """Initialize the listings with no listed directory.
+
+        Args:
+            fs: The filesystem to list.
+        """
+        self._fs = fs
+        self._directories: dict[str, S3Object] = {}
+
+    def ls(self, path: str, detail: bool = True) -> list[S3Object]:
+        """List a path as ``S3FileSystem.ls(detail=True)`` does.
+
+        Args:
+            path: The path, or the name of a directory listed before.
+            detail: Unused; the entries are always returned, as fsspec's
+                ``tree()`` asks for them.
+
+        Returns:
+            A new list of the entries, which fsspec's ``tree()`` sorts in place.
+        """
+        directory = self._directories.get(path)
+        if directory is None:
+            files = cast(list[S3Object], self._fs.ls(path, detail=True))
+        else:
+            files = self._fs._ls_directory(directory)
+        for f in files:
+            if f.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
+                self._directories[f.name] = f
+        return list(files)
+
+    def tree(self, **kwargs: Any) -> str:
+        """Run fsspec's ``tree()`` with these listings.
+
+        Args:
+            **kwargs: The arguments of ``tree()``.
+
+        Returns:
+            The tree as a string.
+        """
+        return cast(str, AbstractFileSystem.tree(self, **kwargs))
 
 
 class S3FileSystem(AbstractFileSystem):
@@ -803,17 +856,8 @@ class S3FileSystem(AbstractFileSystem):
     ) -> list[S3Object]:
         """List the objects and common prefixes under a path.
 
-        A complete, non-empty listing of the path is cached under
-        ``(path, delimiter)``, and an empty one, or a listing that raises
-        FileNotFoundError because the bucket does not exist, evicts it.
-        ``invalidate_cache`` drops it when the path or a path under it is
-        invalidated.
-
-        A common prefix is named after its prefix without the final
-        delimiter, so the common prefix ``dir//`` of a key with an empty
-        segment, such as ``dir//x``, is the directory ``bucket/dir/``, and
-        ``/`` at the top of the bucket is ``bucket/``. Listing such a name
-        lists the keys under that prefix.
+        Lists the key prefix that the path names (see :meth:`_listing_prefix`),
+        as :meth:`_ls_prefix` describes.
 
         Args:
             path: The bucket or directory path to list, without the protocol.
@@ -829,15 +873,102 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The listed directories and files.
         """
-        s3_path = S3Path.parse(path)
-        use_cache = not prefix and not next_token
-        # S3Path.parse() names the bucket by "bucket/" too, but here it is the
-        # directory of the common prefix "/".
-        key = "" if s3_path.key is None and path.endswith("/") else s3_path.key
-        if key is not None:
-            prefix = f"{key}/{prefix}"
+        bucket, directory = self._listing_prefix(path)
+        return self._ls_prefix(
+            bucket,
+            directory,
+            path,
+            prefix=prefix,
+            delimiter=delimiter,
+            next_token=next_token,
+            max_keys=max_keys,
+            refresh=refresh,
+        )
 
-        cache_key = (path, delimiter)
+    @staticmethod
+    def _listing_prefix(path: str) -> tuple[str, str]:
+        """Return the bucket and the key prefix that a path string names as a directory.
+
+        The path is parsed as :meth:`S3Path.parse` parses it, except that
+        ``bucket/``, which it parses as the bucket, names the directory of
+        the common prefix ``/``.
+
+        Args:
+            path: The bucket or directory path, without the protocol.
+
+        Returns:
+            The bucket and the key prefix of the directory: ``""`` for the
+            bucket, and otherwise the key followed by ``/``.
+        """
+        s3_path = S3Path.parse(path)
+        if s3_path.key is None:
+            return s3_path.bucket, "/" if path.endswith("/") else ""
+        return s3_path.bucket, f"{s3_path.key}/"
+
+    @staticmethod
+    def _directory_prefix(directory: S3Object) -> str:
+        """Return the key prefix that a listed directory or bucket lists.
+
+        A directory is named after its common prefix without the final
+        delimiter, which may leave the name with a version ID query or with
+        trailing slashes. The prefix is taken from its key instead, so that
+        the directory is listed as it was listed.
+
+        Args:
+            directory: A directory or bucket entry of a listing.
+
+        Returns:
+            The key prefix: ``""`` for a bucket, and otherwise the key of the
+            directory followed by ``/``.
+        """
+        return "" if directory.key is None else f"{directory.key}/"
+
+    def _ls_prefix(
+        self,
+        bucket: str,
+        directory: str,
+        name: str,
+        prefix: str = "",
+        delimiter: str = "/",
+        next_token: str | None = None,
+        max_keys: int | None = None,
+        refresh: bool = False,
+    ) -> list[S3Object]:
+        """List the objects and common prefixes under a key prefix.
+
+        A complete, non-empty listing of the directory is cached under
+        ``(name, delimiter)``, and an empty one, or a listing that raises
+        FileNotFoundError because the bucket does not exist, evicts it.
+        ``invalidate_cache`` drops it when the path or a path under it is
+        invalidated.
+
+        A common prefix is named after its prefix without the final
+        delimiter, so the common prefix ``dir//`` of a key with an empty
+        segment, such as ``dir//x``, is the directory ``bucket/dir/``, and
+        ``/`` at the top of the bucket is ``bucket/``. Its key is the prefix
+        without the final delimiter (see :meth:`_directory_prefix`).
+
+        Args:
+            bucket: The bucket.
+            directory: The key prefix of the directory, ``""`` for the
+                bucket.
+            name: The name of the directory, under which its listing is
+                cached.
+            prefix: Key prefix to filter by, relative to the directory. A
+                prefixed listing is neither read from nor written to the
+                cache.
+            delimiter: Delimiter to group keys by; ``""`` lists recursively.
+            next_token: Continuation token to start listing from. A listing
+                that starts from a token is neither read from nor written to
+                the cache.
+            max_keys: Maximum number of keys per ListObjectsV2 request.
+            refresh: If True, bypass the cache and list from S3.
+
+        Returns:
+            The listed directories and files.
+        """
+        use_cache = not prefix and not next_token
+        cache_key = (name, delimiter)
         cached = self.dircache.get(cache_key) if use_cache and not refresh else None
         if cached is not None:
             return cast(list[S3Object], cached)
@@ -845,15 +976,14 @@ class S3FileSystem(AbstractFileSystem):
         files: list[S3Object] = []
         try:
             for page in self.core.list_objects(
-                s3_path.bucket,
-                prefix=prefix,
+                bucket,
+                prefix=directory + prefix,
                 delimiter=delimiter,
                 max_keys=max_keys,
                 continuation_token=next_token,
             ):
                 files.extend(
-                    self._directory_object(s3_path.bucket, c.prefix[:-1])
-                    for c in page.common_prefixes
+                    self._directory_object(bucket, c.prefix[:-1]) for c in page.common_prefixes
                 )
                 files.extend(S3Object.from_summary(o) for o in page.objects)
         except FileNotFoundError:
@@ -953,18 +1083,17 @@ class S3FileSystem(AbstractFileSystem):
         """List a prefix including all versions of the objects.
 
         The listing is always fetched from S3 and is not cached, because the
-        dircache stores the current view of a path.
+        dircache stores the current view of a path. A key path with nothing
+        under it lists the versions of its object.
+
+        Args:
+            path: The bucket or key path, without the protocol.
+
+        Returns:
+            The listed directories and versions.
         """
         s3_path = S3Path.parse(path)
-        prefix = f"{s3_path.key}/" if s3_path.key else ""
-
-        files: list[S3Object] = []
-        for page in self.core.list_object_versions(s3_path.bucket, prefix=prefix, delimiter="/"):
-            files.extend(
-                self._directory_object(s3_path.bucket, c.prefix[:-1]) for c in page.common_prefixes
-            )
-            files.extend(S3Object.from_version(v) for v in page.versions)
-
+        files = self._ls_prefix_versions(s3_path.bucket, f"{s3_path.key}/" if s3_path.key else "")
         if not files and s3_path.key:
             # The path may point at an object rather than a key prefix.
             files = [
@@ -976,6 +1105,53 @@ class S3FileSystem(AbstractFileSystem):
                 if v.key == s3_path.key
             ]
         return files
+
+    def _ls_prefix_versions(self, bucket: str, directory: str) -> list[S3Object]:
+        """List the common prefixes and all versions of the objects under a key prefix.
+
+        Args:
+            bucket: The bucket.
+            directory: The key prefix of the directory, ``""`` for the
+                bucket (see :meth:`_directory_prefix`).
+
+        Returns:
+            The listed directories and versions, not cached.
+        """
+        files: list[S3Object] = []
+        for page in self.core.list_object_versions(bucket, prefix=directory, delimiter="/"):
+            files.extend(
+                self._directory_object(bucket, c.prefix[:-1]) for c in page.common_prefixes
+            )
+            files.extend(S3Object.from_version(v) for v in page.versions)
+        return files
+
+    def _ls_directory(
+        self, directory: S3Object, refresh: bool = False, versions: bool = False
+    ) -> list[S3Object]:
+        """List a listed directory or bucket by its key prefix, as ``ls()`` lists a path.
+
+        Args:
+            directory: A directory or bucket entry of a listing (see
+                :meth:`_directory_prefix`).
+            refresh: If True, bypass the cache and list from S3.
+            versions: Whether to list all versions of the objects, as
+                ``ls(versions=True)`` does.
+
+        Returns:
+            A new list of the listed directories and files.
+
+        Raises:
+            FileNotFoundError: If nothing is listed under a directory, such as
+                one whose keys have been deleted since it was listed.
+        """
+        prefix = self._directory_prefix(directory)
+        if versions:
+            files = self._ls_prefix_versions(directory.bucket, prefix)
+        else:
+            files = self._ls_prefix(directory.bucket, prefix, directory.name, refresh=refresh)
+        if not files and directory.key is not None:
+            raise FileNotFoundError(directory.name)
+        return list(files)
 
     def info(self, path: str | os.PathLike[str], **kwargs) -> S3Object:
         """Return information about an S3 path.
@@ -1118,13 +1294,15 @@ class S3FileSystem(AbstractFileSystem):
         Args:
             files: List of S3Object instances representing files.
             bucket: S3 bucket name.
-            base_key: Base key path to calculate relative paths from.
+            base_key: Base key path to calculate relative paths from. Its
+                trailing slash is an empty segment of the keys, as in the
+                base ``a/sub/`` of the keys ``a/sub//x``.
 
         Returns:
             List of S3Object instances representing directories.
         """
         dirs = set()
-        base_key = base_key.rstrip("/") if base_key else ""
+        base_key = base_key or ""
 
         for f in files:
             if f.key and f.type == S3ObjectType.S3_OBJECT_TYPE_FILE:
@@ -1185,8 +1363,14 @@ class S3FileSystem(AbstractFileSystem):
         if maxdepth is not None:
             # The entries listed with the prefix lie as many levels further
             # below the path as the prefix has slashes.
+            bucket, directory = self._listing_prefix(path)
             files = self._find_levels(
-                path, maxdepth - prefix.count("/"), prefix=prefix, refresh=refresh
+                bucket,
+                directory,
+                path,
+                maxdepth - prefix.count("/"),
+                prefix=prefix,
+                refresh=refresh,
             )
         else:
             files = self._ls_dirs(path, prefix=prefix, delimiter="", refresh=refresh)
@@ -1217,15 +1401,28 @@ class S3FileSystem(AbstractFileSystem):
         return files
 
     def _find_levels(
-        self, path: str, maxdepth: int, prefix: str = "", refresh: bool = False
+        self,
+        bucket: str,
+        directory: str,
+        name: str,
+        maxdepth: int,
+        prefix: str = "",
+        refresh: bool = False,
     ) -> list[S3Object]:
-        """List the entries below a path level by level with ``Delimiter="/"``.
+        """List the entries below a directory level by level with ``Delimiter="/"``.
+
+        Each listed directory is listed by its key prefix, never by parsing
+        its name (see :meth:`_directory_prefix`).
 
         Args:
-            path: S3 path to search under.
+            bucket: The bucket.
+            directory: The key prefix of the directory, ``""`` for the
+                bucket.
+            name: The name of the directory, under which its listing is
+                cached.
             maxdepth: Number of levels to list.
-            prefix: Key prefix, relative to the path, to filter the first
-                level by.
+            prefix: Key prefix, relative to the directory, to filter the
+                first level by.
             refresh: If True, bypass the cache and list from S3.
 
         Returns:
@@ -1234,10 +1431,20 @@ class S3FileSystem(AbstractFileSystem):
         if maxdepth < 1:
             return []
         result: list[S3Object] = []
-        for item in self._ls_dirs(path, prefix=prefix, delimiter="/", refresh=refresh):
+        for item in self._ls_prefix(
+            bucket, directory, name, prefix=prefix, delimiter="/", refresh=refresh
+        ):
             result.append(item)
             if item.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
-                result.extend(self._find_levels(item.name, maxdepth - 1, refresh=refresh))
+                result.extend(
+                    self._find_levels(
+                        bucket,
+                        self._directory_prefix(item),
+                        item.name,
+                        maxdepth - 1,
+                        refresh=refresh,
+                    )
+                )
         return result
 
     def find(
@@ -1290,6 +1497,137 @@ class S3FileSystem(AbstractFileSystem):
             return {f.name: f for f in files}
         return [f.name for f in files]
 
+    def walk(self, path, maxdepth=None, topdown=True, on_error="omit", **kwargs):
+        """Walk the directories below a path, as fsspec's ``walk()`` does.
+
+        Unlike fsspec, a listed directory is listed by its key prefix rather
+        than by its name (see :meth:`_directory_prefix`), so a directory whose
+        name ends in a version ID query or in an empty segment is walked as
+        it was listed. Its name in the listing of its parent is the part of
+        its name after the parent's name, such as ``""`` for the directory
+        ``bucket/dir/`` of the keys ``dir//x`` in ``bucket/dir``, and it is
+        walked under its name as listed.
+
+        Args:
+            path: The path to walk.
+            maxdepth: Maximum number of levels to walk, at least 1 (None for
+                unlimited).
+            topdown: Whether to yield a directory before the directories
+                below it. When True, removing names from the yielded
+                directory names skips their directories.
+            on_error: ``"omit"`` to skip a directory whose listing fails,
+                ``"raise"`` to raise the error, or a callable that receives
+                it.
+            **kwargs: Additional arguments passed to ``ls()``, such as
+                ``refresh`` and ``versions``; ``detail=True`` yields the
+                entries by name instead of the names.
+
+        Yields:
+            Tuples of a directory path, its directories, and its files.
+
+        Raises:
+            ValueError: If ``maxdepth`` is less than 1.
+        """
+        yield from self._walk_tree(
+            path, maxdepth=maxdepth, topdown=topdown, on_error=on_error, **kwargs
+        )
+
+    def _walk_tree(
+        self,
+        path,
+        maxdepth=None,
+        topdown=True,
+        on_error="omit",
+        directory: S3Object | None = None,
+        yield_failed: bool = False,
+        **kwargs,
+    ) -> Generator[tuple[str, Any, Any], None, None]:
+        """Walk a path, or a listed directory by its key prefix, as :meth:`walk` describes.
+
+        Args:
+            path: The path to walk, or the name of ``directory``.
+            maxdepth: Maximum number of levels to walk, at least 1.
+            topdown: Whether to yield a directory before those below it.
+            on_error: What to do with an error of a listing, as in
+                :meth:`walk`.
+            directory: The listed directory to walk, or None to list
+                ``path`` with ``ls()``.
+            yield_failed: Whether to yield a directory whose listing failed
+                with no entries, as fsspec's ``_walk()`` does.
+            **kwargs: Additional arguments passed to ``ls()``, as in
+                :meth:`walk`.
+
+        Yields:
+            Tuples of a directory path, its directories, and its files.
+
+        Raises:
+            ValueError: If ``maxdepth`` is less than 1.
+        """
+        if maxdepth is not None and maxdepth < 1:
+            raise ValueError("maxdepth must be at least 1")
+        detail = kwargs.pop("detail", False)
+        if directory is None:
+            path = self._strip_protocol(path)
+        try:
+            if directory is None:
+                listing = cast(list[S3Object], self.ls(path, detail=True, **kwargs))
+            else:
+                listing = self._ls_directory(
+                    directory,
+                    refresh=kwargs.get("refresh", False),
+                    versions=kwargs.get("versions", False),
+                )
+        except (FileNotFoundError, OSError) as e:
+            if on_error == "raise":
+                raise
+            if callable(on_error):
+                on_error(e)
+            if yield_failed:
+                yield path, {} if detail else [], {} if detail else []
+            return
+
+        dirs: dict[str, S3Object] = {}
+        files: dict[str, S3Object] = {}
+        for info in listing:
+            name = info.name
+            if info.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY and name.startswith(path + "/"):
+                # The rest of the name, which an empty segment leaves empty.
+                dirs[name[len(path) + 1 :]] = info
+                continue
+            pathname = name.rstrip("/")
+            if info.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY and pathname != path:
+                dirs[pathname.rsplit("/", 1)[-1]] = info
+            elif pathname == path:
+                # An object named as the path itself, such as a folder marker.
+                files[""] = info
+            else:
+                files[pathname.rsplit("/", 1)[-1]] = info
+        entries = dirs
+        names: Any = dirs if detail else list(dirs)
+        listed: Any = files if detail else list(files)
+
+        if topdown:
+            yield path, names, listed
+        if maxdepth is not None:
+            maxdepth -= 1
+            if maxdepth < 1:
+                if not topdown:
+                    yield path, names, listed
+                return
+        for d in names:
+            yield from self._walk_tree(
+                entries[d].name,
+                maxdepth=maxdepth,
+                topdown=topdown,
+                on_error=on_error,
+                directory=entries[d],
+                yield_failed=yield_failed,
+                detail=detail,
+                **kwargs,
+            )
+        if not topdown:
+            yield path, names, listed
+
     def glob(self, path, maxdepth=None, **kwargs):
         """Find the paths that match a glob pattern.
 
@@ -1328,6 +1666,9 @@ class S3FileSystem(AbstractFileSystem):
     ) -> str:
         """Return a tree of the paths below a path, as fsspec's ``tree()`` does.
 
+        Unlike fsspec, a listed directory is listed by its key prefix rather
+        than by its name, as in :meth:`walk`.
+
         Args:
             path: The root path, as a string or an ``os.PathLike``.
             recursion_limit: Maximum depth of the tree.
@@ -1341,18 +1682,15 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The tree as a string.
         """
-        return cast(
-            str,
-            super().tree(
-                stringify_path(path),
-                recursion_limit=recursion_limit,
-                max_display=max_display,
-                display_size=display_size,
-                prefix=prefix,
-                is_last=is_last,
-                first=first,
-                indent_size=indent_size,
-            ),
+        return _S3TreeListing(self).tree(
+            path=stringify_path(path),
+            recursion_limit=recursion_limit,
+            max_display=max_display,
+            display_size=display_size,
+            prefix=prefix,
+            is_last=is_last,
+            first=first,
+            indent_size=indent_size,
         )
 
     def get_mapper(
