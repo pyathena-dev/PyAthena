@@ -45,7 +45,11 @@ The `polars1` and `polars2` dependency groups select Polars 1.x or 2.x, which Po
 The environments above have `polars1`; a second environment beside each, `benchmarks/.venv-polars2` or `/opt/pyathena/.venv-polars2`, has `polars2`.
 The `s3fs` dependency group installs [s3fs](https://github.com/fsspec/s3fs) for the filesystem suite's `s3fs` API in a third environment, `benchmarks/.venv-s3fs` or `/opt/pyathena/.venv-s3fs`, whose Polars version is not pinned.
 s3fs depends on aiobotocore, which pins botocore to a few patch releases, so the group is resolved apart from the other environments.
-The root `pyproject.toml` declares the three groups and the root `dev` group as conflicting, so `uv.lock` resolves each of them separately.
+The `filesystem` dependency group has only PyAthena, s3fs, and psutil, for interpreters that lack wheels of the DataFrame backends, such as free-threaded builds (#1324).
+It is synced alone, with `--only-group filesystem`, which leaves out the benchmark's own dependencies, into `benchmarks/.venv-fs315` or `/opt/pyathena/.venv-fs315` with Python 3.15, and into `.venv-fs315t` with its free-threaded build, 3.15t.
+These environments run only the filesystem and objects suites, every API of them, s3fs included, and the harness imports none of the DataFrame backends there.
+Python 3.15t has no wheel of psutil on Linux, so its sync builds psutil from source with a C compiler.
+The root `pyproject.toml` declares the four groups and the root `dev` group as conflicting, so `uv.lock` resolves each of them separately.
 The benchmark's default dependency groups include `polars1`; a sync with `--no-default-groups` needs `--group polars1` or `--group polars2`, or it installs whichever Polars version the lock resolves without them.
 The root `uv build -v` still builds only PyAthena, including a wheel built from its sdist.
 Benchmark dependencies do not become PyAthena runtime dependencies, and `uv sync --group dev` at the root does not install them.
@@ -130,7 +134,7 @@ As the results location, it removes leftovers by itself, but reports must be rec
 
 The deployment identity needs permission to create these resources and pass the instance role.
 Use an immutable, remotely accessible commit that contains this directory and the root `uv.lock`.
-Bootstrap checks out that commit, installs pinned uv and Python versions, and syncs the benchmark with `uv sync --locked`: with the `polars1` group into `/opt/pyathena/.venv`, and with the `polars2` group into `/opt/pyathena/.venv-polars2`.
+Bootstrap checks out that commit, installs pinned uv and Python versions, and syncs the benchmark with `uv sync --locked`: with the `polars1` group into `/opt/pyathena/.venv`, with the `polars2` group into `/opt/pyathena/.venv-polars2`, with the `s3fs` group into `/opt/pyathena/.venv-s3fs`, and with the `filesystem` group alone into `/opt/pyathena/.venv-fs315` and `/opt/pyathena/.venv-fs315t`, with the template's `FilesystemPythonVersion`, 3.15.2 by default, and its free-threaded build; it installs gcc for the latter.
 It signals setup completion to CloudFormation but does not prepare data or start measurements.
 The EC2 commands use `--no-sync` to reuse this verified environment; they do not revalidate the lockfile on every invocation.
 
@@ -312,7 +316,7 @@ uv run --no-sync python -m pyathena_bench jobs \
 ## Measurement semantics
 
 Each warmup and measured trial runs in a fresh child process, with imports outside the measurement baseline.
-All DataFrame backends are imported before the baseline, including for row cursors.
+All DataFrame backends are imported before the baseline, including for row cursors, except in the `fs315` and `fs315t` environments, which have none; compare the RSS of their trials with each other, not with those of the other environments.
 Absolute RSS therefore includes the harness's common imports; inspect the baseline and increase when interpreting memory overhead.
 A concurrent batch shares one child process, so its RSS belongs to the batch rather than an individual query.
 Defaults are one discarded warmup and five measured trials per case, executed serially by the parent.
@@ -418,6 +422,8 @@ With `--split-pages`, a job whose single trial needs at least that many pages be
 `jobs` accepts `--warmups` and `--repetitions` too; with either option, every job that is not split carries both values as arguments, so one queue can combine jobs with different trial counts under one stored configuration.
 `queue --jobs` accepts several job files, rejects duplicate job IDs, and orders the combined jobs as `jobs` orders one selection.
 `jobs --environment polars2` runs the selected jobs with Polars 2.x: each job names the environment, and its ID ends with `-polars2`, so one queue can hold the same cases for both Polars versions.
+`jobs --environment fs315` and `--environment fs315t` run jobs of the filesystem and objects suites with Python 3.15 and 3.15t in the same way, s3fs jobs included, which end with the environment's name too; `jobs` rejects the other suites for them.
+Each trial records `gil_enabled`, whether the GIL was enabled after the measurement, so that a run in `fs315t` shows whether an import re-enabled it; the run's environment records it as well.
 A worker runs such a job with the interpreter of `.venv-polars2` beside its own environment, and refuses to start if a job's environment is missing on its host; start the worker from the default environment, whose interpreter runs the other jobs.
 Select the families that use Polars, `polars` and `sqla_polars`, for this environment.
 

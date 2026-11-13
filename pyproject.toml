@@ -148,6 +148,7 @@ conflicts = [
         { package = "pyathena-benchmarks", group = "polars1" },
         { package = "pyathena-benchmarks", group = "polars2" },
         { package = "pyathena-benchmarks", group = "s3fs" },
+        { package = "pyathena-benchmarks", group = "filesystem" },
     ],
 ]
 

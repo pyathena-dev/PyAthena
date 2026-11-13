@@ -7,6 +7,9 @@
 
 import json
 import os
+import subprocess
+import sys
+import textwrap
 import time
 from dataclasses import replace
 from io import BytesIO
@@ -512,3 +515,37 @@ class TestResume:
         )
         assert len(read_records(tmp_path / "run" / "trials.jsonl")) == 2
         assert caplog.text.count("Could not write the checkpoint") == 2
+
+
+def test_filesystem_suites_run_without_the_dataframe_backends():
+    # GH-1324: the filesystem environments, for interpreters that lack wheels of the
+    # DataFrame backends, have none of them; the harness imports, and its trial child
+    # runs the filesystem and objects suites, without them.
+    code = textwrap.dedent(
+        """
+        import importlib.abc
+        import sys
+
+        BACKENDS = {"awswrangler", "pandas", "polars", "pyarrow", "sqlalchemy"}
+
+        class Missing(importlib.abc.MetaPathFinder):
+            def find_spec(self, name, path=None, target=None):
+                if name.partition(".")[0] in BACKENDS:
+                    raise ModuleNotFoundError(name)
+                return None
+
+        sys.meta_path.insert(0, Missing())
+        import pyathena_bench.__main__
+        from pyathena_bench import filesystem, objects, runner
+        from pyathena_bench.config import Settings
+
+        assert runner.adapters is None
+        record = runner.environment(Settings())
+        assert record["backends_imported_before_baseline"] == {}
+        assert record["gil_enabled"] is runner.gil_enabled()
+        assert not BACKENDS & {name.partition(".")[0] for name in sys.modules}
+        """
+    )
+    subprocess.run(
+        [sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[1], check=True
+    )

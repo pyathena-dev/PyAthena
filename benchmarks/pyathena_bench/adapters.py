@@ -47,6 +47,7 @@ from pyathena.s3fs.cursor import S3FSCursor
 from pyathena.s3fs.result_set import AthenaS3FSResultSet
 from pyathena_bench.cases import SQLALCHEMY_FAMILIES, Case
 from pyathena_bench.config import Settings
+from pyathena_bench.sampling import heartbeat
 
 BACKEND_VERSIONS = {
     "pandas": pd.__version__,
@@ -358,13 +359,6 @@ async def measure_query(adapter: Adapter, cursor: Any, sql: str, expected: int) 
     finally:
         if result is not None and hasattr(result, "close"):
             result.close()
-
-
-async def heartbeat(interval: float, stop: asyncio.Event, samples: list[float]) -> None:
-    while not stop.is_set():
-        start = time.perf_counter()
-        await asyncio.sleep(interval)
-        samples.append(max(0.0, time.perf_counter() - start - interval))
 
 
 async def run_adapter(
