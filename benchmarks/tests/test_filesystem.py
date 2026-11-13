@@ -266,45 +266,80 @@ def test_s3fs_filesystem_takes_the_session_credentials_and_the_case_sizes(monkey
     ]
 
 
-@pytest.mark.parametrize("api", ["sync", "aio", "s3fs"])
-def test_client_options_of_a_case(api, monkeypatch):
-    # GH-1325: the S3 client of every API takes the case's pool and the options of its
-    # client; the PyAthena filesystems get them through the connection's s3_config.
-    settings = Settings(
-        filesystem_clients={
-            "default": {},
-            "unsigned": {
-                "request_checksum_calculation": "when_required",
-                "s3": {"payload_signing_enabled": False},
-            },
-        }
-    )
-    case = Case(
+CLIENTS = {
+    "unsigned": {
+        "request_checksum_calculation": "when_required",
+        "s3": {"payload_signing_enabled": False},
+    }
+}
+
+
+def client_case(api, suite="filesystem", client="unsigned"):
+    return Case(
         "s3",
         api,
         "put",
-        "bytes",
-        suite="filesystem",
+        "bytes" if suite == "filesystem" else "objects",
+        suite=suite,
         max_workers=8,
         pool_connections=10,
-        client="unsigned",
+        client=client,
     )
-    expected = {
+
+
+@pytest.mark.parametrize("api", ["sync", "aio"])
+def test_pyathena_clients_take_the_options_of_the_case(api, monkeypatch, tmp_path):
+    # GH-1325: the PyAthena filesystems get the case's pool and the options of its
+    # client through the connection's s3_config.
+    connected = {}
+
+    class ConnectedError(Exception):
+        pass
+
+    def connect(**kwargs):
+        connected.update(kwargs)
+        raise ConnectedError
+
+    monkeypatch.setattr("pyathena_bench.filesystem.connect", connect)
+    with pytest.raises(ConnectedError):
+        asyncio.run(
+            run_filesystem(
+                Settings(filesystem_clients=CLIENTS),
+                client_case(api),
+                SimpleNamespace(),
+                "s3://bucket/source",
+                "s3://bucket/destination",
+                2**20,
+                tmp_path,
+            )
+        )
+    config = connected["s3_config"]
+    assert config.max_pool_connections == 10
+    assert config.request_checksum_calculation == "when_required"
+    assert config.s3 == {"payload_signing_enabled": False}
+
+
+def test_s3fs_client_takes_the_options_of_the_case(monkeypatch):
+    # GH-1325: s3fs gets them as config_kwargs of its own client.
+    s3fs = RecordingS3FS()
+    monkeypatch.setattr("pyathena_bench.filesystem.s3fs", s3fs)
+    session = SimpleNamespace(get_credentials=lambda: FakeCredentials())
+    filesystem(Settings(filesystem_clients=CLIENTS), client_case("s3fs"), session, None)
+    assert s3fs.created[0]["config_kwargs"] == {
+        "connect_timeout": 10,
+        "read_timeout": 60,
         "max_pool_connections": 10,
         "request_checksum_calculation": "when_required",
         "s3": {"payload_signing_enabled": False},
     }
-    assert client_options(settings, case) == expected
-    if api == "s3fs":
-        s3fs = RecordingS3FS()
-        monkeypatch.setattr("pyathena_bench.filesystem.s3fs", s3fs)
-        session = SimpleNamespace(get_credentials=lambda: FakeCredentials())
-        filesystem(settings, case, session, connection=None)
-        assert s3fs.created[0]["config_kwargs"] == {
-            "connect_timeout": 10,
-            "read_timeout": 60,
-            **expected,
-        }
+
+
+def test_objects_clients_take_no_filesystem_client_options():
+    # The objects suite's cases have the default client, which a configuration of
+    # the filesystem suite need not define.
+    settings = Settings(filesystem_clients=CLIENTS)
+    case = client_case("s3fs", suite="objects", client="default")
+    assert client_options(settings, case) == {"max_pool_connections": 10}
 
 
 def test_s3fs_api_needs_the_s3fs_package(monkeypatch):

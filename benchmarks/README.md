@@ -312,8 +312,8 @@ Its operations, selected with `--transport`, and the result each trial checks ar
 - `info`: `info(path)` of each file, through a thread pool of the case's concurrency for the synchronous filesystem and through batches of `fsspec.asyn._run_coros_in_chunks` for the other two; the entries returned.
 
 Each case sets one concurrency from `[objects] concurrency`, 8 and 40 by default: the filesystem's `max_workers` and connection pool, as in the filesystem suite, and the `batch_size` of the `cat`, `get`, `put`, `pipe`, and `copy` operations of every API, which is the number of files they transfer at the same time; the synchronous `S3FileSystem` runs them concurrently since #1322.
-With a concurrency of 1, each operation transfers one object at a time, so its time per object is the latency of one call.
-`rm` deletes in DeleteObjects requests of 1,000 keys with every API, which no batch size affects, and `find` pages through ListObjectsV2 with every API.
+With a concurrency of 1, `cat`, `get`, `put`, `pipe`, and `copy` transfer one object at a time, so their time per object is the latency of one call.
+`rm` deletes in DeleteObjects requests of up to 1,000 keys with every API, PyAthena's up to `max_workers` of them at once, so a set of up to 1,000 objects takes one request at any concurrency; `find` pages through ListObjectsV2 with every API.
 The `aio` API awaits each operation's coroutine on the trial's event loop, whose lag is sampled; the `sync` and `s3fs` APIs call the operation on the trial's thread.
 Besides the metrics of the filesystem suite, each trial records the objects per second and the process CPU time of the operation, user and system, as `cpu_seconds`.
 The objects that `put`, `pipe`, and `copy` create, the copies that an `rm` trial prepares, and the local files of `get` and `put`, are removed after the check, also when the preparation or the operation failed, and a removal that fails makes the trial an error.

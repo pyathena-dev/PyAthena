@@ -192,19 +192,18 @@ def missing_api_reason(case: Case) -> str | None:
 
 
 def client_options(settings: Settings, case: Case) -> dict[str, Any]:
-    """Return the botocore Config options of the S3 clients of a filesystem case.
+    """Return the botocore Config options of the S3 clients of a case.
 
     Args:
-        settings: Configuration with the named client options.
-        case: Filesystem case.
+        settings: Configuration with the named client options of the filesystem suite.
+        case: Case of the filesystem or objects suite.
 
     Returns:
-        The case's connection pool size and the options of its client.
+        The case's connection pool size, with the options of its client in the
+        filesystem suite; the objects suite's clients take no other option.
     """
-    return {
-        "max_pool_connections": case.pool_connections,
-        **settings.filesystem_clients[case.client],
-    }
+    options = settings.filesystem_clients[case.client] if case.suite == "filesystem" else {}
+    return {"max_pool_connections": case.pool_connections, **options}
 
 
 def filesystem(settings: Settings, case: Case, session_: Any, connection: Any) -> Any:

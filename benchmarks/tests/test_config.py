@@ -46,6 +46,7 @@ def test_identifier_rejects_sql_and_path_syntax(value):
         {"filesystem_clients": {"Required": {}}},
         {"filesystem_clients": {"required": "when_required"}},
         {"filesystem_clients": {"required": {"checksum": "when_required"}}},
+        {"filesystem_clients": {"required": {"request_checksum_calculation": "when_requred"}}},
         {"filesystem_clients": {"pool": {"max_pool_connections": 40}}},
     ],
 )

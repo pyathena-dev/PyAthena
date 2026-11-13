@@ -18,7 +18,9 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import botocore.session
 from botocore.config import Config
+from botocore.exceptions import BotoCoreError
 
 FLAT_COLUMNS = (
     '"timestamp", country_code, url, project, file.filename AS filename, '
@@ -153,9 +155,19 @@ class Settings:
                 raise ValueError("Filesystem clients must be tables of botocore Config options")
             if "max_pool_connections" in options:
                 raise ValueError("pool_connections sets the connection pool of the clients")
+            if not options:
+                continue
             try:
-                Config(**options)
-            except TypeError as e:
+                # The values, such as the checksum settings, are checked when a client
+                # is created, which sends no request.
+                botocore.session.get_session().create_client(
+                    "s3",
+                    region_name="us-east-1",
+                    aws_access_key_id="unused",
+                    aws_secret_access_key="unused",
+                    config=Config(**options),
+                )
+            except (TypeError, ValueError, BotoCoreError) as e:
                 raise ValueError(f"Invalid options of the filesystem client {name}: {e}") from e
         if not self.objects_counts:
             raise ValueError("Objects counts must name at least one scale")
