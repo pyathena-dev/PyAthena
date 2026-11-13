@@ -1321,7 +1321,7 @@ class AioS3FileSystem(AsyncFileSystem):
             Tuples of a directory path, its directories, and its files.
         """
         walker = self._sync_fs._walk_tree(
-            path,
+            self._strip_protocol(path),
             maxdepth=maxdepth,
             topdown=topdown,
             on_error=on_error,
@@ -1332,7 +1332,11 @@ class AioS3FileSystem(AsyncFileSystem):
             while (step := await self._thread_pool.run(next, walker, None)) is not None:
                 yield step
         finally:
-            walker.close()
+            # A repeated cancellation stops the wait for a step that is still
+            # running in its thread; the walk is then closed when it is
+            # collected.
+            with contextlib.suppress(ValueError):
+                walker.close()
 
     def tree(
         self,
