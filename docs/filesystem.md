@@ -203,6 +203,39 @@ In a forked child process, create a new filesystem. A file that the parent opene
 `RuntimeError` there from its reads, writes, and flushes, `commit()`, and `discard()`,
 and closing it only marks it closed, without uploading or aborting anything.
 
+Close a file returned by `open` explicitly or with a `with` block. A file that is not
+closed is closed when it is finalized, which commits its written data unless
+`autocommit` is False:
+
+- When it is finalized during a pass of the cyclic garbage collector, it is closed in a
+  new thread that starts once the collection has ended. When it is finalized in a
+  thread of an `S3ThreadPool`, such as the request pool of a filesystem, it is closed
+  in a new thread. The interpreter waits for these closes when it exits. If no thread
+  can be started, the file is left unclosed and its multipart upload incomplete.
+- When its last reference is dropped elsewhere, it is closed before that returns.
+- During interpreter finalization, or after the exit has waited for the closes in new
+  threads, it is closed in the finalizing thread instead of a new thread. The request
+  pools take no more calls then, so a file with data left to upload as a part is not
+  committed, and its multipart upload is aborted.
+
+If the garbage collector finalizes the write buffer of a file before the file, the data
+of the file is not committed, and its multipart upload is aborted.
+
+`close()` called during a pass of the cyclic garbage collector, such as by another
+finalizer, closes the file in the same way, in a new thread that starts once the
+collection has ended, and returns before the file is closed. A later `close()`,
+`commit()`, or `discard()` of the file waits for that close to end. During a collection
+or in a thread of an `S3ThreadPool`, `close()` returns without waiting instead, and
+`commit()` and `discard()` raise `RuntimeError`. If no thread could be started for that
+close, a later `close()`, `commit()`, or `discard()` of the file elsewhere closes it
+first.
+
+A file opened in text mode is closed by its text wrapper when the wrapper is finalized.
+The wrapper writes its remaining text to the file in the thread that finalizes it, and
+then closes the file there, or as above during a collection. That write waits as any
+write does, so in a thread of an `S3ThreadPool` it can wait forever for a part of the
+file that is queued behind that thread.
+
 An interrupt, such as Ctrl+C, or a failure while a file reads ranges in parallel
 cancels the range reads that have not started, and the running ones make no further
 attempt. The interrupt or the error is raised once they have ended, and their data is

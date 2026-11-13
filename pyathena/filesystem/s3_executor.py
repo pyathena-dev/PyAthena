@@ -930,6 +930,16 @@ class S3ThreadPool(S3Executor):
         pool = getattr(_pool_thread, "pool", None)
         return pool is not None and pool() is self
 
+    @staticmethod
+    def in_pool_thread() -> bool:
+        """Whether the calling thread is a thread of any pool of this type.
+
+        Returns:
+            True in a thread that a pool of this type started, also once the
+            pool has been collected.
+        """
+        return getattr(_pool_thread, "pool", None) is not None
+
     @classmethod
     def _reset_after_fork(cls) -> None:
         """Drop the threads and locks that a forked child copied from its parent.

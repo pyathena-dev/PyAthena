@@ -1,13 +1,16 @@
+import _thread
 import array
 import asyncio
 import bz2
 import contextlib
+import contextvars
 import errno
 import functools
 import gc
 import gzip
 import io
 import itertools
+import logging
 import lzma
 import os
 import pickle
@@ -44,7 +47,12 @@ from fsspec.implementations.memory import MemoryFileSystem
 
 import pyathena
 from pyathena.filesystem import register_s3_filesystem, s3_filesystem
-from pyathena.filesystem.s3 import CompressedBuffer, S3File, S3FileSystem
+from pyathena.filesystem.s3 import (
+    CompressedBuffer,
+    S3File,
+    S3FileSystem,
+    _handed_over_closes,
+)
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3MultipartCopyPlan
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool, _S3Batch, _S3PoolScope
@@ -8946,6 +8954,545 @@ class TestS3File:
         assert time.monotonic() - started < EVENT_TIMEOUT
         assert operation.calls == 1
         assert file.closed
+
+    @pytest.fixture
+    def handed_over_closes_end(self):
+        # Each close that the test hands over ends; one that does not fails
+        # the test instead of leaving an exit to wait for it forever.
+        yield
+        pending = list(_handed_over_closes)
+        _handed_over_closes.clear()
+        assert all(closed.wait(EVENT_TIMEOUT) for closed in pending)
+
+    @staticmethod
+    def _finalize_unclosed_file(fs, where, *, text=False):
+        # Write a multipart file without closing it, and finalize it in the
+        # given place, using the only thread of the request pool:
+        # - "last reference": its last reference is dropped in a user thread;
+        # - "collection": the cyclic garbage collector runs in a user thread;
+        # - "queued part": the collector runs in the thread of the pool,
+        #   while the first part of the file is queued behind it;
+        # - "own part": the collector runs inside that first part;
+        # - "last reference in pool": its last reference is dropped in the
+        #   thread of the pool, while the first part is queued behind it.
+        # The user thread is a daemon, so that a finalizer that waits forever
+        # fails the test instead of hanging it. Checks that a close handed
+        # over during a collection starts once the collection has ended, and
+        # that the finalization starts no thread through `threading`, whose
+        # locks the finalizing thread may hold. Returns once each handed-over
+        # close has started or failed to start: the files closed by
+        # `_close_collected`, and the threads that finalized the file.
+        holder = []
+        ready = threading.Event()
+        finalized = threading.Event()
+        finalizers = []
+        finalizing = set()
+
+        def finalize():
+            assert ready.wait(EVENT_TIMEOUT)
+            finalizers.append(threading.current_thread())
+            finalizing.add(threading.current_thread())
+            if where.startswith("last reference"):
+                holder.clear()
+            else:
+                gc.collect()
+            finalizing.discard(threading.current_thread())
+            finalized.set()
+
+        if where in ("queued part", "last reference in pool"):
+            upload = fs.core.create_multipart_upload.return_value
+
+            def create(*args, **kwargs):
+                # Queued ahead of the first part of the file.
+                fs._request_pool.submit(finalize)
+                return upload
+
+            fs.core.create_multipart_upload.side_effect = create
+        elif where == "own part":
+            part = fs.core.upload_part.side_effect
+
+            def upload_part(**kwargs):
+                if kwargs["part_number"] == 1:
+                    finalize()
+                return part(**kwargs)
+
+            fs.core.upload_part.side_effect = upload_part
+
+        close_collected = S3File._close_collected
+        start_close = S3File._start_close
+        start = threading.Thread.start
+        closes = []
+        started_in_collection = []
+        started_by_finalizer = []
+        resolved = threading.Semaphore(0)
+
+        def count_close(file, complete):
+            closes.append(file)
+            resolved.release()
+            close_collected(file, complete)
+
+        def record_start(file, complete):
+            started_in_collection.append(S3File._in_collection())
+            start_close(file, complete)
+            if file not in closes and file._closed_later not in _handed_over_closes:
+                # No thread could be started.
+                resolved.release()
+
+        def record_thread_start(thread):
+            # Except a worker of the request pool, which the wrapper of a
+            # text-mode file may start when it writes to the file.
+            if threading.current_thread() in finalizing and not thread.name.startswith(
+                "ThreadPoolExecutor"
+            ):
+                started_by_finalizer.append(thread)
+            start(thread)
+
+        gc.disable()
+        try:
+            with (
+                mock.patch.object(S3File, "_close_collected", count_close),
+                mock.patch.object(S3File, "_start_close", record_start),
+                mock.patch.object(threading.Thread, "start", record_thread_start),
+            ):
+                file = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4)
+                if text:
+                    holder.append(io.TextIOWrapper(file, encoding="utf-8"))
+                    holder[0].write("abcde")
+                else:
+                    holder.append(file)
+                    file.write(b"abcde")
+                if not where.startswith("last reference"):
+                    # A reference cycle, as the read caches of fsspec make,
+                    # leaves the file to the cyclic garbage collector.
+                    holder[0].cycle = holder[0]
+                    holder.clear()
+                del file
+                ready.set()
+                if where in ("last reference", "collection"):
+                    threading.Thread(target=finalize, daemon=True).start()
+                assert finalized.wait(EVENT_TIMEOUT)
+                for _ in started_in_collection:
+                    assert resolved.acquire(timeout=EVENT_TIMEOUT)
+        finally:
+            gc.enable()
+        assert not any(started_in_collection)
+        assert not started_by_finalizer
+        return SimpleNamespace(closes=closes, finalizers=finalizers)
+
+    @pytest.mark.parametrize(
+        ("where", "text"),
+        [
+            ("last reference", False),
+            ("collection", False),
+            ("collection", True),
+            ("queued part", False),
+            ("own part", False),
+            ("last reference in pool", False),
+        ],
+    )
+    @pytest.mark.usefixtures("handed_over_closes_end")
+    def test_finalized_unclosed_file(self, where, text):
+        # GH-1364: an unclosed file is committed when it is finalized. Only a
+        # file whose last reference is dropped in a user thread is committed
+        # by the finalizer itself. One that the cyclic garbage collector
+        # finalizes, or that is finalized in a thread of the request pool, is
+        # committed from a new thread, with the data that it had buffered,
+        # although the collector closes its buffer, so that the finalizer
+        # does not wait forever for a part queued behind it, or for the part
+        # in which it runs.
+        fs = self._make_append_fs(b"")
+        fs._request_pool = S3ThreadPool(1)
+        completed = threading.Event()
+        committers = []
+
+        def complete(*args, **kwargs):
+            committers.append((threading.current_thread(), fs._request_pool.owns_current_thread()))
+            completed.set()
+            return mock.DEFAULT
+
+        fs.core.complete_multipart_upload.side_effect = complete
+        try:
+            finalization = self._finalize_unclosed_file(fs, where, text=text)
+            assert completed.wait(EVENT_TIMEOUT)
+        finally:
+            shutdown_bounded(fs._request_pool)
+        assert self._uploaded_object(fs, b"") == b"abcde"
+        # A sync file commits in the thread that closes it.
+        ((committer, in_pool),) = committers
+        assert (committer is finalization.finalizers[0]) == (where == "last reference")
+        assert not in_pool
+        # The close is handed over once, also when the finalizer of a text
+        # wrapper closes the file before the finalizer of the file runs.
+        assert len(finalization.closes) == (0 if where == "last reference" else 1)
+
+    @pytest.mark.usefixtures("handed_over_closes_end")
+    def test_finalized_unclosed_file_with_finalized_buffer(self, caplog):
+        # GH-1364: an unclosed file whose buffer the collector finalized
+        # first is discarded, instead of committed without the buffered data.
+        fs = self._make_append_fs(b"")
+        aborted = threading.Event()
+        fs._call.side_effect = lambda *args, **kwargs: aborted.set()
+        gc.disable()
+        try:
+            f = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4)
+            f.write(b"abcde")
+            # As the collector closes a buffer that it finalizes first.
+            f.buffer.close()
+            f.cycle = f
+            del f
+            with caplog.at_level(logging.WARNING, logger="pyathena.filesystem.s3"):
+                gc.collect()
+                assert aborted.wait(EVENT_TIMEOUT)
+        finally:
+            gc.enable()
+            shutdown_bounded(fs._request_pool)
+        fs._call.assert_called_once_with(
+            S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
+        )
+        fs.core.complete_multipart_upload.assert_not_called()
+        assert "buffer was finalized" in caplog.text
+
+    @staticmethod
+    def _start_new_thread_unless_closing(start_new_thread):
+        # Fails to start the thread of a handed-over close, as when no more
+        # threads can be started.
+        def start(function, args):
+            if isinstance(getattr(function, "__self__", None), contextvars.Context):
+                raise RuntimeError("can't start new thread")
+            return start_new_thread(function, args)
+
+        return start
+
+    @pytest.mark.usefixtures("handed_over_closes_end")
+    @pytest.mark.parametrize("when", ["running", "finalizing", "exiting"])
+    def test_finalized_unclosed_file_without_thread(self, caplog, when):
+        # GH-1364: if no thread can be started for the close of a finalized
+        # file, it is left unclosed, and its data uncommitted, rather than
+        # closed where it would wait forever, here in the thread of the
+        # request pool with its first part queued behind it. During
+        # interpreter finalization, when no other thread runs requests, and
+        # once the exit has waited for the handed-over closes, which it would
+        # not wait for again, it is closed in the finalizing thread instead,
+        # without starting a thread.
+        finalizing = when != "running"
+        fs = self._make_append_fs(b"")
+        fs._request_pool = S3ThreadPool(1)
+        committers = []
+        fs.core.complete_multipart_upload.side_effect = lambda *args, **kwargs: (
+            committers.append(threading.current_thread()),
+            mock.DEFAULT,
+        )[1]
+        try:
+            with (
+                mock.patch.object(
+                    _thread,
+                    "start_new_thread",
+                    self._start_new_thread_unless_closing(_thread.start_new_thread),
+                ),
+                mock.patch.object(sys, "is_finalizing", return_value=when == "finalizing"),
+                mock.patch("pyathena.filesystem.s3._handed_over_closes_waited", False),
+                caplog.at_level(logging.WARNING, logger="pyathena.filesystem.s3"),
+            ):
+                if when == "exiting":
+                    S3File._wait_for_handed_over_closes()
+                finalization = self._finalize_unclosed_file(
+                    fs, "collection" if finalizing else "queued part"
+                )
+        finally:
+            shutdown_bounded(fs._request_pool)
+        if finalizing:
+            assert self._uploaded_object(fs, b"") == b"abcde"
+            assert committers == finalization.finalizers
+        else:
+            fs.core.complete_multipart_upload.assert_not_called()
+            assert "no thread could be started" in caplog.text
+
+    @pytest.mark.parametrize(
+        ("method", "autocommit"),
+        [("close", True), ("close", False), ("commit", False), ("discard", False)],
+    )
+    @pytest.mark.usefixtures("handed_over_closes_end")
+    def test_close_handed_over_is_waited_for(self, method, autocommit):
+        # GH-1364: a close of a file that the finalizer of its text wrapper
+        # hands over during a collection is waited for by a later close(),
+        # commit(), or discard() of the file, as at the end of a transaction,
+        # which would otherwise complete the upload without the text that
+        # the wrapper wrote when it was finalized, or race with the close.
+        fs = self._make_append_fs(b"")
+        release = threading.Event()
+        waiting = threading.Event()
+        close_collected = S3File._close_collected
+
+        def close_when_released(file, complete):
+            assert release.wait(EVENT_TIMEOUT)
+            close_collected(file, complete)
+
+        gc.disable()
+        try:
+            with mock.patch.object(S3File, "_close_collected", close_when_released):
+                f = S3File(
+                    fs, "s3://bucket/key.txt", mode="wb", block_size=4, autocommit=autocommit
+                )
+                wrapper = io.TextIOWrapper(f, encoding="utf-8")
+                wrapper.write("abcde")
+                wrapper.flush()
+                wrapper.write("fg")
+                wrapper.cycle = wrapper
+                del wrapper
+                gc.collect()
+                # Observes the wait for the handed-over close, which ends when
+                # it is released.
+                closed_later = f._closed_later
+                wait = closed_later.wait
+
+                def observed_wait(timeout=None):
+                    waiting.set()
+                    return wait(timeout)
+
+                closed_later.wait = observed_wait
+                waiter = threading.Thread(target=getattr(f, method), daemon=True)
+                waiter.start()
+                assert waiting.wait(EVENT_TIMEOUT)
+                release.set()
+                waiter.join(EVENT_TIMEOUT)
+                assert not waiter.is_alive()
+                assert f.closed
+                if method == "close" and not autocommit:
+                    f.commit()
+        finally:
+            gc.enable()
+            release.set()
+            shutdown_bounded(fs._request_pool)
+        if method == "discard":
+            fs._call.assert_called_once_with(
+                S3_CLIENT.abort_multipart_upload,
+                Bucket="bucket",
+                Key="key.txt",
+                UploadId="uploadid",
+            )
+            fs.core.complete_multipart_upload.assert_not_called()
+        else:
+            assert self._uploaded_object(fs, b"") == b"abcdefg"
+
+    @pytest.mark.parametrize("where", ["collection", "pool"])
+    @pytest.mark.usefixtures("handed_over_closes_end")
+    def test_close_handed_over_is_not_waited_for(self, where):
+        # GH-1364: where a handed-over close of a file cannot be waited for,
+        # during a collection, whose end starts it, or in the thread of the
+        # request pool that one of its parts may be queued behind, close()
+        # returns and commit() raises, instead of waiting forever or
+        # completing the upload without the data that the close uploads. A
+        # commit() once the close has ended commits all of the data.
+        fs = self._make_append_fs(b"")
+        fs._request_pool = S3ThreadPool(1)
+        release = threading.Event()
+        closed = []
+        errors = []
+        close_collected = S3File._close_collected
+
+        def close_when_released(file, complete):
+            assert release.wait(EVENT_TIMEOUT)
+            close_collected(file, complete)
+
+        def close_and_commit(file):
+            try:
+                file.close()
+                # The close is left to the thread that runs it.
+                closed.append(file.closed)
+                try:
+                    file.commit()
+                except RuntimeError as e:
+                    errors.append(e)
+            finally:
+                release.set()
+
+        class Closer:
+            def __init__(self, file):
+                self.file = file
+                self.cycle = self
+
+            def __del__(self):
+                # Hands the close over.
+                self.file.close()
+                if where == "collection":
+                    close_and_commit(self.file)
+
+        gc.disable()
+        try:
+            with mock.patch.object(S3File, "_close_collected", close_when_released):
+                f = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4, autocommit=False)
+                f.write(b"abcde")
+                f.write(b"fg")
+                Closer(f)
+                # A daemon thread, so that a collection that waits forever
+                # does not keep the process alive.
+                collector = threading.Thread(target=gc.collect, daemon=True)
+                collector.start()
+                collector.join(EVENT_TIMEOUT)
+                assert not collector.is_alive()
+                if where == "pool":
+                    fs._request_pool.submit(close_and_commit, f).result(EVENT_TIMEOUT)
+                assert closed == [False]
+                assert len(errors) == 1
+                fs.core.complete_multipart_upload.assert_not_called()
+
+                def close_and_commit_later():
+                    # Waits for the handed-over close.
+                    f.close()
+                    f.commit()
+
+                # A daemon thread, so that a close that waits forever does
+                # not keep the process alive.
+                committer = threading.Thread(target=close_and_commit_later, daemon=True)
+                committer.start()
+                committer.join(EVENT_TIMEOUT)
+                assert not committer.is_alive()
+        finally:
+            gc.enable()
+            release.set()
+            shutdown_bounded(fs._request_pool)
+        assert self._uploaded_object(fs, b"") == b"abcdefg"
+
+    @pytest.mark.usefixtures("handed_over_closes_end")
+    @pytest.mark.parametrize(
+        ("method", "waiting"),
+        [("close", False), ("commit", False), ("commit", True), ("close in pool", False)],
+    )
+    def test_close_handed_over_not_started(self, method, waiting):
+        # GH-1364: when no thread could be started for a handed-over close,
+        # a later close() or commit() of the file closes it first, also one
+        # that already waits for it, instead of waiting forever, or
+        # completing the upload, as at the end of a transaction, without the
+        # data that the close uploads. In a thread of the request pool, where
+        # the close could wait for a part queued behind it, close() leaves
+        # the file open and commit() raises.
+        fs = self._make_append_fs(b"")
+        fs._request_pool = S3ThreadPool(1)
+        errors = []
+
+        def close_and_commit_in_pool(file):
+            file.close()
+            assert not file.closed
+            try:
+                file.commit()
+            except RuntimeError as e:
+                errors.append(e)
+
+        handed_over = threading.Event()
+        waited = threading.Event()
+        start_new_thread = self._start_new_thread_unless_closing(_thread.start_new_thread)
+
+        def start_new_thread_once_waited(function, args):
+            if isinstance(getattr(function, "__self__", None), contextvars.Context):
+                handed_over.set()
+                if waiting:
+                    assert waited.wait(EVENT_TIMEOUT)
+            return start_new_thread(function, args)
+
+        class Closer:
+            def __init__(self, file):
+                self.file = file
+                self.cycle = self
+
+            def __del__(self):
+                # Hands the close over.
+                self.file.close()
+
+        gc.disable()
+        try:
+            with mock.patch.object(_thread, "start_new_thread", start_new_thread_once_waited):
+                f = S3File(
+                    fs,
+                    "s3://bucket/key.txt",
+                    mode="wb",
+                    block_size=4,
+                    autocommit=method != "commit",
+                )
+                f.write(b"abcde")
+                f.write(b"fg")
+                Closer(f)
+                # Daemon threads, so that a call that waits forever does not
+                # keep the process alive.
+                collector = threading.Thread(target=gc.collect, daemon=True)
+                collector.start()
+                assert handed_over.wait(EVENT_TIMEOUT)
+                caller = threading.Thread(target=getattr(f, method.split()[0]), daemon=True)
+                if waiting:
+                    # The caller waits for the close before its start fails.
+                    closed_later = f._closed_later
+                    wait = closed_later.wait
+
+                    def observed_wait(timeout=None):
+                        waited.set()
+                        return wait(timeout)
+
+                    closed_later.wait = observed_wait
+                    caller.start()
+                collector.join(EVENT_TIMEOUT)
+                assert not collector.is_alive()
+            if method == "close in pool":
+                fs._request_pool.submit(close_and_commit_in_pool, f).result(EVENT_TIMEOUT)
+                assert len(errors) == 1
+            if not waiting:
+                assert not f.closed
+                caller.start()
+            caller.join(EVENT_TIMEOUT)
+            assert not caller.is_alive()
+        finally:
+            gc.enable()
+            waited.set()
+            shutdown_bounded(fs._request_pool)
+        assert f.closed
+        assert self._uploaded_object(fs, b"") == b"abcdefg"
+
+    @pytest.mark.usefixtures("handed_over_closes_end")
+    def test_close_handed_over_failed_write_is_discarded(self):
+        # GH-1364: when a write fails during the collection that handed over
+        # the close of its file, as a text wrapper writes when it is
+        # finalized, the handed-over close discards the write, which the
+        # failing write cannot wait for.
+        fs = self._make_append_fs(b"")
+        failed = threading.Event()
+        aborted = threading.Event()
+        errors = []
+
+        def fail_part(**kwargs):
+            failed.set()
+            raise OSError("part failed")
+
+        fs.core.upload_part.side_effect = fail_part
+        fs._call.side_effect = lambda *args, **kwargs: aborted.set()
+
+        class Writer:
+            def __init__(self, file):
+                self.file = file
+                self.cycle = self
+
+            def __del__(self):
+                # Hands the close over, then writes another part.
+                self.file.close()
+                try:
+                    self.file.write(b"fghij")
+                except OSError as e:
+                    errors.append(e)
+
+        gc.disable()
+        try:
+            f = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4)
+            f.write(b"abcde")
+            assert failed.wait(EVENT_TIMEOUT)
+            Writer(f)
+            del f
+            gc.collect()
+            assert aborted.wait(EVENT_TIMEOUT)
+        finally:
+            gc.enable()
+            shutdown_bounded(fs._request_pool)
+        assert len(errors) == 1
+        fs._call.assert_called_once_with(
+            S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
+        )
+        fs.core.complete_multipart_upload.assert_not_called()
 
     @pytest.mark.parametrize("autocommit", [True, False])
     def test_upload_chunk_multipart(self, autocommit):
