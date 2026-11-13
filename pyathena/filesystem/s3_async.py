@@ -1289,7 +1289,8 @@ class AioS3FileSystem(AsyncFileSystem):
             topdown: Whether to yield a directory before the directories
                 below it.
             on_error: ``"omit"``, ``"raise"``, or a callable that receives the
-                error of a listing.
+                error of the listing of the path, as in
+                :meth:`S3FileSystem.walk`.
             **kwargs: Additional arguments passed to ``ls()``.
 
         Yields:
@@ -1314,7 +1315,8 @@ class AioS3FileSystem(AsyncFileSystem):
             topdown: Whether to yield a directory before the directories
                 below it.
             on_error: ``"omit"``, ``"raise"``, or a callable that receives the
-                error of a listing.
+                error of the listing of the path, as in
+                :meth:`S3FileSystem.walk`.
             **kwargs: Additional arguments passed to ``ls()``.
 
         Yields:
