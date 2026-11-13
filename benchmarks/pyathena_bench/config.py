@@ -18,9 +18,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-import botocore.session
 from botocore.config import Config
-from botocore.exceptions import BotoCoreError
 
 FLAT_COLUMNS = (
     '"timestamp", country_code, url, project, file.filename AS filename, '
@@ -58,6 +56,11 @@ def identifier(value: str) -> str:
     if not re.fullmatch(r"[a-z][a-z0-9_]*", value):
         raise ValueError(f"Invalid identifier: {value!r}")
     return value
+
+
+# The botocore checksum settings of an S3 client and their values.
+CHECKSUM_SETTINGS = ("request_checksum_calculation", "response_checksum_validation")
+CHECKSUM_VALUES = ("when_supported", "when_required")
 
 
 @dataclass(frozen=True)
@@ -155,20 +158,17 @@ class Settings:
                 raise ValueError("Filesystem clients must be tables of botocore Config options")
             if "max_pool_connections" in options:
                 raise ValueError("pool_connections sets the connection pool of the clients")
-            if not options:
-                continue
             try:
-                # The values, such as the checksum settings, are checked when a client
-                # is created, which sends no request.
-                botocore.session.get_session().create_client(
-                    "s3",
-                    region_name="us-east-1",
-                    aws_access_key_id="unused",
-                    aws_secret_access_key="unused",
-                    config=Config(**options),
-                )
-            except (TypeError, ValueError, BotoCoreError) as e:
+                # Checks the names of the options; creating a client, which also checks
+                # values, would read the AWS configuration of the environment.
+                Config(**options)
+            except TypeError as e:
                 raise ValueError(f"Invalid options of the filesystem client {name}: {e}") from e
+            # botocore checks the values of the checksum settings only when it creates
+            # a client, which a trial would fail at.
+            for key in CHECKSUM_SETTINGS:
+                if key in options and options[key] not in CHECKSUM_VALUES:
+                    raise ValueError(f"Invalid {key} of the filesystem client {name}")
         if not self.objects_counts:
             raise ValueError("Objects counts must name at least one scale")
         for name, count in self.objects_counts.items():
