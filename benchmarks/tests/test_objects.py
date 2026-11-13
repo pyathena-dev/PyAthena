@@ -84,9 +84,14 @@ def run_batch(fs, case, paths=PATHS, targets=TARGETS, local=Path("/local"), size
 
 @pytest.mark.parametrize(
     ("api", "method", "options"),
-    [("sync", "cat", {}), ("aio", "_cat", {"batch_size": 8}), ("s3fs", "cat", {"batch_size": 8})],
+    [
+        ("sync", "cat", {"batch_size": 8}),
+        ("aio", "_cat", {"batch_size": 8}),
+        ("s3fs", "cat", {"batch_size": 8}),
+    ],
 )
-def test_cat_passes_the_batch_size_of_the_asyncio_apis(api, method, options):
+def test_cat_passes_the_batch_size_of_every_api(api, method, options):
+    # GH-1322: the synchronous filesystem's batch operations run concurrently too.
     fs = RecordingFileSystem()
     case = Case("s3", api, "cat", "objects", suite="objects", max_workers=8)
     assert len(run_batch(fs, case)) == 3
@@ -95,7 +100,7 @@ def test_cat_passes_the_batch_size_of_the_asyncio_apis(api, method, options):
 
 @pytest.mark.parametrize("api", ["sync", "aio", "s3fs"])
 def test_get_and_put_pair_the_objects_with_local_files_of_the_same_name(api, tmp_path):
-    options = {} if api == "sync" else {"batch_size": 8}
+    options = {"batch_size": 8}
     fs = RecordingFileSystem()
     locals_ = [str(tmp_path / f"{i:06d}") for i in range(3)]
     run_batch(fs, Case("s3", api, "get", "objects", suite="objects", max_workers=8), local=tmp_path)
@@ -114,7 +119,7 @@ def test_pipe_writes_one_buffer_of_the_object_size_to_every_target(api):
     [(method, (values,), options)] = fs.calls
     assert method == ("_pipe" if api == "aio" else "pipe")
     assert values == dict.fromkeys(TARGETS, bytes(4))
-    assert options == ({} if api == "sync" else {"batch_size": 8})
+    assert options == {"batch_size": 8}
 
 
 @pytest.mark.parametrize("api", ["sync", "aio", "s3fs"])
@@ -122,7 +127,7 @@ def test_copy_excludes_tags_and_annotations(api):
     fs = RecordingFileSystem()
     run_batch(fs, Case("s3", api, "copy", "objects", suite="objects", max_workers=8))
     expected = {
-        **({} if api == "sync" else {"batch_size": 8}),
+        "batch_size": 8,
         "TaggingDirective": "REPLACE",
         "AnnotationDirective": "EXCLUDE",
     }

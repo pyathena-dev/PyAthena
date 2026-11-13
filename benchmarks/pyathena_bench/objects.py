@@ -70,7 +70,8 @@ def batch(fs: Any, case: Case, paths: list[str], targets: list[str], local: Path
     asyncio filesystem's coroutines are awaited on the running event loop.
     The ``info`` fan-out, which fsspec has no batch for, runs the synchronous
     filesystem's ``info()`` in a thread pool of the case's concurrency, and
-    the coroutines of the other two in batches of it.
+    the coroutines of the other two in batches of it. The batch operations of
+    every API get the case's concurrency as their ``batch_size``.
 
     Args:
         fs: The filesystem of the case's API.
@@ -100,7 +101,9 @@ def batch(fs: Any, case: Case, paths: list[str], targets: list[str], local: Path
         # The batch size is not an option of the deletes: PyAthena's and
         # s3fs's send DeleteObjects requests of 1,000 keys.
         return fs._rm(paths) if case.api == "aio" else fs.rm(paths)
-    options: dict[str, Any] = {} if case.api == "sync" else {"batch_size": n}
+    # Every API transfers this many objects at once; the synchronous filesystem's
+    # default batch size, its max_workers, is the same, but is not relied on.
+    options: dict[str, Any] = {"batch_size": n}
     if operation == "cat":
         return fs._cat(paths, **options) if case.api == "aio" else fs.cat(paths, **options)
     if operation == "get":
