@@ -48,6 +48,7 @@ def test_identifier_rejects_sql_and_path_syntax(value):
         {"filesystem_clients": {"required": {"checksum": "when_required"}}},
         {"filesystem_clients": {"required": {"request_checksum_calculation": "when_requred"}}},
         {"filesystem_clients": {"required": {"response_checksum_validation": "never"}}},
+        {"filesystem_clients": {"retries": {"retries": {"mode": "standrad"}}}},
         {"filesystem_clients": {"pool": {"max_pool_connections": 40}}},
     ],
 )
@@ -167,6 +168,24 @@ def test_filesystem_clients_add_named_cases(tmp_path):
         "filesystem-s3-s3fs-write-w8-p10-unsigned",
     } <= {c.id for c in cases}
     assert len({c.id for c in cases}) == len(cases)
+
+
+def test_filesystem_clients_are_checked_without_the_aws_configuration(monkeypatch):
+    # GH-1325: the options are checked without creating a client, which would read
+    # the AWS configuration of the environment and change nested options in place;
+    # botocore accepts the checksum values in any case.
+    monkeypatch.setenv("AWS_PROFILE", "missing")
+    clients = {
+        "required": {
+            "request_checksum_calculation": "WHEN_REQUIRED",
+            "retries": {"max_attempts": 2},
+        }
+    }
+    settings = Settings(filesystem_clients=clients)
+    assert settings.filesystem_clients["required"] == {
+        "request_checksum_calculation": "WHEN_REQUIRED",
+        "retries": {"max_attempts": 2},
+    }
 
 
 def test_filesystem_section_is_loaded_with_its_own_scales(tmp_path):

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from botocore.config import Config
+from botocore.exceptions import BotoCoreError
 
 FLAT_COLUMNS = (
     '"timestamp", country_code, url, project, file.filename AS filename, '
@@ -162,12 +163,14 @@ class Settings:
                 # Checks the names of the options; creating a client, which also checks
                 # values, would read the AWS configuration of the environment.
                 Config(**options)
-            except TypeError as e:
+            except (TypeError, BotoCoreError) as e:
                 raise ValueError(f"Invalid options of the filesystem client {name}: {e}") from e
             # botocore checks the values of the checksum settings only when it creates
             # a client, which a trial would fail at.
             for key in CHECKSUM_SETTINGS:
-                if key in options and options[key] not in CHECKSUM_VALUES:
+                value = options.get(key, CHECKSUM_VALUES[0])
+                # botocore lowercases the value before it checks it.
+                if not isinstance(value, str) or value.lower() not in CHECKSUM_VALUES:
                     raise ValueError(f"Invalid {key} of the filesystem client {name}")
         if not self.objects_counts:
             raise ValueError("Objects counts must name at least one scale")
