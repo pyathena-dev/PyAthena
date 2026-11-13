@@ -11,15 +11,24 @@ import subprocess
 import sys
 import textwrap
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pyathena_bench.cases import Case
 from pyathena_bench.config import Settings
 from pyathena_bench.report import read_records
-from pyathena_bench.runner import Observer, completed_trials, output_files, run, supervise
+from pyathena_bench.runner import (
+    Observer,
+    completed_trials,
+    environment,
+    output_files,
+    run,
+    supervise,
+    worker,
+)
 
 
 def successful_worker(pipe, payload):
@@ -517,6 +526,73 @@ class TestResume:
         assert caplog.text.count("Could not write the checkpoint") == 2
 
 
+class TrialPipe:
+    """The child's end of the pipe; the parent starts the measurement at once."""
+
+    def __init__(self):
+        self.events = []
+
+    def send(self, value):
+        self.events.append(value)
+
+    def recv(self):
+        return None
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize("suite", ["filesystem", "objects"])
+def test_trial_of_a_filesystem_suite_needs_no_adapters(suite, monkeypatch):
+    # GH-1324: the filesystem environments have no adapters. The trial records the
+    # GIL after its measurement, whose imports can enable it on a free-threaded build.
+    gil = [False]
+    monkeypatch.setattr(sys, "_is_gil_enabled", lambda: gil[0], raising=False)
+    monkeypatch.setattr("pyathena_bench.runner.adapters", None)
+    monkeypatch.setattr(
+        "pyathena_bench.runner.session",
+        lambda settings: SimpleNamespace(events=SimpleNamespace(register=lambda *args: None)),
+    )
+
+    async def measurement(*args):
+        gil[0] = True
+        return {"status": "ok", "queries": []}
+
+    monkeypatch.setattr(f"pyathena_bench.runner.run_{suite}", measurement)
+    record = environment(Settings())
+    assert record["backends_imported_before_baseline"] == {}
+    assert record["gil_enabled"] is False
+    case = Case("s3", "sync", "cat", "objects" if suite == "objects" else "bytes", suite=suite)
+    payload = {
+        "settings": asdict(Settings()),
+        "case": asdict(case),
+        "source": "s3://b/source",
+        "destination": "s3://b/out/",
+        "size": 1,
+        "object_set": {},
+        "temp_dir": "/unused",
+    }
+    pipe = TrialPipe()
+    worker(pipe, payload)
+    result = pipe.events[-1]["result"]
+    assert result["status"] == "ok"
+    assert result["gil_enabled"] is True
+
+
+def test_trial_of_an_athena_suite_needs_the_adapters(monkeypatch):
+    monkeypatch.setattr("pyathena_bench.runner.adapters", None)
+    monkeypatch.setattr(
+        "pyathena_bench.runner.session",
+        lambda settings: SimpleNamespace(events=SimpleNamespace(register=lambda *args: None)),
+    )
+    case = Case("rest")
+    pipe = TrialPipe()
+    worker(pipe, {"settings": asdict(Settings()), "case": asdict(case)})
+    result = pipe.events[-1]["result"]
+    assert result["status"] == "error"
+    assert "DataFrame backends" in result["error"]
+
+
 def test_filesystem_suites_run_without_the_dataframe_backends():
     # GH-1324: the filesystem environments, for interpreters that lack wheels of the
     # DataFrame backends, have none of them; the harness imports, and its trial child
@@ -542,7 +618,6 @@ def test_filesystem_suites_run_without_the_dataframe_backends():
         assert runner.adapters is None
         record = runner.environment(Settings())
         assert record["backends_imported_before_baseline"] == {}
-        assert record["gil_enabled"] is runner.gil_enabled()
         assert not BACKENDS & {name.partition(".")[0] for name in sys.modules}
         """
     )

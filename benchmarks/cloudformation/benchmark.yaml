@@ -53,7 +53,8 @@ Parameters:
     Description: Image for arm64 hosts.
   UvVersion:
     Type: String
-    Default: '0.12.5'
+    # A release that knows the Python versions below; 0.12.5 knows no 3.15 release.
+    Default: '0.13.7'
     AllowedPattern: '[0-9]+\.[0-9]+\.[0-9]+'
   PythonVersion:
     Type: String
