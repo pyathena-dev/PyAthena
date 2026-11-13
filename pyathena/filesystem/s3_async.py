@@ -861,9 +861,13 @@ class AioS3FileSystem(AsyncFileSystem):
     ) -> None:
         """Copy files from S3 to the local filesystem.
 
-        See :meth:`S3FileSystem.get`. The downloads run as in fsspec's
-        ``_get()``, and a cancellation cancels them and waits for them, as
-        in :meth:`_copy`.
+        See :meth:`S3FileSystem.get`. The paths are paired as there, and the
+        downloads run as in fsspec's ``_get()``; a cancellation cancels them
+        and waits for them, as in :meth:`_copy`. As in
+        :meth:`S3FileSystem.get`, each download gets ``max(1, max_workers //
+        n)`` parallel range reads, or the caller's smaller ``max_workers``,
+        where ``n`` is the number of files, or ``batch_size`` when it is
+        positive and smaller.
 
         Args:
             rpath: Source S3 path, glob pattern, or list of them.
@@ -872,28 +876,44 @@ class AioS3FileSystem(AsyncFileSystem):
             recursive: Whether to copy the directories with their contents.
             callback: Progress callback.
             maxdepth: Maximum depth of a recursive copy.
-            **kwargs: Additional parameters passed to ``_get_file()``.
+            **kwargs: Additional parameters passed to ``_get_file()``, and
+                ``batch_size``, the number of downloads that fsspec runs at
+                once.
 
         Raises:
-            ValueError: If a source with a version ID is paired, and a
-                destination lies outside ``lpath``.
+            ValueError: If a destination named after a source lies outside
+                ``lpath``.
         """
         rpath = self._sync_fs._stringify_paths(rpath)
-        sources = [rpath] if isinstance(rpath, str) else rpath
-        if isinstance(lpath, (str, os.PathLike)) and any(S3Path.has_version_id(p) for p in sources):
-            root = make_path_posix(lpath)
-            pairs = await self._thread_pool.run(
-                self._sync_fs._copy_pairs,
-                S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
-                isdir=LocalFileSystem().isdir,
-            )
-            rpath, lpath = [p1 for p1, _ in pairs], [p2 for _, p2 in pairs]
-            check_contained(root, lpath)
-            if not rpath:
-                return
+        # Local paths are made absolute, as fsspec's _get() does, so that
+        # it can create their parent directories.
+        root = (
+            make_path_posix(lpath)
+            if isinstance(lpath, (str, os.PathLike))
+            else [make_path_posix(p) if isinstance(p, (str, os.PathLike)) else p for p in lpath]
+        )
+        pairs = await self._thread_pool.run(
+            self._sync_fs._copy_pairs,
+            S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
+            isdir=LocalFileSystem().isdir,
+        )
+        if isinstance(root, str):
+            check_contained(root, [lp for _, lp in pairs])
+        if not pairs:
+            return
+        # fsspec's default batch size, when none is given, is not counted:
+        # at most max_workers downloads run at once in the threads of the
+        # filesystem, and more than max_workers get one range each anyway.
+        concurrency = len(pairs)
+        batch_size = kwargs.get("batch_size", self.batch_size)
+        if batch_size is not None and batch_size > 0:
+            concurrency = min(concurrency, batch_size)
         await _S3BatchTasks().run(
             super()._get(
-                rpath, lpath, recursive=recursive, callback=callback, maxdepth=maxdepth, **kwargs
+                [rp for rp, _ in pairs],
+                [lp for _, lp in pairs],
+                callback=callback,
+                **self._sync_fs._batch_kwargs(concurrency, kwargs),
             )
         )
 

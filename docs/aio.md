@@ -347,7 +347,9 @@ coroutines of their objects as tasks, `batch_size` of them at a time as in fsspe
 `_mv()`, which runs all its copies at once. Cancelling one of them cancels those tasks
 and waits for them before the cancellation is raised, also when the shutdown of the
 event loop cancels them together with the coroutine.
-A recursive `_put()` sends no request for the local directories. `_rm()` sends
+Each download of `_get()` gets `max(1, max_workers // n)` range reads, as with
+`S3FileSystem.get`, `n` being the number of files, or `batch_size` when it is positive and
+smaller. A recursive `_put()` sends no request for the local directories. `_rm()` sends
 `batch_size` DeleteObjects requests at a time, `max_workers` by default and with `-1`; its
 `max_workers` argument is a deprecated alias of `batch_size`.
 

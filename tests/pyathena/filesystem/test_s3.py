@@ -2929,24 +2929,21 @@ class TestS3FileSystem:
 
     def test_get_file_stopped_writes_no_further_block(self):
         # GH-1322 (B2): a download whose batch has stopped writes no further
-        # block, including the one read when the stop came.
-        fs = self._make_fs()
+        # block, including the ones read when the stop came (GH-1323: those
+        # of the wave).
+        fs, _ = self._make_object_fs(b"abcdefgh")
         stop = threading.Event()
-        remote = mock.MagicMock(size=8, blocksize=4)
-        remote.__enter__.return_value = remote
+        get_object = fs._client.get_object.side_effect
 
-        blocks = [b"abcd", b"efgh", b""]
-
-        def read(size):
-            # The batch stops while the first block is being read.
+        def stopping(**request):
+            # The batch stops while the first wave, of one range, is read.
             stop.set()
-            return blocks.pop(0)
+            return get_object(**request)
 
-        remote.read.side_effect = read
-        fs.open = mock.MagicMock(return_value=remote)
+        fs._client.get_object.side_effect = stopping
         outfile = io.BytesIO()
         with stop_retries_on(stop), pytest.raises(CancelledError):
-            fs.get_file("s3://bucket/key?versionId=v1", outfile=outfile)
+            fs.get_file("s3://bucket/key", outfile=outfile, block_size=4, max_workers=1)
         assert outfile.getvalue() == b""
 
     def test_multipart_copy_annotations_retry_after_stop(self):
@@ -4814,6 +4811,299 @@ class TestS3FileSystem:
         outfile = io.BytesIO()
         fs.get_file("s3://bucket/key", outfile=outfile)
         assert outfile.getvalue() == b"data"
+
+    @pytest.mark.parametrize(
+        ("max_workers", "pool", "waves"),
+        [
+            # Waves of max_workers ranges of the block size, each written
+            # before the next is read.
+            (2, 4, [["0-3", "4-7"], ["8-9"]]),
+            # One range at a time with one worker, not the whole object.
+            (1, 4, [["0-3"], ["4-7"], ["8-9"]]),
+            # No more ranges at once than the request pool runs.
+            (8, 2, [["0-3", "4-7"], ["8-9"]]),
+            (8, 4, [["0-3", "4-7", "8-9"]]),
+        ],
+    )
+    def test_get_file_reads_waves_of_ranges(self, max_workers, pool, waves):
+        # GH-1323: get_file() read one block at a time after the first, so a
+        # download ran one range request at a time whatever max_workers was.
+        fs, _ = self._make_object_fs(b"0123456789")
+        fs._request_pool = S3ThreadPool(pool)
+        events = []
+        get_object = fs._client.get_object.side_effect
+
+        def record(**request):
+            events.append(("read", request["Range"].removeprefix("bytes=")))
+            return get_object(**request)
+
+        fs._client.get_object.side_effect = record
+
+        class Outfile(io.BytesIO):
+            def write(self, data):
+                events.append(("write", None))
+                return super().write(data)
+
+        outfile = Outfile()
+        callback = Callback()
+        fs.get_file(
+            "s3://bucket/key",
+            outfile=outfile,
+            callback=callback,
+            block_size=4,
+            max_workers=max_workers,
+        )
+        assert outfile.getvalue() == b"0123456789"
+        observed = []
+        for kind, group in itertools.groupby(events, key=lambda event: event[0]):
+            ranges = [range_ for _, range_ in group]
+            observed.append(sorted(ranges) if kind == "read" else len(ranges))
+        assert observed == [part for wave in waves for part in (wave, len(wave))]
+        assert callback.size == callback.value == 10
+
+    @pytest.mark.parametrize("data", [b"", b"012", b"01234567", b"0123456789"])
+    def test_get_file_contents(self, tmp_path, data):
+        # GH-1323: an empty object, less than a block, an exact multiple of
+        # the block size, and a remainder, with the progress of each body.
+        fs, ranges = self._make_object_fs(data)
+        lpath = tmp_path / "key"
+        updates = []
+
+        class Recording(Callback):
+            def relative_update(self, inc=1):
+                updates.append(inc)
+                super().relative_update(inc)
+
+        fs.get_file(
+            "s3://bucket/key", str(lpath), callback=Recording(), block_size=4, max_workers=2
+        )
+        assert lpath.read_bytes() == data
+        assert updates == [min(4, len(data) - start) for start in range(0, len(data), 4)]
+        assert len(ranges) == len(updates)
+
+    def test_get_file_constructs_no_data_cache(self):
+        # GH-1323: the download reads each range once; a data cache, which
+        # open() constructed, such as "all", read the whole object first.
+        fs, ranges = self._make_object_fs(b"0123456789")
+        outfile = io.BytesIO()
+        fs.get_file(
+            "s3://bucket/key",
+            outfile=outfile,
+            block_size=4,
+            max_workers=4,
+            cache_type="all",
+            cache_options={"unused": True},
+        )
+        assert outfile.getvalue() == b"0123456789"
+        assert sorted(ranges) == ["bytes=0-3", "bytes=4-7", "bytes=8-9"]
+
+    @pytest.mark.parametrize("compressed", [False, True])
+    @pytest.mark.parametrize("block_size", [0, -1])
+    def test_get_file_non_positive_block_size(self, block_size, compressed):
+        # GH-1323: a block size that is not positive reads the object in one
+        # range, as read() reads the rest, and with compression takes a
+        # positive default; the waves read nothing, and the block cache of
+        # the decompressing path failed.
+        data = b"0123456789"
+        fs, ranges = self._make_object_fs(gzip.compress(data) if compressed else data)
+        # Accepted by the constructor; DEFAULT_BLOCK_SIZE then applies.
+        fs.default_block_size = -1
+        outfile = io.BytesIO()
+        fs.get_file(
+            "s3://bucket/key",
+            outfile=outfile,
+            block_size=block_size,
+            max_workers=1,
+            compression="gzip" if compressed else None,
+        )
+        assert outfile.getvalue() == data
+        if not compressed:
+            assert ranges == ["bytes=0-9"]
+
+    def test_get_file_compression_ignores_cache_type(self):
+        # GH-1323: the decompressed download reads one block at a time
+        # through its own cache; the caller's "all" read the whole object
+        # when the file was opened.
+        data = bytes(range(256)) * 64
+        compressed = gzip.compress(data, compresslevel=0)
+        fs, ranges = self._make_object_fs(compressed)
+        outfile = io.BytesIO()
+        fs.get_file(
+            "s3://bucket/key",
+            outfile=outfile,
+            compression="gzip",
+            block_size=1024,
+            # One worker, so that a whole-object read is one request.
+            max_workers=1,
+            cache_type="all",
+        )
+        assert outfile.getvalue() == data
+        assert f"bytes=0-{len(compressed) - 1}" not in ranges
+
+    def test_get_file_failed_range_reads_no_further_wave(self):
+        # GH-1323: a failed range stops the download: no further wave is
+        # read, and nothing of the failed wave is written.
+        fs, _ = self._make_object_fs(b"0123456789")
+        get_object = fs._client.get_object.side_effect
+        ranges = []
+
+        def failing(**request):
+            ranges.append(request["Range"])
+            if request["Range"] == "bytes=4-7":
+                # Once the other range of the wave has been requested, which
+                # would otherwise find the batch stopped.
+                poll_until(lambda: "bytes=0-3" in ranges, "the first range was not requested")
+                raise OSError("failed")
+            return get_object(**request)
+
+        fs._client.get_object.side_effect = failing
+        outfile = io.BytesIO()
+        with pytest.raises(OSError, match="failed"):
+            fs.get_file("s3://bucket/key", outfile=outfile, block_size=4, max_workers=2)
+        assert outfile.getvalue() == b""
+        assert sorted(ranges) == ["bytes=0-3", "bytes=4-7"]
+
+    def test_get_file_holds_one_wave(self):
+        # GH-1323 (Q2): the bodies of a wave are dropped once written, so
+        # that they are not kept while the next wave is read.
+        fs, _ = self._make_object_fs(b"0123456789")
+        refs: dict[int, weakref.ref] = {}
+        held = []
+
+        class Body(bytearray):
+            # Unlike bytes, weakly referenceable.
+            pass
+
+        get_object = fs.core.get_object
+
+        def read(path, range_, **kwargs):
+            if range_[0] >= 8:
+                # The second wave: no body of the first is alive, once the
+                # threads that returned them have returned themselves.
+                poll_until(
+                    lambda: all(ref() is None for ref in refs.values()),
+                    "a body of the first wave is held",
+                    timeout=2,
+                )
+                held.append(range_)
+            body = Body(get_object(path, range_, **kwargs))
+            refs[range_[0]] = weakref.ref(body)
+            return body
+
+        fs.core.get_object = read
+        gc.disable()
+        try:
+            fs.get_file("s3://bucket/key", outfile=io.BytesIO(), block_size=4, max_workers=2)
+        finally:
+            gc.enable()
+        assert held == [(8, 10)]
+
+    @pytest.mark.parametrize("failure", ["write", "wrapped_write", "callback", "interrupt"])
+    def test_get_file_failure_while_writing_keeps_no_bodies(self, failure):
+        # GH-1323 (F5): a failure while the bodies of a wave are written,
+        # including one that a write wraps in another error, keeps none of
+        # them in the traceback.
+        fs, _ = self._make_object_fs(b"0123456789")
+        refs = []
+
+        class Body(bytearray):
+            # Unlike bytes, weakly referenceable.
+            pass
+
+        get_object = fs.core.get_object
+
+        def read(path, range_, **kwargs):
+            body = Body(get_object(path, range_, **kwargs))
+            refs.append(weakref.ref(body))
+            return body
+
+        fs.core.get_object = read
+
+        class Outfile(io.BytesIO):
+            def write(self, data):
+                if failure == "write":
+                    raise OSError("failed")
+                if failure == "wrapped_write":
+                    try:
+                        self._write(data)
+                    except ValueError as e:
+                        raise OSError("failed") from e
+                if failure == "interrupt":
+                    raise KeyboardInterrupt
+                return super().write(data)
+
+            def _write(self, data):
+                raise ValueError("inner")
+
+        class Failing(Callback):
+            def relative_update(self, inc=1):
+                if failure == "callback":
+                    raise OSError("failed")
+
+        gc.disable()
+        try:
+            with pytest.raises((OSError, KeyboardInterrupt)) as info:
+                fs.get_file(
+                    "s3://bucket/key",
+                    outfile=Outfile(),
+                    callback=Failing(),
+                    block_size=4,
+                    max_workers=2,
+                )
+            assert info.value.__traceback__ is not None
+            assert len(refs) == 2
+            assert all(ref() is None for ref in refs)
+        finally:
+            gc.enable()
+
+    def test_get_file_request_parameters(self):
+        # GH-1323: every range of a download carries the version, the
+        # condition on the ETag looked up when it starts, and the
+        # parameters of the call, as the reads of open() do.
+        fs, _ = self._make_object_fs(b"0123456789")
+        fs.info.return_value = S3Object(
+            init={"Key": "key", "ETag": '"e"'},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="key",
+        )
+        fs.info.return_value.size = 10
+
+        fs.get_file(
+            "s3://bucket/key?versionId=v1",
+            outfile=io.BytesIO(),
+            block_size=4,
+            max_workers=2,
+            RequestPayer="requester",
+        )
+        requests = fs._client.get_object.call_args_list
+        assert len(requests) == 3
+        assert {
+            (c.kwargs["VersionId"], c.kwargs["IfMatch"], c.kwargs["RequestPayer"]) for c in requests
+        } == {("v1", '"e"', "requester")}
+
+    @pytest.mark.parametrize(
+        ("rpath", "compression", "compressed"),
+        [
+            ("s3://bucket/key", "gzip", True),
+            # Inferred from the key, without the version.
+            ("s3://bucket/key.gz?versionId=v1", "infer", True),
+            # Nothing to infer: read in parallel ranges, with the size.
+            ("s3://bucket/key", "infer", False),
+        ],
+    )
+    def test_get_file_compression(self, rpath, compression, compressed):
+        # GH-1323: with compression, the object is decompressed into the
+        # destination; the size of the decompressed data is unknown. It
+        # raised AttributeError, since the decompressor has no size.
+        data = b"0123456789" * 100
+        fs, _ = self._make_object_fs(gzip.compress(data) if compressed else data)
+        outfile = io.BytesIO()
+        callback = Callback()
+        fs.get_file(rpath, outfile=outfile, callback=callback, compression=compression)
+        assert outfile.getvalue() == data
+        assert callback.size == (None if compressed else len(data))
+        assert callback.value == len(data)
 
     def test_cat_ranges_range(self):
         fs, ranges = self._make_object_fs(b"0123456789")
