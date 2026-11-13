@@ -191,12 +191,29 @@ def missing_api_reason(case: Case) -> str | None:
     return None
 
 
+def client_options(settings: Settings, case: Case) -> dict[str, Any]:
+    """Return the botocore Config options of the S3 clients of a filesystem case.
+
+    Args:
+        settings: Configuration with the named client options.
+        case: Filesystem case.
+
+    Returns:
+        The case's connection pool size and the options of its client.
+    """
+    return {
+        "max_pool_connections": case.pool_connections,
+        **settings.filesystem_clients[case.client],
+    }
+
+
 def filesystem(settings: Settings, case: Case, session_: Any, connection: Any) -> Any:
     """Create the filesystem of a case, with its S3 client.
 
     The PyAthena filesystems share the connection's S3 client, whose
-    connection pool has the case's size. s3fs creates its own client from the
-    session's credentials, with a connection pool of the same size, and takes
+    connection pool has the case's size and which takes the options of the
+    case's client (see :func:`client_options`). s3fs creates its own client
+    from the session's credentials, with the same pool size and options, and takes
     the case's ``max_workers`` as its ``max_concurrency``, the number of
     parallel range requests of ``get_file()`` and parts of ``put_file()``.
     Its client is connected here, as the PyAthena filesystems take the
@@ -230,7 +247,7 @@ def filesystem(settings: Settings, case: Case, session_: Any, connection: Any) -
             config_kwargs={
                 "connect_timeout": 10,
                 "read_timeout": 60,
-                "max_pool_connections": case.pool_connections,
+                **client_options(settings, case),
             },
             max_concurrency=case.max_workers,
             skip_instance_cache=True,
@@ -287,7 +304,7 @@ async def run_filesystem(
         region_name=settings.region,
         work_group=settings.workgroup,
         config=Config(connect_timeout=10, read_timeout=60),
-        s3_config=Config(max_pool_connections=case.pool_connections),
+        s3_config=Config(**client_options(settings, case)),
     )
     fs = filesystem(settings, case, session_, connection)
     local = temp_dir / "object"

@@ -228,13 +228,28 @@ The filesystem suite transfers one S3 object through PyAthena's `S3FileSystem` (
 Its operations, selected with `--transport`, are:
 
 - `read`: one `read()` of the whole object from a file opened with `block_size`; PyAthena's files read it as parallel range requests of that size and hold the parts and the joined object, about twice the object's size, in memory, while s3fs's file reads it as one stream through fsspec's read-ahead cache;
-- `get`: `get_file()` to a local file in the trial's temporary directory; PyAthena's reads one block at a time through a file opened with `block_size`, whose `bytes` cache requests the next block with the first read and one block at a time afterwards, and s3fs's reads parallel ranges of `chunksize` with `max_concurrency` requests at a time;
+- `get`: `get_file()` to a local file in the trial's temporary directory; PyAthena's reads waves of up to `max_workers` parallel ranges of `block_size`, at most as many as the request pool runs, and writes each wave before it reads the next (#1323), and s3fs's reads parallel ranges of `chunksize` with `max_concurrency` requests at a time;
 - `write`: writes through a file opened with `block_size`, which uploads the object as a multipart upload with parts of that size; PyAthena's files upload up to `max_workers` parts at a time, and s3fs's file one part at a time;
 - `put`: `put_file()` from a sparse local file of the object's size, so that no disk read bounds the upload; PyAthena's uploads up to `max_workers` parts of `block_size` at a time, and s3fs's `max_concurrency` parts of `chunksize`, or one PutObject for an object below both twice `chunksize` and 5 GiB;
 - `copy`: `cp_file()`, or `_cp_file()` of `AioS3FileSystem`, with parts of `block_size`; PyAthena copies an object over 5 GiB as a multipart copy with up to `max_workers` part copies at a time, and s3fs copies one over 150 MiB (`s3fs.core.MANAGED_COPY_THRESHOLD`) as a multipart copy of one part at a time; the copies of smaller objects, single CopyObject requests, are recorded as unsupported; PyAthena's copies exclude tags and annotations, which the generated objects do not have.
 
 Each case sets the filesystem's `max_workers` and the S3 client's `max_pool_connections`, through the connection's `s3_config` for PyAthena, and as `max_concurrency` and `config_kwargs` for s3fs, which creates its own client from the session's credentials.
 The `[filesystem]` section of `config.toml` sets the swept values, 8 and 40 workers and pools of 10 and 40 by default, and a `block_size` of 8 MiB.
+Its `clients` tables name sets of other botocore `Config` options of the S3 clients, passed the same way with every API; each is a case, and a name other than `default`, the only one by default, ends the case IDs, such as `filesystem-s3-sync-put-w8-p10-required`.
+The clients may not set `max_pool_connections`, which `pool_connections` sweeps.
+For example, the upload checksum settings of #1325:
+
+```toml
+[filesystem.clients.default]
+
+[filesystem.clients.required]
+request_checksum_calculation = "when_required"
+
+[filesystem.clients.unsigned]
+request_checksum_calculation = "when_required"
+s3 = { payload_signing_enabled = false }
+```
+
 The suite's scales are the object sizes in bytes in `[filesystem] sizes`, not the row counts in `[scales]`: 64 MiB (small), 256 MiB (medium), 1 GiB (large), and 6 GiB (xlarge) by default.
 A `get` also writes the object to the trial's temporary directory, which the parent process measures as the peak temp dir and removes; on the Amazon Linux 2023 hosts, that directory is on the tmpfs `/tmp`, so the object stays in memory outside the process's RSS. A `put` reads a sparse file, which no disk bounds.
 
@@ -295,11 +310,12 @@ Its operations, selected with `--transport`, and the result each trial checks ar
 - `find`: `find(prefix)` of the set's listing; the keys returned;
 - `info`: `info(path)` of each file, through a thread pool of the case's concurrency for the synchronous filesystem and through batches of `fsspec.asyn._run_coros_in_chunks` for the other two; the entries returned.
 
-Each case sets one concurrency from `[objects] concurrency`, 8 and 40 by default: the filesystem's `max_workers` and connection pool, as in the filesystem suite, and the `batch_size` of the `aio` and s3fs operations, which is the number of files they transfer at the same time.
-The synchronous `S3FileSystem` inherits fsspec's sequential loops for `cat`, `get`, `put`, `pipe`, and `copy`, so its concurrency only sizes its executor and pool; its `rm` and the other two APIs' delete in DeleteObjects requests of 1,000 keys, which no batch size affects; and `find` pages through ListObjectsV2 with every API.
+Each case sets one concurrency from `[objects] concurrency`, 8 and 40 by default: the filesystem's `max_workers` and connection pool, as in the filesystem suite, and the `batch_size` of the `cat`, `get`, `put`, `pipe`, and `copy` operations of every API, which is the number of files they transfer at the same time; the synchronous `S3FileSystem` runs them concurrently since #1322.
+With a concurrency of 1, each operation transfers one object at a time, so its time per object is the latency of one call.
+`rm` deletes in DeleteObjects requests of 1,000 keys with every API, which no batch size affects, and `find` pages through ListObjectsV2 with every API.
 The `aio` API awaits each operation's coroutine on the trial's event loop, whose lag is sampled; the `sync` and `s3fs` APIs call the operation on the trial's thread.
 Besides the metrics of the filesystem suite, each trial records the objects per second and the process CPU time of the operation, user and system, as `cpu_seconds`.
-The objects that `put`, `pipe`, and `copy` create, the copies that an `rm` trial prepares, and the local files of `get` and `put`, are removed after the check, also when the preparation or the operation failed, and a removal that fails makes the trial an error; a write of the `aio` API that a failed batch leaves running in a thread may create an object after the removal.
+The objects that `put`, `pipe`, and `copy` create, the copies that an `rm` trial prepares, and the local files of `get` and `put`, are removed after the check, also when the preparation or the operation failed, and a removal that fails makes the trial an error.
 `cleanup` removes the sets and any remaining trial objects.
 
 ```bash

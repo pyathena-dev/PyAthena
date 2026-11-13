@@ -19,6 +19,7 @@ from pyathena_bench import filesystem as filesystem_module
 from pyathena_bench.cases import SINGLE_COPY_THRESHOLDS, Case
 from pyathena_bench.config import Settings
 from pyathena_bench.filesystem import (
+    client_options,
     filesystem,
     get_object,
     missing_api_reason,
@@ -263,6 +264,47 @@ def test_s3fs_filesystem_takes_the_session_credentials_and_the_case_sizes(monkey
             "skip_instance_cache": True,
         }
     ]
+
+
+@pytest.mark.parametrize("api", ["sync", "aio", "s3fs"])
+def test_client_options_of_a_case(api, monkeypatch):
+    # GH-1325: the S3 client of every API takes the case's pool and the options of its
+    # client; the PyAthena filesystems get them through the connection's s3_config.
+    settings = Settings(
+        filesystem_clients={
+            "default": {},
+            "unsigned": {
+                "request_checksum_calculation": "when_required",
+                "s3": {"payload_signing_enabled": False},
+            },
+        }
+    )
+    case = Case(
+        "s3",
+        api,
+        "put",
+        "bytes",
+        suite="filesystem",
+        max_workers=8,
+        pool_connections=10,
+        client="unsigned",
+    )
+    expected = {
+        "max_pool_connections": 10,
+        "request_checksum_calculation": "when_required",
+        "s3": {"payload_signing_enabled": False},
+    }
+    assert client_options(settings, case) == expected
+    if api == "s3fs":
+        s3fs = RecordingS3FS()
+        monkeypatch.setattr("pyathena_bench.filesystem.s3fs", s3fs)
+        session = SimpleNamespace(get_credentials=lambda: FakeCredentials())
+        filesystem(settings, case, session, connection=None)
+        assert s3fs.created[0]["config_kwargs"] == {
+            "connect_timeout": 10,
+            "read_timeout": 60,
+            **expected,
+        }
 
 
 def test_s3fs_api_needs_the_s3fs_package(monkeypatch):

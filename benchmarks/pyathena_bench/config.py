@@ -18,6 +18,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from botocore.config import Config
+
 FLAT_COLUMNS = (
     '"timestamp", country_code, url, project, file.filename AS filename, '
     "file.version AS version, file.type AS file_type, details.python AS python, "
@@ -82,6 +84,10 @@ class Settings:
     filesystem_block_size: int = 8 * 2**20
     filesystem_max_workers: list[int] = field(default_factory=lambda: [8, 40])
     filesystem_pool_connections: list[int] = field(default_factory=lambda: [10, 40])
+    # Named sets of botocore Config options of the S3 clients of the filesystem suite,
+    # such as its checksum settings; each is a case, and those other than "default"
+    # add their names to the case IDs.
+    filesystem_clients: dict[str, dict[str, Any]] = field(default_factory=lambda: {"default": {}})
     # The objects suite: object counts by scale name, the size of each object, the
     # keys of the listing set per object, and the swept concurrency, which is the
     # filesystem's max_workers and connection pool and the batch size of its operations.
@@ -139,6 +145,18 @@ class Settings:
             values = getattr(self, name)
             if not values or any(type(v) is not int or v < 1 for v in values):
                 raise ValueError(f"Invalid {name}")
+        if not self.filesystem_clients:
+            raise ValueError("At least one filesystem client is required")
+        for name, options in self.filesystem_clients.items():
+            identifier(name)
+            if not isinstance(options, dict):
+                raise ValueError("Filesystem clients must be tables of botocore Config options")
+            if "max_pool_connections" in options:
+                raise ValueError("pool_connections sets the connection pool of the clients")
+            try:
+                Config(**options)
+            except TypeError as e:
+                raise ValueError(f"Invalid options of the filesystem client {name}: {e}") from e
         if not self.objects_counts:
             raise ValueError("Objects counts must name at least one scale")
         for name, count in self.objects_counts.items():
