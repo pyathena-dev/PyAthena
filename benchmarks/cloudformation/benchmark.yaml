@@ -53,12 +53,19 @@ Parameters:
     Description: Image for arm64 hosts.
   UvVersion:
     Type: String
-    Default: '0.12.5'
+    # A release that knows the Python versions below; 0.12.5 knows no 3.15 release.
+    Default: '0.13.7'
     AllowedPattern: '[0-9]+\.[0-9]+\.[0-9]+'
   PythonVersion:
     Type: String
     Default: '3.12.14'
     AllowedPattern: '3\.12\.[0-9]+'
+  # The filesystem environments, .venv-fs315 and .venv-fs315t, of this version and its
+  # free-threaded build.
+  FilesystemPythonVersion:
+    Type: String
+    Default: '3.15.2'
+    AllowedPattern: '3\.15\.[0-9]+'
   WorkGroup:
     Type: String
     Default: pyathena
@@ -353,17 +360,20 @@ Resources:
             - |
               #!/bin/bash
               set -euo pipefail
-              dnf install -y git aws-cfn-bootstrap
+              # gcc builds the wheels that the free-threaded interpreter lacks, such as psutil's.
+              dnf install -y git aws-cfn-bootstrap gcc
               trap '/opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource Fleet --region ${AWS::Region}' EXIT
               curl --proto '=https' --tlsv1.2 -LsSf https://astral.sh/uv/${UvVersion}/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
               git clone https://github.com/pyathena-dev/PyAthena.git /opt/pyathena
               git -C /opt/pyathena fetch origin ${GitCommit}
               git -C /opt/pyathena checkout --detach ${GitCommit}
               export UV_PYTHON_INSTALL_DIR=/opt/uv-python
-              uv python install ${PythonVersion}
+              uv python install ${PythonVersion} ${FilesystemPythonVersion} ${FilesystemPythonVersion}t
               uv sync --directory /opt/pyathena/benchmarks --locked --no-default-groups --group polars1 --python ${PythonVersion}
               UV_PROJECT_ENVIRONMENT=/opt/pyathena/.venv-polars2 uv sync --directory /opt/pyathena/benchmarks --locked --no-default-groups --group polars2 --python ${PythonVersion}
               UV_PROJECT_ENVIRONMENT=/opt/pyathena/.venv-s3fs uv sync --directory /opt/pyathena/benchmarks --locked --no-default-groups --group s3fs --python ${PythonVersion}
+              UV_PROJECT_ENVIRONMENT=/opt/pyathena/.venv-fs315 uv sync --directory /opt/pyathena/benchmarks --locked --only-group filesystem --python ${FilesystemPythonVersion}
+              UV_PROJECT_ENVIRONMENT=/opt/pyathena/.venv-fs315t uv sync --directory /opt/pyathena/benchmarks --locked --only-group filesystem --python ${FilesystemPythonVersion}t
               chmod -R a+rX /opt/uv-python
               chown -R ec2-user:ec2-user /opt/pyathena
               printf '%s\n' '${AWS::StackId}' > /opt/pyathena/benchmarks/stack-id.txt

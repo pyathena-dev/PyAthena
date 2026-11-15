@@ -34,7 +34,6 @@ from typing import Any
 import psutil
 
 from pyathena.util import parse_output_location
-from pyathena_bench.adapters import BACKEND_VERSIONS, Adapter, run_adapter
 from pyathena_bench.aws import (
     cancel_queries,
     client,
@@ -51,6 +50,25 @@ from pyathena_bench.config import Settings, select_sql, write_json
 from pyathena_bench.filesystem import missing_api_reason, run_filesystem
 from pyathena_bench.objects import run_objects
 from pyathena_bench.report import CHECKPOINT, read_trials, trial_key
+
+# The Athena suites' adapters import every DataFrame backend; the filesystem
+# environment, for interpreters that lack their wheels, has none of them and runs
+# only the filesystem and objects suites.
+try:
+    from pyathena_bench import adapters
+except ModuleNotFoundError:
+    adapters = None  # type: ignore[assignment]
+
+
+def gil_enabled() -> bool:
+    """Return whether the GIL is enabled, also after an import re-enabled it.
+
+    Returns:
+        False only on a free-threaded interpreter that still runs without the GIL.
+    """
+    is_gil_enabled = getattr(sys, "_is_gil_enabled", None)
+    return True if is_gil_enabled is None else bool(is_gil_enabled())
+
 
 _logger = logging.getLogger(__name__)
 
@@ -140,7 +158,11 @@ def worker(pipe: Connection, payload: dict[str, Any]) -> None:
                 Path(payload["temp_dir"]),
             )
         else:
-            adapter = Adapter(
+            if adapters is None:
+                raise RuntimeError(
+                    "The Athena suites need the DataFrame backends of the default environment"
+                )
+            adapter = adapters.Adapter(
                 settings,
                 case,
                 session_,
@@ -148,13 +170,15 @@ def worker(pipe: Connection, payload: dict[str, Any]) -> None:
                 payload["output"],
                 payload["temp_table"],
             )
-            measurement = run_adapter(
+            measurement = adapters.run_adapter(
                 adapter, payload["sql"], payload["expected_rows"], payload.get("fixture")
             )
         observer.send({"event": "ready"})
         pipe.recv()
         result = asyncio.run(measurement)
         result["athena"] = list(observer.completed.values())
+        # Read after the measurement, which imports the filesystem's libraries.
+        result["gil_enabled"] = gil_enabled()
         for query in result["queries"]:
             if query.get("query_id") is None and len(observer.completed) == 1:
                 query["query_id"] = next(iter(observer.completed))
@@ -404,7 +428,8 @@ def environment(settings: Settings) -> dict[str, Any]:
         "python": sys.version,
         "platform": platform.platform(),
         "machine": platform.machine(),
-        "backends_imported_before_baseline": BACKEND_VERSIONS,
+        "backends_imported_before_baseline": adapters.BACKEND_VERSIONS if adapters else {},
+        "gil_enabled": gil_enabled(),
         "cpu_count": psutil.cpu_count(),
         "memory_bytes": psutil.virtual_memory().total,
         "dependencies": {d.metadata["Name"]: d.version for d in importlib.metadata.distributions()},

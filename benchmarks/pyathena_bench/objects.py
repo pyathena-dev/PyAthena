@@ -22,10 +22,10 @@ from fsspec.asyn import _run_coros_in_chunks, sync
 
 from pyathena import connect
 from pyathena.util import parse_output_location
-from pyathena_bench.adapters import heartbeat
 from pyathena_bench.cases import Case
 from pyathena_bench.config import Settings
 from pyathena_bench.filesystem import filesystem
+from pyathena_bench.sampling import heartbeat
 
 # The copies name both directives, so that S3 neither reads the tags nor the
 # annotations of the sources, which the generated objects do not have.

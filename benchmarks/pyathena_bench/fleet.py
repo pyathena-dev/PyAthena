@@ -59,10 +59,15 @@ QUIESCE_RETRIES = 10
 QUIESCE_ROUNDS = 3
 # Virtual environments that a job can name, each synced with the dependency group of
 # the same name beside the default environment, which has the polars1 group.
-ENVIRONMENTS = ("polars2", "s3fs")
+ENVIRONMENTS = ("polars2", "s3fs", "fs315", "fs315t")
 # APIs whose cases run only in a named environment, which their jobs get without a
 # suffix to their IDs, as the API already names it.
 API_ENVIRONMENTS = {"s3fs": "s3fs"}
+# Environments of the filesystem group, synced alone with Python 3.15 and its
+# free-threaded build: they run only the filesystem and objects suites, the s3fs API
+# included, since they have no DataFrame backend but have s3fs.
+FILESYSTEM_ENVIRONMENTS = ("fs315", "fs315t")
+FILESYSTEM_SUITES = ("filesystem", "objects")
 
 
 @dataclass(frozen=True)
@@ -185,16 +190,24 @@ def expand_jobs(
             counts under one stored configuration.
         environment: One of ``ENVIRONMENTS`` that runs the jobs, which their IDs
             name, or None for the default environment. Jobs of an API in
-            ``API_ENVIRONMENTS`` run in that API's environment instead.
+            ``API_ENVIRONMENTS`` run in that API's environment instead, except
+            in one of ``FILESYSTEM_ENVIRONMENTS``, which has every API of the
+            filesystem and objects suites.
 
     Returns:
         Job dictionaries ordered with API-heavy jobs first and longer jobs earlier.
 
     Raises:
-        ValueError: If no case matches the selection, or ``environment`` differs
-            from the environment of a selected API.
+        ValueError: If no case matches the selection, ``environment`` differs
+            from the environment of a selected API, or one of
+            ``FILESYSTEM_ENVIRONMENTS`` is given a suite other than the
+            filesystem and objects suites.
     """
     jobs: list[dict[str, Any]] = []
+    if environment in FILESYSTEM_ENVIRONMENTS and set(suites) - set(FILESYSTEM_SUITES):
+        raise ValueError(
+            f"The {environment} environment runs only the filesystem and objects suites"
+        )
     for suite in suites:
         for scale in scales:
             rows = settings.suite_scales(suite)[scale]
@@ -224,7 +237,11 @@ def expand_jobs(
                         chunks = [str(c) for c in sorted({c.chunksize or 0 for c in cases})]
                         base += "-c" + "_".join(chunks)
                         args += ["--chunksize", *chunks]
-                    api_environment = API_ENVIRONMENTS.get(api)
+                    api_environment = (
+                        None
+                        if environment in FILESYSTEM_ENVIRONMENTS
+                        else API_ENVIRONMENTS.get(api)
+                    )
                     if api_environment and environment not in (None, api_environment):
                         raise ValueError(
                             f"The {api} API runs in the {api_environment} environment, "

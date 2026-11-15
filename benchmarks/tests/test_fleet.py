@@ -300,6 +300,26 @@ class TestExpandJobsFilesystem:
         assert {j.get("environment") for j in jobs} == {"s3fs"}
         assert any(j["id"] == "filesystem-large-flat-s3-sync-read-bytes-s3fs" for j in jobs)
 
+    @pytest.mark.parametrize("environment", ["fs315", "fs315t"])
+    def test_filesystem_environments_run_every_api_of_their_suites(self, environment):
+        # GH-1324: the filesystem environments have s3fs, so its jobs run there and
+        # carry the suffix of the environment, as the jobs of the other APIs do.
+        settings = replace(SETTINGS, filesystem_sizes={"large": 2**30})
+        jobs = expand_jobs(
+            settings, ["filesystem"], ["large"], ["flat"], Filters(), environment=environment
+        )
+        assert {j["environment"] for j in jobs} == {environment}
+        assert {
+            f"filesystem-large-flat-s3-sync-read-bytes-{environment}",
+            f"filesystem-large-flat-s3-s3fs-read-bytes-{environment}",
+        } <= {j["id"] for j in jobs}
+
+    @pytest.mark.parametrize("suite", ["single", "concurrent", "init"])
+    def test_filesystem_environments_reject_the_athena_suites(self, suite):
+        # GH-1324: they have no DataFrame backend.
+        with pytest.raises(ValueError, match="runs only the filesystem and objects suites"):
+            expand_jobs(SETTINGS, [suite], ["small"], ["flat"], Filters(), environment="fs315t")
+
 
 class TestExpandJobsArraysize:
     def test_row_output_jobs_keep_one_arraysize_for_every_family(self):

@@ -192,4 +192,17 @@ def test_hosts_start_the_queue_worker_and_expose_their_tags():
         "UV_PROJECT_ENVIRONMENT=/opt/pyathena/.venv-polars2 uv sync --directory "
         "/opt/pyathena/benchmarks --locked --no-default-groups --group polars2"
     ) in user_data
+    # GH-1324: the filesystem environments have the filesystem group alone, with Python
+    # 3.15 and its free-threaded build, for which gcc builds psutil.
+    assert "dnf install -y git aws-cfn-bootstrap gcc" in user_data
+    assert (
+        "uv python install ${PythonVersion} ${FilesystemPythonVersion} ${FilesystemPythonVersion}t"
+    ) in user_data
+    for name, version in (("fs315", ""), ("fs315t", "t")):
+        assert (
+            f"UV_PROJECT_ENVIRONMENT=/opt/pyathena/.venv-{name} uv sync --directory "
+            "/opt/pyathena/benchmarks --locked --only-group filesystem "
+            f"--python ${{FilesystemPythonVersion}}{version}"
+        ) in user_data
+    assert template["Parameters"]["FilesystemPythonVersion"]["Default"].startswith("3.15.")
     assert template["Parameters"]["QueueName"]["Default"] == ""

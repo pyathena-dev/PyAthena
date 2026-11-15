@@ -23,9 +23,9 @@ from pyathena.filesystem import s3_filesystem
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.util import parse_output_location
-from pyathena_bench.adapters import heartbeat
 from pyathena_bench.cases import Case
 from pyathena_bench.config import Settings
+from pyathena_bench.sampling import heartbeat
 
 try:
     import s3fs
