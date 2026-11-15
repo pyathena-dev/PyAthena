@@ -781,7 +781,6 @@ class S3FileSystem(AbstractFileSystem):
     def _head_object(
         self,
         path: S3Path,
-        version_id: str | None = None,
         refresh: bool = False,
         lookup_kwargs: Mapping[str, Any] | None = None,
     ) -> S3Object | None:
@@ -797,7 +796,6 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             path: The path of the object, optionally with a version ID.
-            version_id: The version to get when the path has no version.
             refresh: If True, bypass the cache and call HeadObject.
             lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
                 to send with the request.
@@ -805,8 +803,6 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The object, or None if it does not exist.
         """
-        if version_id and not path.version_id:
-            path = path.with_version_id(version_id)
         version_id = path.version_id
         # Chosen before a version_aware lookup pins the version, so that the
         # lookup of the key stays cached under the key.
@@ -1229,19 +1225,17 @@ class S3FileSystem(AbstractFileSystem):
                 version_id=None,
             )
         s3_path = S3Path.parse(path)
-        version_id = s3_path.version_id if s3_path.version_id else kwargs.pop("version_id", None)
-        return self._info(
-            s3_path,
-            refresh=refresh,
-            version_id=version_id,
-            lookup_kwargs=self._get_lookup_kwargs(kwargs),
+        version_id = kwargs.pop("version_id", None)
+        if version_id and not s3_path.version_id:
+            s3_path = s3_path.with_version_id(version_id)
+        return self._path_info(
+            s3_path, refresh=refresh, lookup_kwargs=self._get_lookup_kwargs(kwargs)
         )
 
-    def _info(
+    def _path_info(
         self,
         path: S3Path,
         refresh: bool = False,
-        version_id: str | None = None,
         lookup_kwargs: Mapping[str, Any] | None = None,
     ) -> S3Object:
         """Return information about the bucket, object or directory of a path.
@@ -1251,9 +1245,8 @@ class S3FileSystem(AbstractFileSystem):
         in its name.
 
         Args:
-            path: The path.
+            path: The path, with the version to look up, if any.
             refresh: If True, bypass the cache and query S3.
-            version_id: The version to look up when the path has none.
             lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``).
 
         Returns:
@@ -1262,8 +1255,6 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             FileNotFoundError: If the path does not exist.
         """
-        if version_id and not path.version_id:
-            path = path.with_version_id(version_id)
         version_id = path.version_id
         lookup_kwargs = lookup_kwargs or {}
         name = path.name
@@ -1385,6 +1376,36 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             ValueError: If ``maxdepth`` is less than 1 or the path is the root.
         """
+        return [f for f, _ in self._find_paths(path, maxdepth, withdirs, **kwargs)]
+
+    def _find_paths(
+        self,
+        path: str | os.PathLike[str],
+        maxdepth: int | None = None,
+        withdirs: bool | None = None,
+        **kwargs,
+    ) -> list[tuple[S3Object, S3Path]]:
+        """List the objects below a path as :meth:`_find` does, with the paths they name.
+
+        A path with a version names the version that it gives, which its
+        entry may name after its key alone. A listed entry names its bucket
+        and key (see :meth:`_entry_path`).
+
+        Args:
+            path: S3 path to search under.
+            maxdepth: Maximum number of levels to descend, at least 1
+                (None for unlimited).
+            withdirs: Whether to include directories in the result.
+            **kwargs: Additional arguments including ``prefix`` and
+                ``refresh``, as described in ``find``.
+
+        Returns:
+            The objects found, and the directories if ``withdirs`` is True,
+            with the paths that they name.
+
+        Raises:
+            ValueError: If ``maxdepth`` is less than 1 or the path is the root.
+        """
         if maxdepth is not None and maxdepth < 1:
             raise ValueError("maxdepth must be at least 1")
         path = self._strip_protocol(path)
@@ -1395,14 +1416,15 @@ class S3FileSystem(AbstractFileSystem):
         refresh = kwargs.pop("refresh", False)
 
         if s3_path.key and s3_path.version_id:
-            return self._ls_version(s3_path, refresh=refresh)
-        return self._find_under(
+            return [(f, s3_path) for f in self._ls_version(s3_path, refresh=refresh)]
+        found = self._find_under(
             self._directory_object(s3_path.bucket, s3_path.key),
             maxdepth=maxdepth,
             withdirs=withdirs,
             prefix=prefix,
             refresh=refresh,
         )
+        return [(f, self._entry_path(f)) for f in found]
 
     def _find_under(
         self,
@@ -1460,7 +1482,7 @@ class S3FileSystem(AbstractFileSystem):
             # As in fsspec, the path itself is returned if it is an object,
             # or with withdirs if it is a directory.
             try:
-                files = [self._info(S3Path(bucket, key), refresh=refresh)]
+                files = [self._path_info(S3Path(bucket, key), refresh=refresh)]
             except FileNotFoundError:
                 files = []
 
@@ -1755,8 +1777,8 @@ class S3FileSystem(AbstractFileSystem):
             The sizes by the names that the lookups give.
         """
         sizes: dict[str, int] = {}
-        for f in self._find(path, maxdepth=maxdepth, **kwargs):
-            info = self._info(self._entry_path(f))
+        for _, s3_path in self._find_paths(path, maxdepth=maxdepth, **kwargs):
+            info = self._path_info(s3_path)
             sizes[info["name"]] = info["size"]
         return sizes
 
@@ -1901,7 +1923,12 @@ class S3FileSystem(AbstractFileSystem):
             ValueError: If ``maxdepth`` is less than 1.
             FileNotFoundError: If nothing matches.
         """
-        return sorted({name for name, _ in self._expand_paths(path, recursive, maxdepth, **kwargs)})
+        # The expansion is sorted by name; a name of two paths is returned once.
+        return list(
+            dict.fromkeys(
+                name for name, _ in self._expand_paths(path, recursive, maxdepth, **kwargs)
+            )
+        )
 
     def _expand_paths(
         self, path, recursive: bool = False, maxdepth: int | None = None, **kwargs
@@ -1967,8 +1994,8 @@ class S3FileSystem(AbstractFileSystem):
                             add(f.name, self._entry_path(f))
                 continue
             if recursive:
-                for f in self._find(p, maxdepth=maxdepth, withdirs=True, **kwargs):
-                    add(f.name, self._entry_path(f))
+                for f, s3_path in self._find_paths(p, maxdepth=maxdepth, withdirs=True, **kwargs):
+                    add(f.name, s3_path)
             if p not in names and (not recursive or self.exists(p)):
                 add(p, S3Path.parse(p))
         if not out:
@@ -2056,7 +2083,7 @@ class S3FileSystem(AbstractFileSystem):
             try:
                 if use_listings and self._ls_from_cache(s3_path):
                     return True
-                info = self._info(s3_path, refresh=refresh, lookup_kwargs=lookup_kwargs)
+                info = self._path_info(s3_path, refresh=refresh, lookup_kwargs=lookup_kwargs)
                 return bool(info)
             except FileNotFoundError:
                 return False
@@ -3477,21 +3504,14 @@ class S3FileSystem(AbstractFileSystem):
                 exist.
         """
         path = stringify_path(path)
-        return self._cat_object(
-            S3Path.parse(path),
-            start=start,
-            end=end,
-            # info() strips the trailing slashes of a path.
-            lookup=S3Path.parse(self._strip_protocol(path)),
-            **kwargs,
-        )
+        return self._cat_object(S3Path.parse(path), start=start, end=end, name=path, **kwargs)
 
     def _cat_object(
         self,
         path: S3Path,
         start: int | None = None,
         end: int | None = None,
-        lookup: S3Path | None = None,
+        name: str | None = None,
         **kwargs,
     ) -> bytes:
         """Read the contents of the object of a path, as :meth:`cat_file` describes.
@@ -3501,8 +3521,10 @@ class S3FileSystem(AbstractFileSystem):
                 used as they are.
             start: Byte offset to start reading at, as in :meth:`cat_file`.
             end: Byte offset to stop reading at, as in :meth:`cat_file`.
-            lookup: The path whose information gives the size of the object
-                for a negative offset or an empty range, by default ``path``.
+            name: The path string that the caller passed, which ``info()``
+                looks up for the size of the object of a negative offset or
+                an empty range, and which a missing object is reported by;
+                None to look up ``path`` itself.
             **kwargs: Additional parameters passed to the GetObject API, and
                 ``version_id``, as in :meth:`cat_file`.
 
@@ -3514,7 +3536,7 @@ class S3FileSystem(AbstractFileSystem):
                 exist.
         """
         if not path.key:
-            raise FileNotFoundError(str(path))
+            raise FileNotFoundError(name or str(path))
         version_id = kwargs.pop("version_id", None)
         if path.version_id:
             version_id = path.version_id
@@ -3530,10 +3552,13 @@ class S3FileSystem(AbstractFileSystem):
                 # A negative offset needs the size of the object, and an
                 # empty range sends no GetObject request that would report a
                 # missing object.
-                info = self._info(
-                    lookup or path,
-                    version_id=version_id,
-                    lookup_kwargs=self._get_lookup_kwargs(kwargs),
+                lookup_kwargs = self._get_lookup_kwargs(kwargs)
+                info = (
+                    self.info(name, version_id=version_id, **lookup_kwargs)
+                    if name is not None
+                    else self._path_info(
+                        path.with_version_id(version_id), lookup_kwargs=lookup_kwargs
+                    )
                 )
                 if (
                     info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
@@ -3542,7 +3567,7 @@ class S3FileSystem(AbstractFileSystem):
                     # There is no object to read, as GetObject reports for
                     # the other ranges, or info() describes the key without
                     # the trailing slash of this one.
-                    raise FileNotFoundError(str(path))
+                    raise FileNotFoundError(name or str(path))
                 start, end, _ = slice(start, end).indices(info.get("size", 0))
             if start is not None or end is not None:
                 start = start or 0
@@ -4056,12 +4081,12 @@ class S3FileSystem(AbstractFileSystem):
         if s3_path.key and acl not in self.core.OBJECT_ACLS:
             raise ValueError(f"ACL not in {self.core.OBJECT_ACLS}.")
         if recursive and not (s3_path.key and s3_path.version_id):
-            found = self._find(path, withdirs=False)
-            items = [(self._entry_path(f), False) for f in found]
+            found = self._find_paths(path, withdirs=False)
+            items = [(s3_path, False) for _, s3_path in found]
             name = self._strip_protocol(path)
             # The key of the path as find() names it ("bucket//" is the bucket).
             root = S3Path.parse(name)
-            if root.key and found and name not in {f.name for f in found}:
+            if root.key and found and name not in {f.name for f, _ in found}:
                 # Objects lie below the key, so find() has not looked the key
                 # itself up; it may be an object too, which is skipped if missing.
                 items.append((root, True))

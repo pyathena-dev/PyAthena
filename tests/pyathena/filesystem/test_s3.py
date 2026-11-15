@@ -1237,6 +1237,13 @@ class TestS3FileSystem:
                 [("head_object", "a/x", None), ("head_object", "a/x?versionId=v1", None)],
                 id="du",
             ),
+            pytest.param(
+                # A path with a version still names the version.
+                lambda fs: fs.du("s3://bucket/a/x?versionId=v1"),
+                2,
+                [("head_object", "a/x", "v1")],
+                id="du-version",
+            ),
         ],
     )
     def test_fan_outs_act_on_listed_keys(self, call, result, sent):
