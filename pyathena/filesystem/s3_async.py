@@ -684,7 +684,7 @@ class AioS3FileSystem(AsyncFileSystem):
         await self._delete_objects(paths, max_workers=max_workers, **kwargs)
 
     async def _delete_objects(
-        self, paths: list[S3Path], max_workers: int | None = None, **kwargs
+        self, paths: list[str | S3Path], max_workers: int | None = None, **kwargs
     ) -> None:
         """Delete objects with parallel DeleteObjects requests.
 
@@ -788,7 +788,7 @@ class AioS3FileSystem(AsyncFileSystem):
             if isinstance(result, BaseException):
                 raise result
         await self._delete_objects(
-            [S3Path.parse(p1) for (p1, _), copied in zip(pairs, results, strict=True) if copied],
+            [p1 for (p1, _), copied in zip(pairs, results, strict=True) if copied],
             **self.core.operation_params("delete_objects", source_params),
         )
 
@@ -1038,12 +1038,17 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         # As in fsspec, the expansion does not receive the parameters of the
         # reads.
-        expanded = await self._thread_pool.run(
-            self._sync_fs._expand_paths, path, recursive=recursive
+        targets = self._sync_fs._first_targets(
+            await self._thread_pool.run(self._sync_fs._expand_paths, path, recursive=recursive)
         )
-        paths = [name for name, _ in expanded]
+        paths = list(targets)
         out = await _run_coros_in_chunks(
-            [self._cat_object(s3_path, **kwargs) for _, s3_path in expanded],
+            [
+                self._cat_file(target, **kwargs)
+                if isinstance(target, str)
+                else self._cat_object(target, **kwargs)
+                for target in targets.values()
+            ],
             batch_size=batch_size or self.batch_size,
             nofiles=True,
             return_exceptions=True,

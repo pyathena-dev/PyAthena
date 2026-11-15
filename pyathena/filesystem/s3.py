@@ -1384,12 +1384,13 @@ class S3FileSystem(AbstractFileSystem):
         maxdepth: int | None = None,
         withdirs: bool | None = None,
         **kwargs,
-    ) -> list[tuple[S3Object, S3Path]]:
+    ) -> list[tuple[S3Object, str | S3Path]]:
         """List the objects below a path as :meth:`_find` does, with the paths they name.
 
-        A path with a version names the version that it gives, which its
-        entry may name after its key alone. A listed entry names its bucket
-        and key (see :meth:`_entry_path`).
+        A listed entry names its bucket and key (see :meth:`_entry_path`),
+        and the path itself, also a version that its entry names after its
+        key alone, is named by the path string as given (see
+        :meth:`_find_under`).
 
         Args:
             path: S3 path to search under.
@@ -1416,15 +1417,15 @@ class S3FileSystem(AbstractFileSystem):
         refresh = kwargs.pop("refresh", False)
 
         if s3_path.key and s3_path.version_id:
-            return [(f, s3_path) for f in self._ls_version(s3_path, refresh=refresh)]
-        found = self._find_under(
+            return [(f, path) for f in self._ls_version(s3_path, refresh=refresh)]
+        return self._find_under(
             self._directory_object(s3_path.bucket, s3_path.key),
             maxdepth=maxdepth,
             withdirs=withdirs,
             prefix=prefix,
             refresh=refresh,
+            name=path,
         )
-        return [(f, self._entry_path(f)) for f in found]
 
     def _find_under(
         self,
@@ -1433,12 +1434,13 @@ class S3FileSystem(AbstractFileSystem):
         withdirs: bool | None = None,
         prefix: str = "",
         refresh: bool = False,
-    ) -> list[S3Object]:
-        """List the objects below a directory, as described in ``find``.
+        name: str | None = None,
+    ) -> list[tuple[S3Object, str | S3Path]]:
+        """List the objects below a directory, as described in ``find``, with the paths they name.
 
         The directory is listed by its key prefix (see
-        :meth:`_directory_prefix`), and looked up as an object by its bucket
-        and key, never by parsing its name.
+        :meth:`_directory_prefix`), never by parsing its name. A listed entry
+        names its bucket and key (see :meth:`_entry_path`).
 
         Args:
             directory: The bucket, the directory or the object to search
@@ -1449,11 +1451,17 @@ class S3FileSystem(AbstractFileSystem):
             prefix: Key prefix, relative to the directory, to filter the
                 listed keys by.
             refresh: If True, bypass the cache and list from S3.
+            name: The path string that the caller passed for the directory,
+                which names the directory itself and which ``info()`` looks
+                up when nothing is listed below it; None for a listed
+                directory, which names its bucket and key.
 
         Returns:
-            The objects found, and the directories if ``withdirs`` is True.
+            The objects found, and the directories if ``withdirs`` is True,
+            with the paths that they name.
         """
         bucket, key = directory.bucket, directory.key
+        own: str | S3Path = name if name is not None else S3Path(bucket, key)
         if maxdepth is not None:
             # The entries listed with the prefix lie as many levels further
             # below the path as the prefix has slashes.
@@ -1472,23 +1480,27 @@ class S3FileSystem(AbstractFileSystem):
                     files, bucket, listed[: listed.rfind("/") + 1]
                 )
 
-        if files:
+        found: list[tuple[S3Object, str | S3Path]] = [(f, self._entry_path(f)) for f in files]
+        if found:
             # Something is listed below the path, so the path is a directory,
             # which fsspec includes with the directories. A bucket is not
             # included, since cp_file() cannot copy it in a recursive copy.
             if withdirs and key:
-                files = [self._directory_object(bucket, key), *files]
+                found = [(self._directory_object(bucket, key), own), *found]
         elif key:
             # As in fsspec, the path itself is returned if it is an object,
             # or with withdirs if it is a directory.
             try:
-                files = [self._path_info(S3Path(bucket, key), refresh=refresh)]
+                if name is not None:
+                    found = [(self.info(name, refresh=refresh), own)]
+                else:
+                    found = [(self._path_info(S3Path(bucket, key), refresh=refresh), own)]
             except FileNotFoundError:
-                files = []
+                found = []
 
         if not withdirs:
-            files = [f for f in files if f.type != S3ObjectType.S3_OBJECT_TYPE_DIRECTORY]
-        return files
+            found = [(f, t) for f, t in found if f.type != S3ObjectType.S3_OBJECT_TYPE_DIRECTORY]
+        return found
 
     def _find_levels(
         self, directory: S3Object, maxdepth: int, prefix: str = "", refresh: bool = False
@@ -1774,11 +1786,13 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs: Additional arguments passed to ``find()``.
 
         Returns:
-            The sizes by the names that the lookups give.
+            The sizes by the names that the lookups give. The path itself is
+            looked up with ``info()``, and a listed entry by its bucket and
+            key.
         """
         sizes: dict[str, int] = {}
-        for _, s3_path in self._find_paths(path, maxdepth=maxdepth, **kwargs):
-            info = self._path_info(s3_path)
+        for _, target in self._find_paths(path, maxdepth=maxdepth, **kwargs):
+            info = self.info(target) if isinstance(target, str) else self._path_info(target)
             sizes[info["name"]] = info["size"]
         return sizes
 
@@ -1932,15 +1946,16 @@ class S3FileSystem(AbstractFileSystem):
 
     def _expand_paths(
         self, path, recursive: bool = False, maxdepth: int | None = None, **kwargs
-    ) -> list[tuple[str, S3Path]]:
+    ) -> list[tuple[str, str | S3Path]]:
         """Expand glob patterns and directories as :meth:`expand_path`, with the paths they name.
 
-        A path that the caller passes is parsed once, as :meth:`S3Path.parse`
-        parses it. A path that a listing returns keeps the bucket and key of
-        its entry (see :meth:`_entry_path`), also when its name ends in what
-        looks like a version ID query, and the expansion below a matched
-        directory lists it by its key prefix. As in fsspec, the directories
-        are expanded below the matches of a recursive glob pattern.
+        A path that the caller passes names itself, as the string that
+        :meth:`expand_path` returns. A path that a listing returns names the
+        bucket and key of its entry (see :meth:`_entry_path`), also when its
+        name ends in what looks like a version ID query, and the expansion
+        below a matched directory lists it by its key prefix. As in fsspec,
+        the directories are expanded below the matches of a recursive glob
+        pattern.
 
         Args:
             path: S3 path, glob pattern, or list of them.
@@ -1951,7 +1966,9 @@ class S3FileSystem(AbstractFileSystem):
 
         Returns:
             The names, as :meth:`expand_path` returns them, and the paths
-            that they name, sorted by name.
+            that they name, sorted by name: the name itself for a path that
+            the caller passed, which the caller parses as a path string, and
+            an ``S3Path`` for a listed entry.
 
         Raises:
             ValueError: If ``maxdepth`` is less than 1.
@@ -1963,22 +1980,22 @@ class S3FileSystem(AbstractFileSystem):
         refresh = kwargs.get("refresh", False)
         versions, others = self._split_version_paths(path)
         # Insertion-ordered set of the names and the paths that they name.
-        out: dict[tuple[str, S3Path], None] = {}
+        out: dict[tuple[str, str | S3Path], None] = {}
         names: set[str] = set()
 
-        def add(name: str, s3_path: S3Path) -> None:
+        def add(name: str, target: str | S3Path) -> None:
             """Add a name and the path that it names.
 
             Args:
                 name: The name.
-                s3_path: The path.
+                target: The path.
             """
-            out[(name, s3_path)] = None
+            out[(name, target)] = None
             names.add(name)
 
         for p in versions:
             if not recursive or self.exists(p):
-                add(p, S3Path.parse(p))
+                add(p, p)
         for p in others:
             if not assume_literal and has_magic(p):
                 matches = cast(
@@ -1990,14 +2007,16 @@ class S3FileSystem(AbstractFileSystem):
                 if recursive and not (maxdepth is not None and maxdepth <= 1):
                     depth = maxdepth - 1 if maxdepth is not None else None
                     for match in matches.values():
-                        for f in self._find_under(match, depth, withdirs=True, refresh=refresh):
-                            add(f.name, self._entry_path(f))
+                        for f, target in self._find_under(
+                            match, depth, withdirs=True, refresh=refresh
+                        ):
+                            add(f.name, target)
                 continue
             if recursive:
-                for f, s3_path in self._find_paths(p, maxdepth=maxdepth, withdirs=True, **kwargs):
-                    add(f.name, s3_path)
+                for f, target in self._find_paths(p, maxdepth=maxdepth, withdirs=True, **kwargs):
+                    add(f.name, target)
             if p not in names and (not recursive or self.exists(p)):
-                add(p, S3Path.parse(p))
+                add(p, p)
         if not out:
             raise FileNotFoundError(path)
         return sorted(out, key=lambda item: item[0])
@@ -2083,7 +2102,7 @@ class S3FileSystem(AbstractFileSystem):
             try:
                 if use_listings and self._ls_from_cache(s3_path):
                     return True
-                info = self._path_info(s3_path, refresh=refresh, lookup_kwargs=lookup_kwargs)
+                info = self.info(path, refresh=refresh, **lookup_kwargs)
                 return bool(info)
             except FileNotFoundError:
                 return False
@@ -2182,7 +2201,7 @@ class S3FileSystem(AbstractFileSystem):
 
     def _delete_paths(
         self, path: str | list[str], recursive: bool = False, maxdepth: int | None = None
-    ) -> list[S3Path]:
+    ) -> list[str | S3Path]:
         """Expand the paths that ``rm()`` deletes (see :meth:`S3PathPairing.delete_paths`).
 
         Args:
@@ -2193,19 +2212,20 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The paths with a version ID as given, followed by the paths that
             the expansion of the other paths names (see
-            :meth:`_expand_paths`).
+            :meth:`_expand_paths`): the path strings that the caller passed,
+            and the listed paths.
 
         Raises:
             ValueError: If a path is a bucket.
         """
         versioned_paths, unversioned_paths = S3PathPairing.delete_paths(path)
-        paths = [S3Path.parse(p) for p in versioned_paths]
+        paths: list[str | S3Path] = list(versioned_paths)
         if not unversioned_paths:
             # The expansion raises FileNotFoundError for no paths.
             return paths
         return paths + [
-            s3_path
-            for _, s3_path in self._expand_paths(
+            target
+            for _, target in self._expand_paths(
                 unversioned_paths, recursive=recursive, maxdepth=maxdepth
             )
         ]
@@ -2361,7 +2381,7 @@ class S3FileSystem(AbstractFileSystem):
             executor.shutdown(wait=False)
 
     def _delete_objects(
-        self, paths: list[S3Path], max_workers: int | None = None, **kwargs
+        self, paths: list[str | S3Path], max_workers: int | None = None, **kwargs
     ) -> None:
         """Delete objects with DeleteObjects requests grouped by bucket.
 
@@ -2392,7 +2412,7 @@ class S3FileSystem(AbstractFileSystem):
 
     @staticmethod
     def _delete_batches(
-        paths: list[S3Path], **kwargs
+        paths: list[str | S3Path], **kwargs
     ) -> tuple[list[S3DeleteBatch], dict[str, Any]]:
         """Group the objects that ``rm`` deletes into DeleteObjects batches.
 
@@ -2412,7 +2432,8 @@ class S3FileSystem(AbstractFileSystem):
             if name in kwargs:
                 raise TypeError(f"rm() got an unexpected keyword argument '{name}'")
         quiet = kwargs.pop("Quiet", True)
-        batches = S3DeleteBatch.from_paths([p for p in paths if p.key], quiet=quiet)
+        s3_paths = [S3Path.parse(p) if isinstance(p, str) else p for p in paths]
+        batches = S3DeleteBatch.from_paths([p for p in s3_paths if p.key], quiet=quiet)
         return batches, kwargs
 
     def _delete_batch(self, batch: S3DeleteBatch, **kwargs) -> S3DeleteResult:
@@ -2705,7 +2726,7 @@ class S3FileSystem(AbstractFileSystem):
         # Every copy has ended, and succeeded, before anything is deleted.
         copied = self._run_batch(copy_pair, pairs, concurrency).outcomes
         self._delete_objects(
-            [S3Path.parse(p1) for (p1, _), c in zip(pairs, copied, strict=True) if c],
+            [p1 for (p1, _), c in zip(pairs, copied, strict=True) if c],
             **self.core.operation_params("delete_objects", source_params),
         )
 
@@ -3378,17 +3399,17 @@ class S3FileSystem(AbstractFileSystem):
             ValueError: If ``batch_size`` is neither positive, -1, nor None.
         """
         limit = self._batch_limit(batch_size)
-        expanded = self._expand_paths(path, recursive=recursive, **kwargs)
-        paths = [name for name, _ in expanded]
+        targets = self._first_targets(self._expand_paths(path, recursive=recursive, **kwargs))
+        paths = list(targets)
         if not (len(paths) > 1 or isinstance(path, list) or paths[0] != self._strip_protocol(path)):
-            return self._cat_object(expanded[0][1], **kwargs)
+            return self._cat_target(targets[paths[0]], **kwargs)
         outcomes: list[Any] | None = None
         contents: dict[str, Any] | None = None
         outcome = None
         try:
             outcomes = self._run_batch(
-                functools.partial(self._cat_object, **kwargs),
-                [s3_path for _, s3_path in expanded],
+                functools.partial(self._cat_target, **kwargs),
+                list(targets.values()),
                 min(limit, len(paths)),
                 counts=None if on_error == "raise" else lambda e: False,
             ).outcomes
@@ -3402,6 +3423,43 @@ class S3FileSystem(AbstractFileSystem):
             # keeps (F5).
             contents = outcomes = outcome = None
             raise
+
+    @staticmethod
+    def _first_targets(expanded: list[tuple[str, str | S3Path]]) -> dict[str, str | S3Path]:
+        """Return the first path that each name of an expansion names.
+
+        An explicit version and a listed key that ends in the same query
+        share a name. The contents are returned by name, so a name is read
+        once, as the first path that it names, which is the path that the
+        caller passed.
+
+        Args:
+            expanded: The names and the paths that they name, as
+                :meth:`_expand_paths` returns them.
+
+        Returns:
+            The paths by name, in the order of the names.
+        """
+        targets: dict[str, str | S3Path] = {}
+        for name, target in expanded:
+            targets.setdefault(name, target)
+        return targets
+
+    def _cat_target(self, target: str | S3Path, **kwargs) -> bytes:
+        """Read a path of an expansion.
+
+        Args:
+            target: A path string that the caller passed, which
+                :meth:`cat_file` reads, or a listed path, read by its bucket
+                and key.
+            **kwargs: Additional parameters, as for :meth:`cat_file`.
+
+        Returns:
+            The bytes read from the object.
+        """
+        if isinstance(target, str):
+            return self.cat_file(target, **kwargs)
+        return self._cat_object(target, **kwargs)
 
     def cat_ranges(
         self, paths, starts, ends, max_gap=None, on_error="return", batch_size=None, **kwargs
@@ -4082,14 +4140,13 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError(f"ACL not in {self.core.OBJECT_ACLS}.")
         if recursive and not (s3_path.key and s3_path.version_id):
             found = self._find_paths(path, withdirs=False)
-            items = [(s3_path, False) for _, s3_path in found]
+            items: list[tuple[str | S3Path, bool]] = [(target, False) for _, target in found]
             name = self._strip_protocol(path)
             # The key of the path as find() names it ("bucket//" is the bucket).
-            root = S3Path.parse(name)
-            if root.key and found and name not in {f.name for f, _ in found}:
+            if S3Path.parse(name).key and found and name not in {f.name for f, _ in found}:
                 # Objects lie below the key, so find() has not looked the key
                 # itself up; it may be an object too, which is skipped if missing.
-                items.append((root, True))
+                items.append((name, True))
             self._map(lambda item: self._chmod_object(*item, acl, **kwargs), items)
             if s3_path.key:
                 return
@@ -4098,7 +4155,7 @@ class S3FileSystem(AbstractFileSystem):
         else:
             self.core.put_bucket_acl(s3_path.bucket, acl, **kwargs)
 
-    def _chmod_object(self, path: S3Path, missing_ok: bool, acl: str, **kwargs) -> None:
+    def _chmod_object(self, path: str | S3Path, missing_ok: bool, acl: str, **kwargs) -> None:
         """Apply a canned ACL to an object in a recursive ``chmod``.
 
         Args:
@@ -4112,7 +4169,9 @@ class S3FileSystem(AbstractFileSystem):
                 is False.
         """
         try:
-            self.core.put_object_acl(path, acl, **kwargs)
+            self.core.put_object_acl(
+                S3Path.parse(path) if isinstance(path, str) else path, acl, **kwargs
+            )
         except FileNotFoundError:
             if not missing_ok:
                 raise
