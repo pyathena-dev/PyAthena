@@ -524,10 +524,12 @@ fs = S3FileSystem(retry_config=RetryConfig(exceptions=["SlowDown"], attempt=3))
 botocore also retries these errors within each attempt, as the retry mode of the S3
 client sets (`retries` in its `botocore.config.Config`, or the `AWS_RETRY_MODE` and
 `AWS_MAX_ATTEMPTS` settings). Unless the maximum attempts are set, botocore sends a
-request up to 5 times in its default `legacy` mode, and up to 3 times in `standard` mode.
-So with the default policy (8 attempts) and botocore's default settings, a request whose
-error persists is sent up to 40 times before the operation raises the error. The waits
-of the policy, which add up to 127 seconds plus jitter, come on top of botocore's own.
+request up to 3 times in `standard` mode, its default since botocore 1.44.0, and up to 5
+times in `legacy` mode, the default of earlier versions. So with the default policy
+(8 attempts) and botocore's default settings, a request whose error persists is sent up
+to 24 times before the operation raises the error, or up to 40 times with botocore
+earlier than 1.44.0. The waits of the policy, which add up to 127 seconds plus jitter,
+come on top of botocore's own.
 
 A request body given as a stream, such as `S3Core.put_object(path, Body=file)`, is sent
 from the position where the call found it on each attempt of the policy. A stream whose
