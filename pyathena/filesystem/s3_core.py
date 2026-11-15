@@ -602,20 +602,38 @@ class S3Core:
         Args:
             client: The boto3 S3 client to send the requests with.
             retry_config: The retry policy of the requests; defaults to
-                ``RetryConfig()``. If its ``exceptions`` are the default codes
-                (``THROTTLING_ERROR_CODES``), in any order, the requests are
-                sent with a copy that also retries ``RETRY_ERROR_CODES``.
+                ``RetryConfig()``. The requests are sent with the policy that
+                :meth:`resolve_retry_config` returns for it.
             request_kwargs: Parameters sent with every operation that accepts
                 them, such as ``{"RequestPayer": "requester"}``.
         """
         self._client = client
-        retry_config = retry_config if retry_config else RetryConfig()
-        if set(retry_config.exceptions) == set(THROTTLING_ERROR_CODES):
-            retry_config = _with_exceptions(
-                retry_config, (*retry_config.exceptions, *self.RETRY_ERROR_CODES)
-            )
-        self._retry_config = retry_config
+        self._retry_config = self.resolve_retry_config(
+            retry_config if retry_config else RetryConfig()
+        )
         self._request_kwargs = dict(request_kwargs) if request_kwargs else {}
+
+    @classmethod
+    def resolve_retry_config(cls, retry_config: RetryConfig) -> RetryConfig:
+        """Resolve the retry policy that S3 requests are sent with.
+
+        A policy whose ``exceptions`` are the default codes
+        (``THROTTLING_ERROR_CODES``), in any order, also retries
+        ``RETRY_ERROR_CODES``. A policy with other ``exceptions`` is used as
+        given.
+
+        Args:
+            retry_config: The retry policy.
+
+        Returns:
+            A copy of the policy that also retries ``RETRY_ERROR_CODES`` with
+            the same attempts and waits, or the policy itself.
+        """
+        if set(retry_config.exceptions) == set(THROTTLING_ERROR_CODES):
+            return _with_exceptions(
+                retry_config, (*retry_config.exceptions, *cls.RETRY_ERROR_CODES)
+            )
+        return retry_config
 
     @property
     def client(self) -> BaseClient:
