@@ -236,7 +236,8 @@ def to_sql(
     retry policy, resolved as for the S3 filesystem
     (:meth:`~pyathena.filesystem.s3_core.S3Core.resolve_retry_config`): a policy
     with the default codes also retries the S3 error codes of
-    :attr:`~pyathena.filesystem.s3_core.S3Core.RETRY_ERROR_CODES`.
+    :attr:`~pyathena.filesystem.s3_core.S3Core.RETRY_ERROR_CODES`. The deletion
+    is retried as a whole: a retry lists the objects that remain and deletes them.
 
     The SQL statements run on a ``pyathena.cursor.Cursor``, whatever the connection's
     cursor class is, with the connection's query settings, such as ``work_group``,
@@ -324,7 +325,6 @@ def to_sql(
             retry_config = S3Core.resolve_retry_config(conn._retry_config)
             objects = bucket.objects.filter(Prefix=key_prefix)
             if retry_api_call(lambda: list(objects.limit(1)), config=retry_config, logger=_logger):
-                # A retry lists the objects that remain and deletes them.
                 retry_api_call(objects.delete, config=retry_config, logger=_logger)
 
     if index:
