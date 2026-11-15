@@ -77,6 +77,7 @@ from tests.pyathena.util import (
     poll_until,
     retried,
     run_in_forked_child,
+    s3_request_targets,
     serve_s3_keys,
     shutdown_bounded,
     sigint_when,
@@ -1197,6 +1198,103 @@ class TestS3FileSystem:
             ("bucket/a", ["b", "d"], []),
             ("bucket/a/d", [], ["e"]),
         ]
+
+    # The key "a/x" and a key that a string path would name as its version.
+    LITERAL_KEYS = ("a/x", "a/x?versionId=v1")
+
+    @pytest.mark.parametrize(
+        ("call", "result", "sent"),
+        [
+            pytest.param(
+                lambda fs: fs.rm("s3://bucket/a", recursive=True),
+                None,
+                [
+                    ("delete_objects", "a", None),
+                    ("delete_objects", "a/x", None),
+                    ("delete_objects", "a/x?versionId=v1", None),
+                ],
+                id="rm",
+            ),
+            pytest.param(
+                lambda fs: fs.chmod("s3://bucket/a", "private", recursive=True),
+                None,
+                [
+                    ("put_object_acl", "a", None),
+                    ("put_object_acl", "a/x", None),
+                    ("put_object_acl", "a/x?versionId=v1", None),
+                ],
+                id="chmod",
+            ),
+            pytest.param(
+                lambda fs: fs.cat("s3://bucket/a/*"),
+                {"bucket/a/x": b"aa", "bucket/a/x?versionId=v1": b"aa"},
+                [("get_object", "a/x", None), ("get_object", "a/x?versionId=v1", None)],
+                id="cat",
+            ),
+            pytest.param(
+                lambda fs: fs.du("s3://bucket/a"),
+                4,
+                [("head_object", "a/x", None), ("head_object", "a/x?versionId=v1", None)],
+                id="du",
+            ),
+        ],
+    )
+    def test_fan_outs_act_on_listed_keys(self, call, result, sent):
+        # GH-1402: a fan-out acts on the keys that a listing returns, also on a
+        # key that ends in what looks like a version ID query, never on the
+        # version that parsing its name would give.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs, self.LITERAL_KEYS)
+        assert call(fs) == result
+        assert s3_request_targets(requests) == sent
+
+    def test_expand_path_expands_below_listed_matches(self):
+        # GH-1402: a recursive glob expands below each match by its key prefix.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs, {"a/dir?versionId=v1/z"})
+        assert fs.expand_path("s3://bucket/a/*", recursive=True) == [
+            "bucket/a/dir?versionId=v1",
+            "bucket/a/dir?versionId=v1/z",
+        ]
+
+    def test_lookups_keep_versions_apart_from_listed_keys(self):
+        # GH-1402: the lookup of a version is cached apart from that of a key
+        # whose name ends in the same version ID query.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs, self.LITERAL_KEYS)
+        fs.du("s3://bucket/a")
+        requests.clear()
+        fs.info("s3://bucket/a/x?versionId=v1")
+        assert s3_request_targets(requests) == [("head_object", "a/x", "v1")]
+
+        fs.invalidate_cache()
+        fs.info("s3://bucket/a/x?versionId=v1")
+        requests.clear()
+        fs.du("s3://bucket/a")
+        assert s3_request_targets(requests) == [
+            ("head_object", "a/x", None),
+            ("head_object", "a/x?versionId=v1", None),
+        ]
+
+    def test_deletion_invalidates_listed_directories(self):
+        # GH-1402: deleting a key evicts the cached listing of its directory,
+        # also of one named with a version ID query.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs, {"a/dir?versionId=v1/w", "a/dir?versionId=v1/z"})
+        assert sorted(fs.find("s3://bucket/a", maxdepth=3)) == [
+            "bucket/a/dir?versionId=v1/w",
+            "bucket/a/dir?versionId=v1/z",
+        ]
+        fs.rm("s3://bucket/a/*/z")
+        assert fs.find("s3://bucket/a", maxdepth=3) == ["bucket/a/dir?versionId=v1/w"]
 
     def test_find_directory_without_extra_requests(self):
         fs = self._make_fs()

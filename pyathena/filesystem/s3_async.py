@@ -23,7 +23,13 @@ from concurrent.futures import CancelledError, Future, wait
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from fsspec.asyn import AbstractAsyncStreamedFile, AsyncFileSystem, sync
+from fsspec.asyn import (
+    AbstractAsyncStreamedFile,
+    AsyncFileSystem,
+    _run_coros_in_chunks,
+    is_exception,
+    sync,
+)
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
 from fsspec.implementations.local import LocalFileSystem, make_path_posix
@@ -678,7 +684,7 @@ class AioS3FileSystem(AsyncFileSystem):
         await self._delete_objects(paths, max_workers=max_workers, **kwargs)
 
     async def _delete_objects(
-        self, paths: list[str], max_workers: int | None = None, **kwargs
+        self, paths: list[S3Path], max_workers: int | None = None, **kwargs
     ) -> None:
         """Delete objects with parallel DeleteObjects requests.
 
@@ -782,7 +788,7 @@ class AioS3FileSystem(AsyncFileSystem):
             if isinstance(result, BaseException):
                 raise result
         await self._delete_objects(
-            [p1 for (p1, _), copied in zip(pairs, results, strict=True) if copied],
+            [S3Path.parse(p1) for (p1, _), copied in zip(pairs, results, strict=True) if copied],
             **self.core.operation_params("delete_objects", source_params),
         )
 
@@ -1005,10 +1011,90 @@ class AioS3FileSystem(AsyncFileSystem):
             their bytes.
         """
         return await _S3BatchTasks().run(
-            super()._cat(
+            self._cat_paths(
                 path, recursive=recursive, on_error=on_error, batch_size=batch_size, **kwargs
             )
         )
+
+    async def _cat_paths(
+        self, path, recursive=False, on_error="raise", batch_size=None, **kwargs
+    ) -> Any:
+        """Read the contents of one or more paths as fsspec's ``_cat()`` does.
+
+        Unlike fsspec, each path that the expansion returns is read by its
+        bucket and key (see :meth:`S3FileSystem._expand_paths`), never by
+        parsing its name.
+
+        Args:
+            path: S3 path, glob pattern, or list of them.
+            recursive: Whether to read the files below the directories.
+            on_error: ``"raise"``, ``"omit"``, or ``"return"``.
+            batch_size: Number of reads to run at the same time.
+            **kwargs: Additional parameters passed to the reads.
+
+        Returns:
+            The bytes of a single path, or a dictionary of the paths and
+            their bytes.
+        """
+        # As in fsspec, the expansion does not receive the parameters of the
+        # reads.
+        expanded = await self._thread_pool.run(
+            self._sync_fs._expand_paths, path, recursive=recursive
+        )
+        paths = [name for name, _ in expanded]
+        out = await _run_coros_in_chunks(
+            [self._cat_object(s3_path, **kwargs) for _, s3_path in expanded],
+            batch_size=batch_size or self.batch_size,
+            nofiles=True,
+            return_exceptions=True,
+        )
+        if on_error == "raise":
+            error = next(filter(is_exception, out), None)
+            if error is not None:
+                raise error
+        if len(paths) > 1 or isinstance(path, list) or paths[0] != self._strip_protocol(path):
+            return {
+                k: v
+                for k, v in zip(paths, out, strict=True)
+                if on_error != "omit" or not is_exception(v)
+            }
+        return out[0]
+
+    async def _cat_object(self, path: S3Path, **kwargs) -> bytes:
+        """Read the contents of the object of a path, as ``_cat_file()`` does.
+
+        Args:
+            path: The path of the object, whose bucket, key and version are
+                used as they are.
+            **kwargs: Additional parameters, as for ``_cat_file()``.
+
+        Returns:
+            The bytes read from the object.
+        """
+        _S3BatchTasks.track()
+        return await self._thread_pool.run(self._sync_fs._cat_object, path, **kwargs)
+
+    async def _du(self, path, total=True, maxdepth=None, **kwargs):
+        """Return the sizes of the objects below a path, as fsspec's ``_du()`` does.
+
+        Runs :meth:`S3FileSystem._du_sizes`, which looks up each entry that
+        ``find()`` returns by its bucket and key, never by parsing its name.
+
+        Args:
+            path: The path to search under.
+            total: Whether to return the sum of the sizes instead of the
+                sizes by name.
+            maxdepth: Maximum number of levels to descend, at least 1 (None
+                for unlimited).
+            **kwargs: Additional arguments passed to ``find()``.
+
+        Returns:
+            The total size, or the sizes by the names that ``info()`` gives.
+        """
+        sizes = await self._thread_pool.run(
+            self._sync_fs._du_sizes, path, maxdepth=maxdepth, **kwargs
+        )
+        return sum(sizes.values()) if total else sizes
 
     async def _cat_ranges(
         self,
@@ -1840,6 +1926,16 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         self._sync_fs.invalidate_cache(path)
 
+    def _invalidate(self, path: S3Path) -> None:
+        """Remove the cached entries of a path and of the directories above it.
+
+        See :meth:`S3FileSystem._invalidate`.
+
+        Args:
+            path: The path of the bucket or the object.
+        """
+        self._sync_fs._invalidate(path)
+
     async def _touch(
         self, path: str | os.PathLike[str], truncate: bool = True, **kwargs
     ) -> dict[str, Any]:
@@ -2443,7 +2539,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             except BaseException:
                 self._discard()
                 raise
-        self.fs.invalidate_cache(self.path)
+        self.fs._invalidate(S3Path(self.bucket, self.key))
 
     def _discard(self) -> None:
         """Discard the write, and abort its multipart upload, if any; blocks.
