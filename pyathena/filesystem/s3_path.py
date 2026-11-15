@@ -31,9 +31,9 @@ class S3Path:
 
     Attributes:
         bucket: The name of the bucket.
-        key: The key, or None for a bucket path. A trailing slash is kept,
-            and a key of only slashes (``bucket//``) names the bucket (see
-            ``is_bucket``).
+        key: The key, or None for a bucket path. An empty key is stored as
+            None. A trailing slash is kept, and a key of only slashes
+            (``bucket//``) names the bucket (see ``is_bucket``).
         version_id: The version ID, or None for a path without a version.
 
     Example:
@@ -63,6 +63,11 @@ class S3Path:
     bucket: str
     key: str | None = None
     version_id: str | None = None
+
+    def __post_init__(self) -> None:
+        """Store an empty key as None, so that the path is the bucket path it prints as."""
+        if self.key == "":
+            object.__setattr__(self, "key", None)
 
     @classmethod
     def parse(cls, path: str) -> S3Path:

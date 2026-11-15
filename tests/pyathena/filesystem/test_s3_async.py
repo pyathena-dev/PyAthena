@@ -625,6 +625,77 @@ class TestAioS3FileSystem:
         assert outcomes[0][0] is not None or outcomes[0][1]
         assert outcomes[1] == outcomes[0]
 
+    @pytest.mark.asyncio
+    async def test_walks_list_listed_prefixes(self):
+        # GH-1401: the walks and the tree list a listed directory by its
+        # common prefix, as those of S3FileSystem do, not by parsing its name.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, {"a/dir?versionId=v1/z", "a/e//f"})
+        expected = [
+            ("bucket/a", ["dir?versionId=v1", "e"], []),
+            ("bucket/a/dir?versionId=v1", [], ["z"]),
+            ("bucket/a/e", [""], []),
+            ("bucket/a/e/", [], ["f"]),
+        ]
+
+        assert [step async for step in fs._walk("s3://bucket/a")] == expected
+        assert list(fs.walk("s3://bucket/a")) == expected
+        assert fs.tree("bucket/a", recursion_limit=2) == (
+            "bucket/a\n├── dir?versionId=v1\n│   └── z\n└── e\n    └── "
+        )
+        # As in fsspec, the walks yield a path whose listing fails with no
+        # entries.
+        assert [step async for step in fs._walk("s3://bucket/missing")] == [
+            ("bucket/missing", [], [])
+        ]
+        assert list(fs.walk("s3://bucket/missing")) == [("bucket/missing", [], [])]
+
+    @pytest.mark.asyncio
+    async def test_walk_reports_errors_in_the_event_loop(self):
+        # GH-1401: as in fsspec, _walk() calls on_error in the event loop.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, set())
+        threads = []
+
+        steps = [
+            step
+            async for step in fs._walk(
+                "s3://bucket/missing", on_error=lambda e: threads.append(threading.current_thread())
+            )
+        ]
+        assert steps == [("bucket/missing", [], [])]
+        assert threads == [threading.current_thread()]
+
+    @pytest.mark.asyncio
+    async def test_walk_cancellation_sends_no_further_listing(self):
+        # GH-1401: _walk() awaits each listing on its own, so a cancellation
+        # during a listing sends no further one, also when walking bottom up.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs._sync_fs, {"a/b/c"})
+        serve = fs._sync_fs._core.call
+        started, release = threading.Event(), threading.Event()
+
+        def call(method, **request):
+            if not started.is_set():
+                started.set()
+                release.wait(EVENT_TIMEOUT)
+            return serve(method, **request)
+
+        fs._sync_fs._call = fs._sync_fs._core.call = call
+        task = asyncio.ensure_future(anext(fs._walk("s3://bucket/a", topdown=False)))
+        assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await await_bounded(task)
+        assert [name for name, _ in requests] == ["list_objects_v2"]
+
     @pytest.mark.parametrize("path", ["s3://bucket/dir", None])
     def test_invalidate_cache(self, path):
         # invalidate_cache() clears the listings that the asynchronous methods
