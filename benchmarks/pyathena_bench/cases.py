@@ -67,13 +67,16 @@ class Case:
     # filesystem suite.
     max_workers: int | None = None
     pool_connections: int | None = None
+    # The named botocore Config options of the filesystem suite's S3 clients.
+    client: str = "default"
 
     @property
     def id(self) -> str:
         if self.suite == "filesystem":
+            client = "" if self.client == "default" else f"-{self.client}"
             return (
                 f"{self.suite}-{self.family}-{self.api}-{self.transport}-"
-                f"w{self.max_workers}-p{self.pool_connections}"
+                f"w{self.max_workers}-p{self.pool_connections}{client}"
             )
         if self.suite == "objects":
             return f"{self.suite}-{self.family}-{self.api}-{self.transport}-n{self.max_workers}"
@@ -123,7 +126,9 @@ def matrix(settings: Settings, suite: str, shape: str) -> list[Case]:
     suites.
 
     The ``filesystem`` and ``objects`` suites do not query Athena and have no
-    shape; their cases belong to the ``flat`` shape. A case of the ``objects``
+    shape; their cases belong to the ``flat`` shape. The ``filesystem`` suite
+    has a case for each named set of S3 client options in its ``clients``
+    setting. A case of the ``objects``
     suite sets its concurrency as the filesystem's ``max_workers`` and
     connection pool, and as the batch size of its operation.
 
@@ -154,11 +159,13 @@ def matrix(settings: Settings, suite: str, shape: str) -> list[Case]:
                 suite=suite,
                 max_workers=workers,
                 pool_connections=pool,
+                client=client,
             )
             for operation in FILESYSTEM_OPERATIONS
             for api in FILESYSTEM_APIS
             for workers in settings.filesystem_max_workers
             for pool in settings.filesystem_pool_connections
+            for client in settings.filesystem_clients
         ]
     if suite == "objects":
         if shape != "flat":
