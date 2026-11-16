@@ -121,6 +121,9 @@ Conversion to Parquet and upload to S3 use [ThreadPoolExecutor](https://docs.pyt
 It is also possible to use [ProcessPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#processpoolexecutor).
 The S3 requests use the connection's `s3_config` (see "S3 client" in [Usage](usage.md)) and credentials.
 The upload workers resolve the credentials themselves, except for a connection given a `session` and no explicit keys, whose session's credentials they receive once, when the uploads start.
+The S3 requests, the uploads and, with `if_exists="replace"`, the listing and the deletion of the existing objects, are retried with the connection's retry policy (`retry_config`), resolved as for the S3 filesystem (see "Retries" in [S3 filesystem](filesystem.md)).
+A policy whose `exceptions` are the default codes also retries the S3 error codes `SlowDown`, `ServiceUnavailable`, `InternalError`, and `RequestTimeout`; a policy with other `exceptions` is used as given.
+The deletion is retried as a whole: a retry lists the objects that remain and deletes them.
 
 ```python
 import pandas as pd

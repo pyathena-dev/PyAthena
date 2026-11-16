@@ -22,6 +22,7 @@ from boto3 import Session
 
 from pyathena import OperationalError
 from pyathena.cursor import Cursor
+from pyathena.filesystem.s3_core import S3Core
 from pyathena.model import AthenaCompression
 from pyathena.util import RetryConfig, parse_output_location, retry_api_call
 
@@ -168,7 +169,10 @@ def to_parquet(
         df: The DataFrame to write.
         bucket_name: S3 bucket name.
         prefix: S3 key prefix (path within the bucket).
-        retry_config: Configuration for API call retries.
+        retry_config: The retry policy of the upload. It is resolved with
+            :meth:`~pyathena.filesystem.s3_core.S3Core.resolve_retry_config`, so a
+            policy with the default codes also retries the S3 error codes of
+            :attr:`~pyathena.filesystem.s3_core.S3Core.RETRY_ERROR_CODES`.
         session_kwargs: Arguments for creating a boto3 Session.
         client_kwargs: Arguments for creating the S3 client.
         compression: Parquet compression codec (e.g., "snappy", "gzip").
@@ -189,7 +193,7 @@ def to_parquet(
     pq.write_table(table, buf, compression=compression, flavor=flavor)
     response = retry_api_call(
         bucket.put_object,
-        config=retry_config,
+        config=S3Core.resolve_retry_config(retry_config),
         Body=buf.getvalue().to_pybytes(),
         Key=prefix + str(uuid.uuid4()),
     )
@@ -226,6 +230,14 @@ def to_sql(
     ``serial_number``, whose session's credentials they receive once, when the
     uploads start. They are not refreshed during the uploads, so an upload
     that runs past their expiry fails.
+
+    The S3 requests, the uploads and, with ``if_exists="replace"``, the listing
+    and the deletion of the existing objects, are retried with the connection's
+    retry policy, resolved as for the S3 filesystem
+    (:meth:`~pyathena.filesystem.s3_core.S3Core.resolve_retry_config`): a policy
+    with the default codes also retries the S3 error codes of
+    :attr:`~pyathena.filesystem.s3_core.S3Core.RETRY_ERROR_CODES`. The deletion
+    is retried as a whole: a retry lists the objects that remain and deletes them.
 
     The SQL statements run on a ``pyathena.cursor.Cursor``, whatever the connection's
     cursor class is, with the connection's query settings, such as ``work_group``,
@@ -310,9 +322,10 @@ def to_sql(
                     """
                 )
             )
+            retry_config = S3Core.resolve_retry_config(conn._retry_config)
             objects = bucket.objects.filter(Prefix=key_prefix)
-            if list(objects.limit(1)):
-                objects.delete()
+            if retry_api_call(lambda: list(objects.limit(1)), config=retry_config, logger=_logger):
+                retry_api_call(objects.delete, config=retry_config, logger=_logger)
 
     if index:
         reset_index(df, index_label)

@@ -4,14 +4,18 @@ import uuid
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from functools import partial
 from multiprocessing import get_context
 from unittest.mock import patch
 
+import botocore.session
 import numpy as np
 import pandas as pd
 import pytest
 from boto3.session import Session
+from botocore.awsrequest import AWSResponse
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from pyathena import OperationalError
 from pyathena.aio.connection import AioConnection
@@ -26,9 +30,11 @@ from pyathena.pandas.util import (
     reset_index,
     to_sql,
 )
+from pyathena.util import RetryConfig
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (
+    RawBody,
     answered_requests,
     query_results_response,
     succeeded_query_execution_data,
@@ -672,6 +678,135 @@ def test_to_sql_queries_ignore_connection_cursor_class(connection_class, connect
         parameters["ResultReuseConfiguration"]["ResultReuseByAgeConfiguration"]["Enabled"] is False
     )
     assert parameters["WorkGroup"] == "to-sql-work-group"
+
+
+@pytest.mark.parametrize(
+    ("exceptions", "sends"),
+    [
+        (["ThrottlingException", "TooManyRequestsException"], 2),
+        (["ThrottlingException"], 1),
+    ],
+    ids=["default", "configured"],
+)
+def test_to_parquet_retries_s3_errors(exceptions, sends):
+    # GH-1408: a policy with the default codes also retries the transient S3
+    # errors of the upload, as the S3 filesystem does; one with other codes is
+    # used as given.
+    session = botocore.session.Session()
+    requests = []
+
+    def send(request, **kwargs):
+        requests.append(request)
+        if len(requests) == 1:
+            error = b"<Error><Code>InternalError</Code><Message>Try again</Message></Error>"
+            return AWSResponse(request.url, 500, {}, RawBody(error))
+        return AWSResponse(request.url, 200, {}, RawBody(b""))
+
+    session.register("before-send.s3.PutObject", send)
+    upload = partial(
+        util.to_parquet,
+        pd.DataFrame({"col_int": np.int32([1])}),
+        "bucket",
+        "prefix/",
+        RetryConfig(exceptions=exceptions, attempt=2, multiplier=0),
+        {
+            "botocore_session": session,
+            "aws_access_key_id": "dummy",
+            "aws_secret_access_key": "dummy",
+        },
+        # botocore sends each attempt once.
+        {"region_name": "us-east-1", "config": Config(retries={"total_max_attempts": 1})},
+    )
+    if sends == 2:
+        assert upload().startswith("s3://bucket/prefix/")
+    else:
+        with pytest.raises(ClientError, match="Try again"):
+            upload()
+    assert len(requests) == sends
+
+
+@pytest.mark.parametrize(
+    "exceptions",
+    [["ThrottlingException", "TooManyRequestsException"], ["ThrottlingException"]],
+    ids=["default", "configured"],
+)
+def test_to_sql_replace_retries_s3_errors(exceptions):
+    # GH-1408: with if_exists="replace", the listing and the deletion of the
+    # existing objects were sent without the retry policy; they retry as the
+    # uploads do.
+    conn = Connection(
+        region_name="us-east-1",
+        s3_staging_dir="s3://bucket/path/",
+        aws_access_key_id="access_key",
+        aws_secret_access_key="secret_key",
+        retry_config=RetryConfig(exceptions=exceptions, attempt=2, multiplier=0),
+        # botocore sends each attempt once.
+        s3_config=Config(retries={"total_max_attempts": 1}),
+    )
+    # S3 answers the first request of each operation with a transient error.
+    errors = {
+        "ListObjects": (503, b"<Error><Code>SlowDown</Code><Message>Slow down</Message></Error>"),
+        "DeleteObjects": (500, b"<Error><Code>InternalError</Code><Message>x</Message></Error>"),
+    }
+    answers = {
+        "ListObjects": b"<ListBucketResult><Name>bucket</Name><IsTruncated>false</IsTruncated>"
+        b"<Contents><Key>existing/old</Key></Contents></ListBucketResult>",
+        "DeleteObjects": b"<DeleteResult><Deleted><Key>existing/old</Key></Deleted></DeleteResult>",
+    }
+    deleted = []
+
+    def send(request, event_name, **kwargs):
+        operation = event_name.rsplit(".", 1)[-1]
+        if operation in errors:
+            status, error = errors.pop(operation)
+            return AWSResponse(request.url, status, {}, RawBody(error))
+        if operation == "DeleteObjects":
+            deleted.append(request.body)
+        return AWSResponse(request.url, 200, {}, RawBody(answers[operation]))
+
+    conn.session.events.register("before-send.s3", send)
+    lookup = query_results_response([("table_name", "varchar")])
+    # The column labels, then the table that the lookup finds.
+    lookup["ResultSet"]["Rows"] = [
+        {"Data": [{"VarCharValue": "table_name"}]},
+        {"Data": [{"VarCharValue": "existing"}]},
+    ]
+    responses = {
+        "StartQueryExecution": {"QueryExecutionId": "query-id"},
+        "GetQueryExecution": {
+            "QueryExecution": {
+                **succeeded_query_execution_data("query-id", "SELECT", datetime.now(UTC)),
+                "ResultConfiguration": {"OutputLocation": "s3://bucket/path/query-id.csv"},
+            }
+        },
+        "GetQueryResults": lookup,
+    }
+    queries = []
+
+    def answer(operation, parameters):
+        if operation == "StartQueryExecution":
+            queries.append(parameters["QueryString"].split()[0])
+        return responses[operation]
+
+    df = pd.DataFrame({"col_int": np.int32([1])})
+    try:
+        with (
+            patch.object(conn.client, "_make_api_call", side_effect=answer),
+            patch.object(util, "to_parquet", return_value="s3://bucket/existing/new"),
+        ):
+            if exceptions == ["ThrottlingException"]:
+                with pytest.raises(ClientError, match="Slow down"):
+                    to_sql(df, "existing", conn, "s3://bucket/existing/", if_exists="replace")
+            else:
+                to_sql(df, "existing", conn, "s3://bucket/existing/", if_exists="replace")
+    finally:
+        conn.close()
+    if exceptions == ["ThrottlingException"]:
+        assert (deleted, queries) == ([], ["SELECT", "DROP"])
+    else:
+        (body,) = deleted
+        assert b"<Key>existing/old</Key>" in body
+        assert queries == ["SELECT", "DROP", "CREATE"]
 
 
 def test_to_sql_with_partitions(cursor):
