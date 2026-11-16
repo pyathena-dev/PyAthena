@@ -68,6 +68,7 @@ from tests.pyathena.util import (
     MULTIPART_COPY_BLOCK_SIZE,
     MULTIPART_COPY_KWARGS,
     MULTIPART_COPY_SIZE,
+    BranchRecordingCallback,
     OpaquePath,
     ThrottledOperation,
     forking,
@@ -77,6 +78,7 @@ from tests.pyathena.util import (
     poll_until,
     retried,
     run_in_forked_child,
+    s3_copy_targets,
     s3_request_targets,
     serve_s3_keys,
     shutdown_bounded,
@@ -1256,6 +1258,67 @@ class TestS3FileSystem:
         assert call(fs) == result
         assert s3_request_targets(requests) == sent
 
+    # The key "a/x" and a key that a string path would name as its null
+    # version, which a move compares with the key itself.
+    NULL_KEYS = ("a/x", "a/x?versionId=null")
+
+    @pytest.mark.parametrize(
+        ("call", "stored", "copied", "deleted"),
+        [
+            pytest.param(
+                lambda fs: fs.copy("s3://bucket/a", "s3://bucket/b", recursive=True),
+                {"a/x", "a/x?versionId=null", "b/x", "b/x?versionId=null"},
+                [("a/x", None, "b/x"), ("a/x?versionId=null", None, "b/x?versionId=null")],
+                [],
+                id="copy",
+            ),
+            pytest.param(
+                lambda fs: fs.copy("s3://bucket/a/*", "s3://bucket/c/"),
+                {"a/x", "a/x?versionId=null", "c/x", "c/x?versionId=null"},
+                [("a/x", None, "c/x"), ("a/x?versionId=null", None, "c/x?versionId=null")],
+                [],
+                id="copy-glob",
+            ),
+            pytest.param(
+                lambda fs: fs.mv("s3://bucket/a", "s3://bucket/b", recursive=True),
+                {"b/x", "b/x?versionId=null"},
+                [("a/x", None, "b/x"), ("a/x?versionId=null", None, "b/x?versionId=null")],
+                [("delete_objects", "a/x", None), ("delete_objects", "a/x?versionId=null", None)],
+                id="mv",
+            ),
+        ],
+    )
+    def test_copies_act_on_listed_keys(self, call, stored, copied, deleted):
+        # GH-1403: copy() and mv() copy each key that a listing returns to a
+        # destination named after the key as it is, also a key that ends in
+        # what looks like a version ID query, never the version that parsing
+        # its name would give.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, requests = serve_s3_keys(fs, self.NULL_KEYS)
+        call(fs)
+        assert store == stored
+        assert s3_copy_targets(requests) == copied
+        assert [t for t in s3_request_targets(requests) if t[0] == "delete_objects"] == deleted
+
+    def test_get_downloads_listed_keys(self, tmp_path):
+        # GH-1403: get() downloads each key that a listing returns by its
+        # bucket and key to a local path named after the key as it is, and
+        # names the branch of the callback after the key as a string.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs, self.NULL_KEYS)
+        callback = BranchRecordingCallback()
+        fs.get("s3://bucket/a", str(tmp_path / "out"), recursive=True, callback=callback)
+        assert sorted(os.listdir(tmp_path / "out")) == ["x", "x?versionId=null"]
+        assert [t for t in s3_request_targets(requests) if t[0] == "get_object"] == [
+            ("get_object", "a/x", None),
+            ("get_object", "a/x?versionId=null", None),
+        ]
+        assert sorted(callback.sources) == ["bucket/a", "bucket/a/x", "bucket/a/x?versionId=null"]
+
     def test_expand_path_expands_below_listed_matches(self):
         # GH-1402: a recursive glob expands below each match by its key prefix.
         fs = S3FileSystem(
@@ -2231,7 +2294,9 @@ class TestS3FileSystem:
     def test_mv_conflicting_destinations_of_listed_sources(self):
         # A list of sources is mapped without looking up the destination.
         fs = self._make_fs()
-        fs.expand_path = mock.MagicMock(return_value=["bucket/x/a", "bucket/y/a"])
+        fs._expand_paths = mock.MagicMock(
+            return_value=[(p, S3Path.parse(p)) for p in ("bucket/x/a", "bucket/y/a")]
+        )
         fs.isdir = mock.MagicMock()
 
         with pytest.raises(ValueError, match="same destination"):
@@ -2707,8 +2772,10 @@ class TestS3FileSystem:
     def test_mv_nothing_within_maxdepth(self):
         # Only directories within maxdepth: nothing is moved, as with copy().
         fs = self._make_fs()
-        fs.expand_path = mock.MagicMock(return_value=["bucket/src/sub"])
-        fs.isdir = mock.MagicMock(return_value=True)
+        fs._expand_paths = mock.MagicMock(
+            return_value=[("bucket/src/sub", S3Path("bucket", "src/sub"))]
+        )
+        fs._target_isdir = mock.MagicMock(return_value=True)
 
         fs.mv("s3://bucket/src", "s3://bucket/dst/", recursive=True, maxdepth=1)
         fs._call.assert_not_called()
@@ -3063,11 +3130,12 @@ class TestS3FileSystem:
         ) as expand_path:
             fs.put(str(tmp_path / "a"), "s3://bucket/dst/", assume_literal=True)
         assert expand_path.call_args.kwargs["assume_literal"] is True
-        fs.expand_path = mock.MagicMock(return_value=["bucket/root/a"])
+        fs._expand_paths = mock.MagicMock(
+            return_value=[("bucket/root/a", S3Path("bucket", "root/a"))]
+        )
         fs.get_file = mock.MagicMock()
-        fs.isdir = mock.MagicMock(return_value=False)
         fs.get("s3://bucket/root/", str(tmp_path / "out") + "/", recursive=True, prefix="a")
-        assert fs.expand_path.call_args.kwargs["prefix"] == "a"
+        assert fs._expand_paths.call_args.kwargs["prefix"] == "a"
 
     @pytest.mark.parametrize("on_error", ["return", "raise"])
     def test_cat_ranges_on_error(self, on_error):

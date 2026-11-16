@@ -903,11 +903,17 @@ except Exception:
 
 ## Path pairing
 
-`S3PathPairing` pairs the paths of one `copy()`, `get()` or `mv()`: `mv()` always, and
-`copy()` and `get()` when a source has a version ID and the destination is one path
-(fsspec pairs the others). Its `delete_paths()` splits the paths of an `rm()` into
-those deleted as given and those expanded. The pairing is fsspec's, except that a
-path with a version ID names that version, and its destination is named after its key.
+`S3PathPairing` pairs the paths of one `copy()`, `get()` or `mv()`. Its `delete_paths()`
+splits the paths of an `rm()` into those deleted as given and those expanded. The
+pairing is fsspec's, except that a path with a version ID names that version, and its
+destination is named after its key.
+
+A source may also be an `S3Path`, as the filesystems pass the keys that their listings
+return. It names its bucket and key as they are, also a key that ends in what looks
+like a version ID query, such as `a/x?versionId=null`, and its destination is named
+after that key. `s3_copy_pairs()` pairs the sources as `copy_pairs()` does, and returns
+the S3 destination of an `S3Path` source as an `S3Path`. `conflict_candidates()` returns
+the candidates of `S3Path` sources as `S3Path` objects, and `missing` accepts them.
 
 A pairing is a frozen dataclass of `path1`, `path2`, `recursive` and `maxdepth`, and
 holds no filesystem. The filesystems read from it what to look up (`expands`,

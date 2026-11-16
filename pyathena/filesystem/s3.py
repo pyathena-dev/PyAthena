@@ -2752,7 +2752,7 @@ class S3FileSystem(AbstractFileSystem):
         concurrency = min(limit, len(pairs))
         call_kwargs = self._batch_kwargs(concurrency, kwargs)
 
-        def copy_pair(pair: tuple[str, str]) -> bool:
+        def copy_pair(pair: tuple[str | S3Path, str | S3Path]) -> bool:
             """Copy a pair of the move.
 
             Args:
@@ -2777,7 +2777,7 @@ class S3FileSystem(AbstractFileSystem):
         recursive: bool = False,
         maxdepth: int | None = None,
         source_params: Mapping[str, Any] | None = None,
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str | S3Path, str | S3Path]]:
         """Pair and check the paths of a move (see :meth:`S3PathPairing.move_pairs`).
 
         Args:
@@ -2807,10 +2807,10 @@ class S3FileSystem(AbstractFileSystem):
     def _conflict_lookups(
         self,
         pairing: S3PathPairing,
-        pairs: list[tuple[str, str]],
+        pairs: list[tuple[str | S3Path, str | S3Path]],
         source_params: Mapping[str, Any] | None = None,
         copy: bool = False,
-    ) -> tuple[set[str], set[str]]:
+    ) -> tuple[set[str | S3Path], set[str]]:
         """Look up what the conflict checks of a move or a copy need.
 
         See :meth:`S3PathPairing.conflict_candidates`.
@@ -2831,11 +2831,11 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             OSError: If bucket versioning cannot be read.
         """
-        paths = {p: S3Path.parse(p) for pair in pairs for p in pair}
-        unversioned = {p.name for p in paths.values() if not p.version_id}
+        paths = {self._pair_path(p) for pair in pairs for p in pair}
+        unversioned = {p.name for p in paths if not p.version_id}
         buckets = {
             p.bucket
-            for p in paths.values()
+            for p in paths
             if p.version_id == "null" and p.name in unversioned and not p.is_directory_bucket
         }
         versioned_buckets = {
@@ -2847,44 +2847,86 @@ class S3FileSystem(AbstractFileSystem):
             for source in pairing.conflict_candidates(
                 pairs, versioning_enabled_buckets=versioned_buckets, copy=copy
             )
-            if self._head_object(S3Path.parse(source), lookup_kwargs=lookup_kwargs) is None
+            if self._head_object(self._pair_path(source), lookup_kwargs=lookup_kwargs) is None
         }
         return missing, versioned_buckets
+
+    @staticmethod
+    def _pair_path(path: str | S3Path) -> S3Path:
+        """Return a path of the pairs of a copy as an ``S3Path``.
+
+        Args:
+            path: A path string that the caller passed, which is parsed, or
+                a listed path.
+
+        Returns:
+            The path.
+        """
+        return path if isinstance(path, S3Path) else S3Path.parse(path)
 
     def _copy_pairs(
         self,
         pairing: S3PathPairing,
-        isdir: Callable[[str], bool] | None = None,
+        local: bool = False,
         **kwargs: Any,
-    ) -> list[tuple[str, str]]:
-        """Expand and pair the paths of a copy (see :meth:`S3PathPairing.copy_pairs`).
+    ) -> list[tuple[str | S3Path, str | S3Path]]:
+        """Expand and pair the paths of a copy (see :meth:`S3PathPairing.s3_copy_pairs`).
 
-        The destination is looked up only when it decides the pairing.
+        The sources are expanded as :meth:`_expand_paths` names them: a path
+        that the caller passes as the string it was given, and a listed entry
+        as its bucket and key. The destination is looked up only when it
+        decides the pairing.
 
         Args:
             pairing: The paths of the copy.
-            isdir: Whether the destination is a directory, by default
-                ``self.isdir``; ``get()`` passes the local filesystem's.
-            **kwargs: Passed to ``expand_path()``, as fsspec's ``get()`` passes
-                its keyword arguments.
+            local: Whether the destinations are the local paths of ``get()``,
+                which the local filesystem looks up, and which are named as
+                :meth:`S3PathPairing.copy_pairs` names them.
+            **kwargs: Passed to the expansion, as fsspec's ``get()`` passes its
+                keyword arguments to ``expand_path()``.
 
         Returns:
             The sources and their destinations.
         """
         if not pairing.expands:
-            return pairing.copy_pairs()
-        sources = self.expand_path(
+            return list(pairing.copy_pairs())
+        expanded = self._expand_paths(
             pairing.path1, recursive=pairing.recursive, maxdepth=pairing.maxdepth, **kwargs
         )
         if pairing.skips_directories:
-            sources = [p for p in sources if not (trailing_sep(p) or self.isdir(p))]
+            expanded = [
+                (name, target)
+                for name, target in expanded
+                if not (trailing_sep(name) or self._target_isdir(target))
+            ]
+        sources = [target for _, target in expanded]
+        isdir = LocalFileSystem().isdir if local else self.isdir
         destination_is_dir = (
             # A string, as looks_up_destination checks.
-            (isdir or self.isdir)(cast(str, pairing.path2))
-            if sources and pairing.looks_up_destination
-            else None
+            isdir(cast(str, pairing.path2)) if sources and pairing.looks_up_destination else None
         )
-        return pairing.copy_pairs(sources, destination_is_dir)
+        if local:
+            return list(pairing.copy_pairs(sources, destination_is_dir))
+        return pairing.s3_copy_pairs(sources, destination_is_dir)
+
+    def _target_isdir(self, target: str | S3Path) -> bool:
+        """Return whether a path that an expansion names is a directory.
+
+        Args:
+            target: A path string that the caller passed, which ``isdir()``
+                looks up, or a listed path, looked up by its bucket and key.
+
+        Returns:
+            Whether the path is a directory.
+        """
+        if isinstance(target, str):
+            return bool(self.isdir(target))
+        try:
+            return bool(
+                self._path_info(target).get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
+            )
+        except OSError:
+            return False
 
     def copy(
         self,
@@ -2951,7 +2993,7 @@ class S3FileSystem(AbstractFileSystem):
         concurrency = min(limit, len(pairs))
         call_kwargs = self._batch_kwargs(concurrency, kwargs)
 
-        def copy_pair(pair: tuple[str, str]) -> None:
+        def copy_pair(pair: tuple[str | S3Path, str | S3Path]) -> None:
             """Copy a pair.
 
             Args:
@@ -3011,7 +3053,7 @@ class S3FileSystem(AbstractFileSystem):
         root = make_path_posix(lpath) if isinstance(lpath, (str, os.PathLike)) else lpath
         pairs = self._copy_pairs(
             S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
-            isdir=LocalFileSystem().isdir,
+            local=True,
             **kwargs,
         )
         if isinstance(root, str):
@@ -3026,14 +3068,15 @@ class S3FileSystem(AbstractFileSystem):
         call_kwargs = self._batch_kwargs(concurrency, kwargs)
         locked = _S3LockedCallback(callback, threading.Lock())
 
-        def get_pair(pair: tuple[str, Any]) -> None:
+        def get_pair(pair: tuple[str | S3Path, Any]) -> None:
             """Download a pair with a branch of the callback.
 
             Args:
-                pair: The S3 source and its local destination.
+                pair: The S3 source and its local destination. The branch
+                    is named after the source as a string.
             """
             rp, lp = pair
-            with locked.branched(rp, lp) as child:
+            with locked.branched(str(rp), lp) as child:
                 self.get_file(rp, lp, callback=child, **call_kwargs)
             locked.relative_update(1)
 
@@ -3082,8 +3125,8 @@ class S3FileSystem(AbstractFileSystem):
 
     def cp_file(
         self,
-        path1: str | os.PathLike[str],
-        path2: str | os.PathLike[str],
+        path1: str | os.PathLike[str] | S3Path,
+        path2: str | os.PathLike[str] | S3Path,
         recursive=False,
         maxdepth=None,
         on_error=None,
@@ -3096,8 +3139,10 @@ class S3FileSystem(AbstractFileSystem):
         and multipart copy based on object size.
 
         Args:
-            path1: Source S3 path (s3://bucket/key).
-            path2: Destination S3 path (s3://bucket/key).
+            path1: Source S3 path (s3://bucket/key), or an ``S3Path``, whose
+                bucket, key and version are used as they are, such as a key
+                that a listing returns.
+            path2: Destination S3 path (s3://bucket/key), or an ``S3Path``.
             recursive: Unused parameter for fsspec compatibility.
             maxdepth: Unused parameter for fsspec compatibility.
             on_error: Unused parameter for fsspec compatibility.
@@ -3125,12 +3170,12 @@ class S3FileSystem(AbstractFileSystem):
         path1, path2 = stringify_path(path1), stringify_path(path2)
         self._copy_file(path1, path2, **kwargs)
 
-    def _copy_file(self, path1: str, path2: str, **kwargs) -> bool:
+    def _copy_file(self, path1: str | S3Path, path2: str | S3Path, **kwargs) -> bool:
         """Copy an S3 object as :meth:`cp_file` does.
 
         Args:
-            path1: Source S3 path (s3://bucket/key).
-            path2: Destination S3 path (s3://bucket/key).
+            path1: Source S3 path (s3://bucket/key), or an ``S3Path``.
+            path2: Destination S3 path (s3://bucket/key), or an ``S3Path``.
             **kwargs: Additional S3 copy parameters, as for :meth:`cp_file`.
 
         Returns:
@@ -3143,8 +3188,8 @@ class S3FileSystem(AbstractFileSystem):
         # Parameters of the multipart copy, not of the S3 requests.
         block_size = kwargs.pop("block_size", None)
         max_workers = kwargs.pop("max_workers", None)
-        source = S3Path.parse(path1)
-        destination = S3Path.parse(path2)
+        source = self._pair_path(path1)
+        destination = self._pair_path(path2)
         if destination.version_id:
             raise ValueError("Cannot copy to a versioned file.")
         if not source.key or not destination.key:
@@ -3152,7 +3197,12 @@ class S3FileSystem(AbstractFileSystem):
 
         # Looked up with the parameters that authorize the access to the
         # source, such as its customer-provided key.
-        info1 = self.info(path1, **self.core.copy_source_params(kwargs))
+        source_params = self.core.copy_source_params(kwargs)
+        info1 = (
+            self.info(path1, **source_params)
+            if isinstance(path1, str)
+            else self._path_info(source, lookup_kwargs=self._get_lookup_kwargs(source_params))
+        )
         if info1.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
             # Recursive copy() passes the directories too; S3 has no object
             # to copy for them.
@@ -3173,7 +3223,10 @@ class S3FileSystem(AbstractFileSystem):
         finally:
             # A multipart copy that fails to copy an annotation has already
             # written the destination.
-            self.invalidate_cache(path2)
+            if isinstance(path2, str):
+                self.invalidate_cache(path2)
+            else:
+                self._invalidate(destination)
         return True
 
     def _copy_object_with_multipart_upload(
@@ -3855,7 +3908,7 @@ class S3FileSystem(AbstractFileSystem):
 
     def get_file(
         self,
-        rpath: str | os.PathLike[str],
+        rpath: str | os.PathLike[str] | S3Path,
         lpath=None,
         callback=_DEFAULT_CALLBACK,
         outfile=None,
@@ -3883,7 +3936,9 @@ class S3FileSystem(AbstractFileSystem):
         directories of a local file ``lpath`` are created as needed.
 
         Args:
-            rpath: S3 source path (s3://bucket/key).
+            rpath: S3 source path (s3://bucket/key), or an ``S3Path``, whose
+                bucket, key and version are used as they are, such as a key
+                that a listing returns.
             lpath: Local destination path, or a file-like object to write to.
                 Not needed when ``outfile`` is given.
             callback: Progress callback for tracking download progress, with
@@ -3899,13 +3954,13 @@ class S3FileSystem(AbstractFileSystem):
                 ``DEFAULT_BLOCK_SIZE`` if that is not positive either, and the
                 size of the callback is unknown.
         """
-        path_version_id = S3Path.parse(self._strip_protocol(rpath)).version_id
+        s3_path = rpath if isinstance(rpath, S3Path) else S3Path.parse(self._strip_protocol(rpath))
         if outfile is None and isfilelike(lpath):
             outfile = lpath
         elif (
             outfile is None
-            and not (path_version_id or kwargs.get("version_id"))
-            and self.isdir(rpath)
+            and not (s3_path.version_id or kwargs.get("version_id"))
+            and (self.isdir(rpath) if not isinstance(rpath, S3Path) else self._target_isdir(rpath))
         ):
             # A requested version always names an object, while isdir()
             # would look up the latest version, or the prefix of the same
@@ -3915,9 +3970,7 @@ class S3FileSystem(AbstractFileSystem):
 
         # The codec, if any, as fsspec's open() resolves it, with "infer"
         # from the key without the version.
-        codec = get_compression(
-            S3Path.parse(self._strip_protocol(rpath)).key or "", kwargs.pop("compression", None)
-        )
+        codec = get_compression(s3_path.key or "", kwargs.pop("compression", None))
         # Not the caller's cache: one such as "all" would read the whole
         # object when the file is opened, and "background" reads outside
         # the stop scopes of the caller. Without a codec, the object is read
@@ -3934,7 +3987,11 @@ class S3FileSystem(AbstractFileSystem):
         # The remote file is opened first so that no local file is created
         # when open() finds no object at the path.
         with contextlib.ExitStack() as stack:
-            remote = stack.enter_context(self.open(rpath, "rb", **kwargs))
+            remote = stack.enter_context(
+                self._open(rpath, "rb", **kwargs)
+                if isinstance(rpath, S3Path)
+                else self.open(rpath, "rb", **kwargs)
+            )
             reader: Any = None
             if codec is not None:
                 # As fsspec's open() wraps the file, but closed with it.
@@ -4495,7 +4552,7 @@ class S3FileSystem(AbstractFileSystem):
             return False
         return True
 
-    def _object_exists(self, path: str, lookup_kwargs: Mapping[str, Any]) -> bool:
+    def _object_exists(self, path: str | S3Path, lookup_kwargs: Mapping[str, Any]) -> bool:
         """Check whether an object exists at the path, for a write that must not replace one.
 
         A key that is only a prefix of other keys has no object, as when
@@ -4510,7 +4567,11 @@ class S3FileSystem(AbstractFileSystem):
             True if an object exists at the path.
         """
         try:
-            info = self.info(path, **lookup_kwargs)
+            info = (
+                self.info(path, **lookup_kwargs)
+                if isinstance(path, str)
+                else self._path_info(path, lookup_kwargs=lookup_kwargs)
+            )
         except FileNotFoundError:
             return False
         return bool(info.get("type") != S3ObjectType.S3_OBJECT_TYPE_DIRECTORY)
@@ -4660,7 +4721,7 @@ class S3FileSystem(AbstractFileSystem):
 
     def _open(
         self,
-        path: str,
+        path: str | S3Path,
         mode: str = "rb",
         block_size: int | None = None,
         cache_type: str | None = None,
@@ -4777,7 +4838,7 @@ class S3FileTarget:
     def resolve(
         cls,
         fs: S3FileSystem,
-        path: str,
+        path: str | S3Path,
         mode: str,
         *,
         block_size: int,
@@ -4791,7 +4852,10 @@ class S3FileTarget:
 
         Args:
             fs: The filesystem that the file belongs to.
-            path: S3 path (s3://bucket/key) of the file.
+            path: S3 path (s3://bucket/key) of the file, or an ``S3Path``,
+                whose bucket, key and version are used as they are, such as
+                a key that a listing returns, and which is looked up by them.
+                The path of the file is then the string of the ``S3Path``.
             mode: The file mode: ``rb``, ``wb``, ``ab``, or ``xb``.
             block_size: The block size of the file.
             version_id: The version ID to read. Must match the version ID in
@@ -4816,7 +4880,11 @@ class S3FileTarget:
         """
         # A new dictionary, so that the caller's is not modified.
         kwargs: dict[str, Any] = dict(request_kwargs or {})
-        s3_path = S3Path.parse(path)
+        # A path string is looked up as a string, and an S3Path by its bucket,
+        # key and version.
+        typed = path if isinstance(path, S3Path) else None
+        s3_path = typed or S3Path.parse(cast(str, path))
+        path = str(path)
         path_version_id = s3_path.version_id
         if not s3_path.key:
             raise ValueError("The path does not contain a key.")
@@ -4856,7 +4924,11 @@ class S3FileTarget:
         if "r" in mode:
             # Looked up here; the base class initializer of a file would
             # otherwise take the size from the latest version of the object.
-            info = fs.info(path, version_id=version_id, **lookup_kwargs)
+            info = (
+                fs._path_info(typed.with_version_id(version_id), lookup_kwargs=lookup_kwargs)
+                if typed
+                else fs.info(path, version_id=version_id, **lookup_kwargs)
+            )
             if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
                 # A prefix has no object to read.
                 raise FileNotFoundError(path)
@@ -4880,7 +4952,11 @@ class S3FileTarget:
             # The rewritten object keeps the metadata of the existing one,
             # which a cached listing entry lacks, so look up the object.
             with contextlib.suppress(FileNotFoundError):
-                appended = fs.info(path, refresh=True, **lookup_kwargs)
+                appended = (
+                    fs._path_info(typed, refresh=True, lookup_kwargs=lookup_kwargs)
+                    if typed
+                    else fs.info(path, refresh=True, **lookup_kwargs)
+                )
             if (
                 appended is not None
                 and appended.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
@@ -4896,7 +4972,11 @@ class S3FileTarget:
                     # the whole object is read, and an object replaced since
                     # is not.
                     condition = {"IfMatch": etag} if etag else {}
-                    append_data = fs.cat_file(path, **condition, **lookup_kwargs)
+                    append_data = (
+                        fs._cat_object(typed, **condition, **lookup_kwargs)
+                        if typed
+                        else fs.cat_file(path, **condition, **lookup_kwargs)
+                    )
                 # The attributes of the object looked up are kept where the
                 # caller gives none: the encryption as a whole, so that its
                 # fields are not combined with another encryption, and
@@ -4919,7 +4999,7 @@ class S3FileTarget:
         elif "x" in mode:
             # Checked up front so that no data is uploaded for an existing
             # object, and on commit with IfNoneMatch for one created since.
-            if fs._object_exists(path, lookup_kwargs):
+            if fs._object_exists(typed or path, lookup_kwargs):
                 raise FileExistsError(path)
             kwargs.update({"IfNoneMatch": "*"})
         return cls(
@@ -4947,7 +5027,7 @@ class S3File(AbstractBufferedFile):
     def __init__(
         self,
         fs: S3FileSystem,
-        path: str,
+        path: str | S3Path,
         mode: str = "rb",
         version_id: str | None = None,
         max_workers: int | None = None,
@@ -4974,7 +5054,8 @@ class S3File(AbstractBufferedFile):
 
         Args:
             fs: The filesystem that the file belongs to.
-            path: S3 path (s3://bucket/key) of the file.
+            path: S3 path (s3://bucket/key) of the file, or an ``S3Path``
+                (see :meth:`S3FileTarget.resolve`).
             mode: The file mode: ``rb``, ``wb``, ``ab``, or ``xb``.
             version_id: The version ID to read. Must match the version ID in
                 the path if both are given. A version cannot be given, in

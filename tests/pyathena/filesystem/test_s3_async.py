@@ -50,6 +50,7 @@ from tests.pyathena.util import (
     MOVE_SOURCE_PARAMS,
     MULTIPART_COPY_BLOCK_SIZE,
     MULTIPART_COPY_KWARGS,
+    BranchRecordingCallback,
     OpaquePath,
     ThrottledOperation,
     await_bounded,
@@ -62,6 +63,7 @@ from tests.pyathena.util import (
     retried,
     run_bounded,
     run_in_forked_child,
+    s3_copy_targets,
     s3_request_targets,
     serve_s3_keys,
     shutdown_bounded,
@@ -735,6 +737,64 @@ class TestAioS3FileSystem:
         _, requests = serve_s3_keys(fs._sync_fs, {"a/x", "a/x?versionId=v1"})
         assert await await_bounded(call(fs)) == result
         assert s3_request_targets(requests) == sent
+
+    @pytest.mark.parametrize(
+        ("call", "stored", "copied", "deleted"),
+        [
+            pytest.param(
+                lambda fs: fs._copy("s3://bucket/a", "s3://bucket/b", recursive=True),
+                {"a/x", "a/x?versionId=null", "b/x", "b/x?versionId=null"},
+                [("a/x", None, "b/x"), ("a/x?versionId=null", None, "b/x?versionId=null")],
+                [],
+                id="copy",
+            ),
+            pytest.param(
+                lambda fs: fs._copy("s3://bucket/a/*", "s3://bucket/c/"),
+                {"a/x", "a/x?versionId=null", "c/x", "c/x?versionId=null"},
+                [("a/x", None, "c/x"), ("a/x?versionId=null", None, "c/x?versionId=null")],
+                [],
+                id="copy-glob",
+            ),
+            pytest.param(
+                lambda fs: fs._mv("s3://bucket/a", "s3://bucket/b", recursive=True),
+                {"b/x", "b/x?versionId=null"},
+                [("a/x", None, "b/x"), ("a/x?versionId=null", None, "b/x?versionId=null")],
+                [("delete_objects", "a/x", None), ("delete_objects", "a/x?versionId=null", None)],
+                id="mv",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_copies_act_on_listed_keys(self, call, stored, copied, deleted):
+        # GH-1403: the asynchronous copies act on the keys that a listing
+        # returns, as those of S3FileSystem do.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, requests = serve_s3_keys(fs._sync_fs, {"a/x", "a/x?versionId=null"})
+        await await_bounded(call(fs))
+        assert store == stored
+        assert s3_copy_targets(requests) == copied
+        assert [t for t in s3_request_targets(requests) if t[0] == "delete_objects"] == deleted
+
+    @pytest.mark.asyncio
+    async def test_get_downloads_listed_keys(self, tmp_path):
+        # GH-1403: _get() downloads the keys that a listing returns as get()
+        # does, with the branches of the callback named after them as strings.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs._sync_fs, {"a/x", "a/x?versionId=null"})
+        callback = BranchRecordingCallback()
+        await await_bounded(
+            fs._get("s3://bucket/a", str(tmp_path / "out"), recursive=True, callback=callback)
+        )
+        assert sorted(os.listdir(tmp_path / "out")) == ["x", "x?versionId=null"]
+        assert [t for t in s3_request_targets(requests) if t[0] == "get_object"] == [
+            ("get_object", "a/x", None),
+            ("get_object", "a/x?versionId=null", None),
+        ]
+        assert sorted(callback.sources) == ["bucket/a", "bucket/a/x", "bucket/a/x?versionId=null"]
 
     @pytest.mark.asyncio
     async def test_du_cancellation_sends_no_further_lookup(self):
