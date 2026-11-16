@@ -4378,9 +4378,10 @@ class S3FileSystem(AbstractFileSystem):
         A version-qualified path invalidates the lookup of the version, and
         also the object path without the version, because deleting or
         copying a version can change the current version of the object. It
-        also invalidates the key that ends in its query, such as the key
-        ``a/x?versionId=v1`` of ``bucket/a/x?versionId=v1``, which a listing
-        names as the path. Only the path itself is parsed for a version: its
+        also invalidates the keys that end in its query, in each spelling
+        that names the version, such as the keys ``a/x?versionId=v1`` and
+        ``a/x?version_id=v1`` of ``bucket/a/x?versionId=v1``, which a listing
+        names as the paths. Only the path itself is parsed for a version: its
         parent paths are directories, named as they are listed, such as
         ``bucket/a/dir?versionId=v1`` for the key ``a/dir?versionId=v1/x``.
         A path that ends in slashes is invalidated both with and without
@@ -4401,14 +4402,17 @@ class S3FileSystem(AbstractFileSystem):
         trailing = len(raw) - len(raw.rstrip("/"))
         for spelling in (stripped, stripped + "/" * trailing) if trailing else (stripped,):
             base, version_id = S3Path.split_version_id(spelling)
-            if version_id:
-                # The lookup of the version, as _lookup_cache_key() keys it,
-                # and the object path without the version.
-                self._evict_lookup((base, _VERSION_CACHE_KEY, version_id))
-                self._invalidate_name(base)
-            # The path as named, also the key that ends in a version ID query,
-            # or the directory of a trailing slash.
-            self._invalidate_name(spelling)
+            if not version_id:
+                # Also the directory of a trailing slash.
+                self._invalidate_name(spelling)
+                continue
+            # The lookup of the version, as _lookup_cache_key() keys it, the
+            # keys that end in the query in each spelling that names the
+            # version, and the object path without the version.
+            self._evict_lookup((base, _VERSION_CACHE_KEY, version_id))
+            for query in ("versionId", "versionID", "versionid", "version_id"):
+                self._invalidate_name(f"{base}?{query}={version_id}")
+            self._invalidate_name(base)
 
     def _invalidate(self, path: S3Path) -> None:
         """Remove the cached entries of a path and of the directories above it.

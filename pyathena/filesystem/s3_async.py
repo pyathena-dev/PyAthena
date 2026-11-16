@@ -1084,8 +1084,8 @@ class AioS3FileSystem(AsyncFileSystem):
 
         As fsspec does, looks up the entries that ``find()`` returns one at
         a time, each in a thread of the filesystem, so that a cancellation
-        sends no further lookup. A listed entry is looked up by its bucket
-        and key, never by parsing its name.
+        sends no further lookup of an entry. A listed entry is looked up by
+        its bucket and key, never by parsing its name.
 
         Args:
             path: The path to search under.

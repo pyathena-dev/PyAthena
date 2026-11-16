@@ -1310,6 +1310,8 @@ class TestS3FileSystem:
             # The key that ends in the query of a version path.
             ("s3://bucket/a/x?versionId=v1", "bucket/a/x?versionId=v1"),
             ("s3://bucket/?versionId=v1", "bucket/?versionId=v1"),
+            # The directory named by another spelling of the same query.
+            ("s3://bucket/a/dir?versionId=v1", ("bucket/a/dir?versionID=v1", "/")),
             # The directory of the common prefix "/" (keys such as "/x").
             ("s3://bucket/", ("bucket/", "/")),
         ],
