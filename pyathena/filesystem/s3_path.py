@@ -89,6 +89,25 @@ class S3Path:
         return cls(match.group("bucket"), match.group("key"), match.group("version_id"))
 
     @classmethod
+    def of(cls, path: str | S3Path) -> S3Path:
+        """Return a path string parsed, or an S3 path as it is.
+
+        An ``S3Path``, such as a key that a listing returns, is never parsed
+        again, so that a key that ends in what looks like a version ID query
+        keeps naming that key.
+
+        Args:
+            path: The S3 path string, as for :meth:`parse`, or an ``S3Path``.
+
+        Returns:
+            The path.
+
+        Raises:
+            ValueError: If the string is not a valid S3 path.
+        """
+        return path if isinstance(path, S3Path) else cls.parse(path)
+
+    @classmethod
     def split_version_id(cls, path: str) -> tuple[str, str | None]:
         """Split the version ID query from the end of a path string.
 

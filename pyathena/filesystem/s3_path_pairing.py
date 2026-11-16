@@ -234,8 +234,8 @@ class S3PathPairing:
             TypeError: If ``versioning_enabled_buckets`` is a string.
         """
         return [
-            target if isinstance(p1, S3Path) else str(target)
-            for p1, target in self._moves(pairs, versioning_enabled_buckets, copy)[2]
+            pair.source if isinstance(pair.path1, S3Path) else str(pair.source)
+            for pair in self._moves(pairs, versioning_enabled_buckets, copy)[2]
         ]
 
     def move_pairs(
@@ -341,8 +341,8 @@ class S3PathPairing:
         if missing is None and candidates:
             raise ValueError("missing is needed to check the pairs.")
         # A directory without an object at its key writes no destination.
-        skipped = {target for _, target in candidates}.intersection(
-            self._target(self._as_path(path), versioning_enabled_buckets) for path in missing or ()
+        skipped = {pair.source for pair in candidates}.intersection(
+            self._target(S3Path.of(path), versioning_enabled_buckets) for path in missing or ()
         )
         # A path with a version always names an object, so it writes its
         # destination even when the key has no current object.
@@ -399,18 +399,6 @@ class S3PathPairing:
         return has_magic(path) and not S3Path.has_version_id(path)
 
     @staticmethod
-    def _as_path(path: str | S3Path) -> S3Path:
-        """Return a path of the pairs as an ``S3Path``.
-
-        Args:
-            path: A path string, which is parsed, or an ``S3Path``.
-
-        Returns:
-            The path.
-        """
-        return path if isinstance(path, S3Path) else S3Path.parse(path)
-
-    @staticmethod
     def _target(path: S3Path, versioning_enabled_buckets: Collection[str]) -> S3Path:
         """Return a move target using the caller's bucket versioning state.
 
@@ -429,7 +417,7 @@ class S3PathPairing:
         pairs: Sequence[tuple[str | S3Path, str | S3Path]],
         versioning_enabled_buckets: Collection[str] = (),
         copy: bool = False,
-    ) -> tuple[list[_NamedPair], set[S3Path], list[tuple[str | S3Path, S3Path]]]:
+    ) -> tuple[list[_NamedPair], set[S3Path], list[_NamedPair]]:
         """Compare the paths of a move by what they name.
 
         Args:
@@ -440,9 +428,8 @@ class S3PathPairing:
         Returns:
             Each pair with whether its source has a version and the targets
             of its source and destination; the targets of all sources,
-            including those left in place; and the conflict candidates (see
-            :meth:`conflict_candidates`), each as the source of its pair and
-            its target.
+            including those left in place; and the pairs of the conflict
+            candidates (see :meth:`conflict_candidates`).
 
         Raises:
             TypeError: If ``versioning_enabled_buckets`` is a string.
@@ -453,14 +440,14 @@ class S3PathPairing:
             )
         named = []
         for p1, p2 in pairs:
-            source_path = S3PathPairing._as_path(p1)
+            source_path = S3Path.of(p1)
             named.append(
                 _NamedPair(
                     p1,
                     p2,
                     bool(source_path.version_id),
                     S3PathPairing._target(source_path, versioning_enabled_buckets),
-                    S3PathPairing._target(S3PathPairing._as_path(p2), versioning_enabled_buckets),
+                    S3PathPairing._target(S3Path.of(p2), versioning_enabled_buckets),
                 )
             )
         # The sources left in place count too; a copy onto one overwrites it.
@@ -475,7 +462,7 @@ class S3PathPairing:
                 parent = parent.rpartition("/")[0]
         counts = Counter(pair.destination for pair in named if pair.source != pair.destination)
         candidates = [
-            (pair.path1, pair.source)
+            pair
             for pair in named
             if pair.source != pair.destination
             and (counts[pair.destination] > 1 or pair.destination in sources)

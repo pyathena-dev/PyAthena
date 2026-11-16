@@ -1319,6 +1319,56 @@ class TestS3FileSystem:
         ]
         assert sorted(callback.sources) == ["bucket/a", "bucket/a/x", "bucket/a/x?versionId=null"]
 
+    @pytest.mark.parametrize(
+        ("path", "version_id", "sent"),
+        [
+            (
+                S3Path("bucket", "a/x?versionId=null"),
+                None,
+                ("head_object", "a/x?versionId=null", None),
+            ),
+            (
+                S3Path("bucket", "a/x?versionId=null"),
+                "v2",
+                ("head_object", "a/x?versionId=null", "v2"),
+            ),
+        ],
+    )
+    def test_info_looks_up_path_as_it_is(self, path, version_id, sent):
+        # GH-1403: info() looks an S3Path up by its bucket, key and version,
+        # as given or from version_id, never by parsing its name.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs, self.NULL_KEYS)
+        assert fs.info(path, version_id=version_id)["name"] == "bucket/a/x?versionId=null"
+        assert s3_request_targets(requests) == [sent]
+
+    @pytest.mark.parametrize(
+        ("call", "sent"),
+        [
+            pytest.param(
+                lambda fs: fs.copy(["s3://bucket/a/x", "s3://bucket/a/*"], "s3://bucket/b/"),
+                [("copy_object", "b/x", None)],
+                id="copy",
+            ),
+            pytest.param(
+                lambda fs: fs.rm(["s3://bucket/a/x", "s3://bucket/a/*"]),
+                [("delete_objects", "a/x", None)],
+                id="rm",
+            ),
+        ],
+    )
+    def test_expansion_acts_on_an_object_once(self, call, sent):
+        # GH-1403: a path that the caller passes and a listed key that name
+        # the same object are acted on once, as expand_path() names them once.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs, {"a/x"})
+        call(fs)
+        assert [t for t in s3_request_targets(requests) if t[0] != "head_object"] == sent
+
     def test_expand_path_expands_below_listed_matches(self):
         # GH-1402: a recursive glob expands below each match by its key prefix.
         fs = S3FileSystem(
@@ -2775,7 +2825,7 @@ class TestS3FileSystem:
         fs._expand_paths = mock.MagicMock(
             return_value=[("bucket/src/sub", S3Path("bucket", "src/sub"))]
         )
-        fs._target_isdir = mock.MagicMock(return_value=True)
+        fs.isdir = mock.MagicMock(return_value=True)
 
         fs.mv("s3://bucket/src", "s3://bucket/dst/", recursive=True, maxdepth=1)
         fs._call.assert_not_called()
