@@ -77,6 +77,7 @@ from tests.pyathena.util import (
     poll_until,
     retried,
     run_in_forked_child,
+    s3_request_targets,
     serve_s3_keys,
     shutdown_bounded,
     sigint_when,
@@ -424,17 +425,17 @@ class TestS3FileSystem:
     @pytest.mark.parametrize(
         ("path", "cache_key"),
         [
-            ("s3://bucket/a/c.txt?versionId=v1", "bucket/a/c.txt?versionId=v1"),
-            (Path("bucket/a/c.txt?versionId=v1"), "bucket/a/c.txt?versionId=v1"),
+            # A lookup of a version is cached under its name and version ID,
+            # whatever spelling of the query named it.
+            ("s3://bucket/a/c.txt?versionId=v1", ("bucket/a/c.txt", "versionId", "v1")),
+            (Path("bucket/a/c.txt?versionId=v1"), ("bucket/a/c.txt", "versionId", "v1")),
+            ("s3://bucket/a/c.txt?version_id=v1", ("bucket/a/c.txt", "versionId", "v1")),
             # A directory marker object keeps the trailing slash before the query.
-            ("s3://bucket/a/c.txt/?versionId=v1", "bucket/a/c.txt/?versionId=v1"),
-            # S3Path.parse accepts other spellings of the query.
-            ("s3://bucket/a/c.txt?version_id=v1", "bucket/a/c.txt?versionId=v1"),
-            ("s3://bucket/a/c.txt?versionId=v1", "bucket/a/c.txt?versionid=v1"),
+            ("s3://bucket/a/c.txt/?versionId=v1", ("bucket/a/c.txt/", "versionId", "v1")),
             # info() strips a slash after the version ID of a path, but not
             # of the version_id argument.
-            ("s3://bucket/a/c.txt?versionId=v1/", "bucket/a/c.txt?versionId=v1"),
-            ("s3://bucket/a/c.txt?versionId=v1/", "bucket/a/c.txt?versionId=v1/"),
+            ("s3://bucket/a/c.txt?versionId=v1/", ("bucket/a/c.txt", "versionId", "v1")),
+            ("s3://bucket/a/c.txt?versionId=v1/", ("bucket/a/c.txt", "versionId", "v1/")),
             # Without a version ID after it, the query is part of the key.
             ("s3://bucket/a/c.txt?versionId=/", "bucket/a/c.txt?versionId="),
         ],
@@ -443,16 +444,15 @@ class TestS3FileSystem:
         fs = self._make_fs()
         invalidated = [
             cache_key,
-            (cache_key, "/"),
+            (cache_key, "lookups"),
             "bucket/a/c.txt",
             ("bucket/a", "/"),
             ("bucket", "/"),
         ]
         # Other versions of the object do not change.
-        kept = ["bucket/a/c.txt?versionId=v2"]
+        kept = [("bucket/a/c.txt", "versionId", "v2")]
         for key in invalidated + kept:
             fs.dircache[key] = []
-
         fs.invalidate_cache(path)
         assert list(fs.dircache) == kept
 
@@ -860,7 +860,7 @@ class TestS3FileSystem:
         assert actual == ["bucket/key?versionId=v2"]
         assert [c.args[0] for c in fs._call.call_args_list] == [fs._client.head_object]
         # Nothing is cached as a listing of the version-qualified path.
-        assert list(fs.dircache) == ["bucket/key?versionId=v2"]
+        assert list(fs.dircache) == [("bucket/key", "versionId", "v2")]
 
     def test_listing_of_missing_version_path(self):
         # GH-1351: the keys under the key prefix do not make a missing
@@ -1197,6 +1197,167 @@ class TestS3FileSystem:
             ("bucket/a", ["b", "d"], []),
             ("bucket/a/d", [], ["e"]),
         ]
+
+    # The key "a/x" and a key that a string path would name as its version.
+    LITERAL_KEYS = ("a/x", "a/x?versionId=v1")
+
+    @pytest.mark.parametrize(
+        ("call", "result", "sent"),
+        [
+            pytest.param(
+                lambda fs: fs.rm("s3://bucket/a", recursive=True),
+                None,
+                [
+                    ("delete_objects", "a", None),
+                    ("delete_objects", "a/x", None),
+                    ("delete_objects", "a/x?versionId=v1", None),
+                ],
+                id="rm",
+            ),
+            pytest.param(
+                lambda fs: fs.chmod("s3://bucket/a", "private", recursive=True),
+                None,
+                [
+                    ("put_object_acl", "a", None),
+                    ("put_object_acl", "a/x", None),
+                    ("put_object_acl", "a/x?versionId=v1", None),
+                ],
+                id="chmod",
+            ),
+            pytest.param(
+                lambda fs: fs.cat("s3://bucket/a/*"),
+                {"bucket/a/x": b"aa", "bucket/a/x?versionId=v1": b"aa"},
+                [("get_object", "a/x", None), ("get_object", "a/x?versionId=v1", None)],
+                id="cat",
+            ),
+            pytest.param(
+                lambda fs: fs.du("s3://bucket/a"),
+                4,
+                [("head_object", "a/x", None), ("head_object", "a/x?versionId=v1", None)],
+                id="du",
+            ),
+            pytest.param(
+                # A path with a version still names the version.
+                lambda fs: fs.du("s3://bucket/a/x?versionId=v1"),
+                2,
+                [("head_object", "a/x", "v1")],
+                id="du-version",
+            ),
+        ],
+    )
+    def test_fan_outs_act_on_listed_keys(self, call, result, sent):
+        # GH-1402: a fan-out acts on the keys that a listing returns, also on a
+        # key that ends in what looks like a version ID query, never on the
+        # version that parsing its name would give.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs, self.LITERAL_KEYS)
+        assert call(fs) == result
+        assert s3_request_targets(requests) == sent
+
+    def test_expand_path_expands_below_listed_matches(self):
+        # GH-1402: a recursive glob expands below each match by its key prefix.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs, {"a/dir?versionId=v1/z"})
+        assert fs.expand_path("s3://bucket/a/*", recursive=True) == [
+            "bucket/a/dir?versionId=v1",
+            "bucket/a/dir?versionId=v1/z",
+        ]
+
+    @pytest.mark.parametrize(
+        ("call", "expected"),
+        [
+            pytest.param(
+                lambda fs: fs.expand_path("s3://bucket/a/*", recursive=True, prefix="keep"),
+                ["bucket/a/keepdir", "bucket/a/keepdir/keep.txt"],
+                id="prefix-below-matches",
+            ),
+            pytest.param(
+                lambda fs: fs.expand_path("s3://bucket/a/*", detail=False),
+                ["bucket/a/keepdir"],
+                id="detail",
+            ),
+        ],
+    )
+    def test_expand_path_passes_options_as_fsspec(self, call, expected):
+        # GH-1402: as in fsspec, the expansion below the matches of a
+        # recursive glob receives the prefix, and the caller's detail option
+        # is accepted.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs, {"a/keepdir/keep.txt", "a/keepdir/drop.txt"})
+        assert call(fs) == expected
+
+    def test_rm_of_unmatched_recursive_glob_deletes_nothing(self):
+        # GH-1402: as in fsspec, a recursive glob that matches nothing raises
+        # before anything is deleted.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, requests = serve_s3_keys(fs, {"a"})
+        with pytest.raises(FileNotFoundError):
+            fs.rm(["s3://bucket/a", "s3://bucket/missing*"], recursive=True)
+        assert store == {"a"}
+        assert not [t for t in s3_request_targets(requests) if t[0].startswith("delete")]
+
+    @pytest.mark.parametrize(
+        ("path", "cache_key"),
+        [
+            # The key that ends in the query of a version path.
+            ("s3://bucket/a/x?versionId=v1", "bucket/a/x?versionId=v1"),
+            ("s3://bucket/?versionId=v1", "bucket/?versionId=v1"),
+            # The directory named by another spelling of the same query.
+            ("s3://bucket/a/dir?versionId=v1", ("bucket/a/dir?versionID=v1", "/")),
+            # The directory of the common prefix "/" (keys such as "/x").
+            ("s3://bucket/", ("bucket/", "/")),
+        ],
+    )
+    def test_invalidate_cache_evicts_the_name_as_given(self, path, cache_key):
+        # GH-1402: a path string invalidates the entries named as it is
+        # spelled, besides the version that it may name.
+        fs = self._make_fs()
+        fs.dircache[cache_key] = []
+        fs.invalidate_cache(path)
+        assert cache_key not in fs.dircache
+
+    def test_lookups_keep_versions_apart_from_listed_keys(self):
+        # GH-1402: the lookup of a version is cached apart from that of a key
+        # whose name ends in the same version ID query.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs, self.LITERAL_KEYS)
+        fs.du("s3://bucket/a")
+        requests.clear()
+        fs.info("s3://bucket/a/x?versionId=v1")
+        assert s3_request_targets(requests) == [("head_object", "a/x", "v1")]
+
+        fs.invalidate_cache()
+        fs.info("s3://bucket/a/x?versionId=v1")
+        requests.clear()
+        fs.du("s3://bucket/a")
+        assert s3_request_targets(requests) == [
+            ("head_object", "a/x", None),
+            ("head_object", "a/x?versionId=v1", None),
+        ]
+
+    def test_deletion_invalidates_listed_directories(self):
+        # GH-1402: deleting a key evicts the cached listing of its directory,
+        # also of one named with a version ID query.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs, {"a/dir?versionId=v1/w", "a/dir?versionId=v1/z"})
+        assert sorted(fs.find("s3://bucket/a", maxdepth=3)) == [
+            "bucket/a/dir?versionId=v1/w",
+            "bucket/a/dir?versionId=v1/z",
+        ]
+        fs.rm("s3://bucket/a/*/z")
+        assert fs.find("s3://bucket/a", maxdepth=3) == ["bucket/a/dir?versionId=v1/w"]
 
     def test_find_directory_without_extra_requests(self):
         fs = self._make_fs()
@@ -2761,12 +2922,15 @@ class TestS3FileSystem:
         class Contents:
             pass
 
-        class Path(str):
-            # Interrupts the insertion of the first path into the dict.
-            def __hash__(self):
-                raise KeyboardInterrupt
-
         refs = []
+
+        class Path(str):
+            # Interrupts the insertion of the first path into the dict, once
+            # both reads have ended.
+            def __hash__(self):
+                if len(refs) == 2:
+                    raise KeyboardInterrupt
+                return str.__hash__(self)
 
         def cat_file(path, **kwargs):
             contents = Contents()
@@ -2774,7 +2938,9 @@ class TestS3FileSystem:
             return contents
 
         fs.cat_file = cat_file
-        fs.expand_path = mock.MagicMock(return_value=[Path("bucket/a"), Path("bucket/b")])
+        fs._expand_paths = mock.MagicMock(
+            return_value=[(Path(p), Path(p)) for p in ("bucket/a", "bucket/b")]
+        )
         gc.disable()
         try:
             with pytest.raises(KeyboardInterrupt) as info:
@@ -2880,7 +3046,7 @@ class TestS3FileSystem:
         fs.cp_file = mock.MagicMock()
         fs._head_object = mock.MagicMock(
             side_effect=lambda path, **kwargs: (
-                None if path.endswith("dir") else self._file_object("x")
+                None if path.name.endswith("dir") else self._file_object("x")
             )
         )
         fs.copy(["s3://bucket/dir", "s3://bucket/x"], ["s3://bucket/x", "s3://bucket/y"])
@@ -6309,7 +6475,9 @@ class TestS3FileSystem:
         # GH-1203: a failed ACL update stops the retries of the running ones,
         # whose backoff wait would take at least EVENT_TIMEOUT seconds.
         fs = self._make_fs()
-        fs.find = mock.MagicMock(return_value=["bucket/key1", "bucket/key2"])
+        fs._find_paths = mock.MagicMock(
+            return_value=[(self._file_object(k), S3Path("bucket", k)) for k in ("key1", "key2")]
+        )
         operation = ThrottledOperation(operation_name="PutObjectAcl")
         throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
 
@@ -6332,7 +6500,9 @@ class TestS3FileSystem:
         # EVENT_TIMEOUT seconds.
         # The update that is queued when the interrupt comes is not sent.
         fs = self._make_fs()
-        fs.find = mock.MagicMock(return_value=["bucket/key1", "bucket/key2"])
+        fs._find_paths = mock.MagicMock(
+            return_value=[(self._file_object(k), S3Path("bucket", k)) for k in ("key1", "key2")]
+        )
         operation = ThrottledOperation(operation_name="PutObjectAcl")
         throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
         updated = []

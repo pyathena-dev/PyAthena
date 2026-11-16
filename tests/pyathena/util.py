@@ -1812,6 +1812,30 @@ class OpaquePath:
         return self._path
 
 
+def s3_request_targets(requests):
+    """Return the operations, keys and version IDs of recorded S3 requests.
+
+    The listings are left out, and a DeleteObjects request counts once per
+    object.
+
+    Args:
+        requests: The requests that :func:`serve_s3_keys` records.
+
+    Returns:
+        The sorted tuples of the operation, the key, and the version ID.
+    """
+    targets = []
+    for name, request in requests:
+        if name == "delete_objects":
+            targets.extend(
+                (name, o["Key"], o.get("VersionId")) for o in request["Delete"]["Objects"]
+            )
+        elif name != "list_objects_v2":
+            targets.append((name, request.get("Key"), request.get("VersionId")))
+    # A request without a version ID sorts before those with one.
+    return sorted(targets, key=lambda target: (target[0], target[1] or "", target[2] or ""))
+
+
 def serve_s3_keys(fs, keys):
     """Answer the S3 requests of a filesystem from a set of keys of "bucket".
 
