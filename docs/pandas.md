@@ -124,6 +124,7 @@ The upload workers resolve the credentials themselves, except for a connection g
 The S3 requests, the uploads and, with `if_exists="replace"`, the listing and the deletion of the existing objects, are retried with the connection's retry policy (`retry_config`), resolved as for the S3 filesystem (see "Retries" in [S3 filesystem](filesystem.md)).
 A policy whose `exceptions` are the default codes also retries the S3 error codes `SlowDown`, `ServiceUnavailable`, `InternalError`, and `RequestTimeout`; a policy with other `exceptions` is used as given.
 The deletion is retried as a whole: a retry lists the objects that remain and deletes them.
+If S3 answers that it could not delete some of the objects, `to_sql` does not retry the deletion: it raises `OperationalError`, which lists them, before it writes any data, and the table remains dropped.
 
 ```python
 import pandas as pd

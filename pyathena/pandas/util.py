@@ -22,7 +22,7 @@ from boto3 import Session
 
 from pyathena import OperationalError
 from pyathena.cursor import Cursor
-from pyathena.filesystem.s3_core import S3Core
+from pyathena.filesystem.s3_core import S3Core, S3DeleteResult
 from pyathena.model import AthenaCompression
 from pyathena.util import RetryConfig, parse_output_location, retry_api_call
 
@@ -267,7 +267,10 @@ def to_sql(
     Raises:
         ValueError: If if_exists is invalid, compression is unsupported,
             or partition keys contain None values.
-        OperationalError: If if_exists="fail" and table already exists.
+        OperationalError: If if_exists="fail" and table already exists, or if
+            if_exists="replace" and S3 answers that it could not delete some
+            of the existing objects; this answer is not retried. The table has
+            been dropped then, and no data is written.
     """
     if if_exists not in ("fail", "replace", "append"):
         raise ValueError(f"`{if_exists}` is not valid for if_exists")
@@ -325,7 +328,18 @@ def to_sql(
             retry_config = S3Core.resolve_retry_config(conn._retry_config)
             objects = bucket.objects.filter(Prefix=key_prefix)
             if retry_api_call(lambda: list(objects.limit(1)), config=retry_config, logger=_logger):
-                retry_api_call(objects.delete, config=retry_config, logger=_logger)
+                responses = retry_api_call(objects.delete, config=retry_config, logger=_logger)
+                # DeleteObjects answers with success also when it cannot delete some
+                # of the objects, and lists them in its Errors.
+                errors = sorted(
+                    str(error)
+                    for response in responses
+                    for error in S3DeleteResult.from_response(bucket_name, response).errors
+                )
+                if errors:
+                    raise OperationalError(
+                        f"Failed to delete objects under {location}: {', '.join(errors)}"
+                    )
 
     if index:
         reset_index(df, index_label)

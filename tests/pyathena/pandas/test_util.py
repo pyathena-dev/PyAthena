@@ -725,6 +725,40 @@ def test_to_parquet_retries_s3_errors(exceptions, sends):
     assert len(requests) == sends
 
 
+def answer_existing_table(queries):
+    """Answer Athena's requests as if the table ``existing`` exists.
+
+    Args:
+        queries: A list that receives the first word of each query.
+
+    Returns:
+        A side effect for the client's ``_make_api_call``.
+    """
+    lookup = query_results_response([("table_name", "varchar")])
+    # The column labels, then the table that the lookup finds.
+    lookup["ResultSet"]["Rows"] = [
+        {"Data": [{"VarCharValue": "table_name"}]},
+        {"Data": [{"VarCharValue": "existing"}]},
+    ]
+    responses = {
+        "StartQueryExecution": {"QueryExecutionId": "query-id"},
+        "GetQueryExecution": {
+            "QueryExecution": {
+                **succeeded_query_execution_data("query-id", "SELECT", datetime.now(UTC)),
+                "ResultConfiguration": {"OutputLocation": "s3://bucket/path/query-id.csv"},
+            }
+        },
+        "GetQueryResults": lookup,
+    }
+
+    def answer(operation, parameters):
+        if operation == "StartQueryExecution":
+            queries.append(parameters["QueryString"].split()[0])
+        return responses[operation]
+
+    return answer
+
+
 @pytest.mark.parametrize(
     "exceptions",
     [["ThrottlingException", "TooManyRequestsException"], ["ThrottlingException"]],
@@ -765,33 +799,11 @@ def test_to_sql_replace_retries_s3_errors(exceptions):
         return AWSResponse(request.url, 200, {}, RawBody(answers[operation]))
 
     conn.session.events.register("before-send.s3", send)
-    lookup = query_results_response([("table_name", "varchar")])
-    # The column labels, then the table that the lookup finds.
-    lookup["ResultSet"]["Rows"] = [
-        {"Data": [{"VarCharValue": "table_name"}]},
-        {"Data": [{"VarCharValue": "existing"}]},
-    ]
-    responses = {
-        "StartQueryExecution": {"QueryExecutionId": "query-id"},
-        "GetQueryExecution": {
-            "QueryExecution": {
-                **succeeded_query_execution_data("query-id", "SELECT", datetime.now(UTC)),
-                "ResultConfiguration": {"OutputLocation": "s3://bucket/path/query-id.csv"},
-            }
-        },
-        "GetQueryResults": lookup,
-    }
     queries = []
-
-    def answer(operation, parameters):
-        if operation == "StartQueryExecution":
-            queries.append(parameters["QueryString"].split()[0])
-        return responses[operation]
-
     df = pd.DataFrame({"col_int": np.int32([1])})
     try:
         with (
-            patch.object(conn.client, "_make_api_call", side_effect=answer),
+            patch.object(conn.client, "_make_api_call", side_effect=answer_existing_table(queries)),
             patch.object(util, "to_parquet", return_value="s3://bucket/existing/new"),
         ):
             if exceptions == ["ThrottlingException"]:
@@ -807,6 +819,52 @@ def test_to_sql_replace_retries_s3_errors(exceptions):
         (body,) = deleted
         assert b"<Key>existing/old</Key>" in body
         assert queries == ["SELECT", "DROP", "CREATE"]
+
+
+def test_to_sql_replace_raises_delete_errors():
+    # GH-1410: DeleteObjects answers with success also when it cannot delete some
+    # of the objects, which remained under the location of the new table.
+    conn = Connection(
+        region_name="us-east-1",
+        s3_staging_dir="s3://bucket/path/",
+        aws_access_key_id="access_key",
+        aws_secret_access_key="secret_key",
+    )
+    answers = {
+        "ListObjects": b"<ListBucketResult><Name>bucket</Name><IsTruncated>false</IsTruncated>"
+        b"<Contents><Key>existing/old-1</Key></Contents>"
+        b"<Contents><Key>existing/old-2</Key></Contents></ListBucketResult>",
+        "DeleteObjects": b"<DeleteResult><Deleted><Key>existing/old-1</Key></Deleted>"
+        b"<Error><Key>existing/old-2</Key><Code>AccessDenied</Code>"
+        b"<Message>Access Denied</Message></Error></DeleteResult>",
+    }
+    operations = []
+
+    def send(request, event_name, **kwargs):
+        operation = event_name.rsplit(".", 1)[-1]
+        operations.append(operation)
+        return AWSResponse(request.url, 200, {}, RawBody(answers[operation]))
+
+    conn.session.events.register("before-send.s3", send)
+    queries = []
+    df = pd.DataFrame({"col_int": np.int32([1])})
+    try:
+        with (
+            patch.object(conn.client, "_make_api_call", side_effect=answer_existing_table(queries)),
+            patch.object(util, "to_parquet") as upload,
+            pytest.raises(OperationalError) as raised,
+        ):
+            to_sql(df, "existing", conn, "s3://bucket/existing/", if_exists="replace")
+    finally:
+        conn.close()
+    assert str(raised.value) == (
+        "Failed to delete objects under s3://bucket/existing/: "
+        "bucket/existing/old-2 (AccessDenied: Access Denied)"
+    )
+    # The deletion is not retried, and nothing is written.
+    assert operations == ["ListObjects", "ListObjects", "DeleteObjects"]
+    upload.assert_not_called()
+    assert queries == ["SELECT", "DROP"]
 
 
 def test_to_sql_with_partitions(cursor):
