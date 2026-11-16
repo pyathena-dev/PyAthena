@@ -1832,7 +1832,8 @@ def s3_request_targets(requests):
             )
         elif name != "list_objects_v2":
             targets.append((name, request.get("Key"), request.get("VersionId")))
-    return sorted(targets)
+    # A request without a version ID sorts before those with one.
+    return sorted(targets, key=lambda target: (target[0], target[1] or "", target[2] or ""))
 
 
 def serve_s3_keys(fs, keys):

@@ -1180,8 +1180,8 @@ class S3FileSystem(AbstractFileSystem):
         removed. With ``version_aware``, a cached file
         entry without a version ID is looked up again. With an explicit
         version, the cached entries of the path are skipped, the
-        HeadObject result is cached under the version-qualified path apart
-        from other versions, except for the ``null`` version, which an
+        HeadObject result is cached under the name and the version ID, apart
+        from the key and other versions, except for the ``null`` version, which an
         overwrite replaces, and a missing version is not looked up as a key
         prefix, since a version names an object. With request parameters on which the
         authorization of the requests depends (``ExpectedBucketOwner``,
@@ -4478,8 +4478,8 @@ class S3FileSystem(AbstractFileSystem):
         dircache.
 
         Args:
-            path: The path of the object, optionally version-qualified, or
-                the bucket name.
+            path: The lookup cache key of the object (see
+                :meth:`_lookup_cache_key`), or the bucket name.
             lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``).
 
         Returns:
@@ -4505,8 +4505,8 @@ class S3FileSystem(AbstractFileSystem):
         """Cache the HeadObject or HeadBucket result of a lookup.
 
         Args:
-            path: The path of the object, optionally version-qualified, or
-                the bucket name.
+            path: The lookup cache key of the object (see
+                :meth:`_lookup_cache_key`), or the bucket name.
             lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
                 that the request was made with.
             file: The object to cache.
