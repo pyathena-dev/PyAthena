@@ -830,6 +830,10 @@ Those PutObject and UploadPart requests then include the SHA-256 hash of their b
 Over HTTPS, the client leaves the hash out of a request that sets `ContentMD5`, which S3 checks instead, unless its `s3` options set `payload_signing_enabled` to `True`.
 It also leaves the hash out if its `s3` options set `payload_signing_enabled` to `False` or if it sends unsigned requests, such as `S3FileSystem(anon=True)`.
 
+In the [benchmark run of 2026-11-15](https://github.com/pyathena-dev/PyAthena/blob/master/benchmarks/history/2026-11-15-1d9e5039-filesystem.md), on one `c8gn.2xlarge` host with 40 workers and 8 MiB parts, `S3FileSystem` wrote a 1 GiB object at 836 MiB/s with the defaults, at 1,002 MiB/s with `request_checksum_calculation="when_required"`, and at 1,216 MiB/s when its `s3` options also set `payload_signing_enabled` to `False`.
+It wrote a 6 GiB object at 1,119, 1,623, and 1,836 MiB/s with the same settings, taking 11.0, 10.8, and 7.1 seconds of CPU time.
+Its writes of a 256 MiB object and its reads and downloads ran within 5% of the defaults with either setting.
+
 With `response_checksum_validation="when_supported"`, the client requests the checksum of the object with every GetObject request.
 It validates the body it reads when the response carries a full-object checksum of an algorithm that botocore supports, and reads the body without validation otherwise, such as with the composite checksum of an object uploaded in parts.
 botocore supports CRC32, SHA-1, SHA-256, and SHA-512, and with `botocore[crt]` also CRC32C, CRC64NVME, XXHASH64, XXHASH3, and XXHASH128.
