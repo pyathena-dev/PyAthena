@@ -1774,27 +1774,10 @@ class S3FileSystem(AbstractFileSystem):
         if withdirs and self.isdir(path):
             info = self.info(path)
             sizes[info["name"]] = info["size"]
-        sizes.update(self._du_sizes(path, maxdepth=maxdepth, withdirs=withdirs, **kwargs))
-        return sum(sizes.values()) if total else sizes
-
-    def _du_sizes(self, path, maxdepth=None, **kwargs) -> dict[str, int]:
-        """Look up the entries that ``find()`` returns by their buckets and keys.
-
-        Args:
-            path: The path to search under.
-            maxdepth: Maximum number of levels to descend.
-            **kwargs: Additional arguments passed to ``find()``.
-
-        Returns:
-            The sizes by the names that the lookups give. The path itself is
-            looked up with ``info()``, and a listed entry by its bucket and
-            key.
-        """
-        sizes: dict[str, int] = {}
-        for _, target in self._find_paths(path, maxdepth=maxdepth, **kwargs):
+        for _, target in self._find_paths(path, maxdepth=maxdepth, withdirs=withdirs, **kwargs):
             info = self._target_info(target)
             sizes[info["name"]] = info["size"]
-        return sizes
+        return sum(sizes.values()) if total else sizes
 
     def _target_info(self, target: str | S3Path) -> S3Object:
         """Look up a path that an expansion or ``find()`` names.
