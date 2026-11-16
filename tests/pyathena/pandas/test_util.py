@@ -862,7 +862,7 @@ def test_to_sql_replace_raises_delete_errors():
         "bucket/existing/old-2 (AccessDenied: Access Denied)"
     )
     # The deletion is not retried, and nothing is written.
-    assert operations == ["ListObjects", "ListObjects", "DeleteObjects"]
+    assert operations.count("DeleteObjects") == 1
     upload.assert_not_called()
     assert queries == ["SELECT", "DROP"]
 

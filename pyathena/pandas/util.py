@@ -270,7 +270,9 @@ def to_sql(
         OperationalError: If if_exists="fail" and table already exists, or if
             if_exists="replace" and S3 answers that it could not delete some
             of the existing objects; this answer is not retried. The table has
-            been dropped then, and no data is written.
+            been dropped then, and no data is written. A later call deletes the
+            objects under ``location`` only when the table exists, so delete the
+            remaining objects before calling it again.
     """
     if if_exists not in ("fail", "replace", "append"):
         raise ValueError(f"`{if_exists}` is not valid for if_exists")
