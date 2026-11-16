@@ -21,6 +21,7 @@ Compare entries only when they used the same instance type, architecture, and sc
 | 2026-10-19 | `9e99caa8` | 4.2.0 (tagged on `baee716c`, which differs only in one test file) | `r7g.2xlarge` (arm64), fleet of 10 | Spot | medium, large, xlarge, xxlarge | [2026-10-19-9e99caa8](history/2026-10-19-9e99caa8.md) |
 | 2026-10-19 | `9e99caa8` | 4.2.0 (tagged on `baee716c`, which differs only in one test file), filesystem suite | `c8gn.2xlarge` (arm64), one host | Spot | small, medium, large, xlarge (objects) | [2026-10-19-9e99caa8-filesystem](history/2026-10-19-9e99caa8-filesystem.md) |
 | 2026-10-23 | `7b20b499` | unreleased (after 4.2.1), filesystem and objects suites against s3fs | `c8gn.2xlarge` (arm64), one host | Spot | small, medium, large, xlarge (single objects); medium (object set) | [2026-10-23-7b20b499-filesystem](history/2026-10-23-7b20b499-filesystem.md) |
+| 2026-11-15 | `1d9e5039` | unreleased (after 4.2.1), filesystem and objects suites against s3fs, with Python 3.15 and 3.15t | `c8gn.2xlarge` (arm64), one host | Spot | small, medium, large, xlarge (single objects); medium (object set) | [2026-11-15-1d9e5039-filesystem](history/2026-11-15-1d9e5039-filesystem.md) |
 
 ## Recommendations
 
