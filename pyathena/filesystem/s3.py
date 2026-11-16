@@ -1792,9 +1792,24 @@ class S3FileSystem(AbstractFileSystem):
         """
         sizes: dict[str, int] = {}
         for _, target in self._find_paths(path, maxdepth=maxdepth, **kwargs):
-            info = self.info(target) if isinstance(target, str) else self._path_info(target)
+            info = self._target_info(target)
             sizes[info["name"]] = info["size"]
         return sizes
+
+    def _target_info(self, target: str | S3Path) -> S3Object:
+        """Look up a path that an expansion or ``find()`` names.
+
+        Args:
+            target: A path string that the caller passed, which ``info()``
+                looks up, or a listed path, looked up by its bucket and key.
+
+        Returns:
+            S3Object describing the bucket, directory, or file.
+
+        Raises:
+            FileNotFoundError: If the path does not exist.
+        """
+        return self.info(target) if isinstance(target, str) else self._path_info(target)
 
     def glob(self, path, maxdepth=None, **kwargs):
         """Find the paths that match a glob pattern.
@@ -1976,10 +1991,48 @@ class S3FileSystem(AbstractFileSystem):
         """
         if maxdepth is not None and maxdepth < 1:
             raise ValueError("maxdepth must be at least 1")
-        assume_literal = kwargs.pop("assume_literal", False)
-        refresh = kwargs.get("refresh", False)
         versions, others = self._split_version_paths(path)
         # Insertion-ordered set of the names and the paths that they name.
+        out: dict[tuple[str, str | S3Path], None] = {
+            (p, p): None for p in versions if not recursive or self.exists(p)
+        }
+        if others:
+            try:
+                out.update(self._expand_unversioned(others, recursive, maxdepth, **kwargs))
+            except FileNotFoundError:
+                if not out:
+                    raise
+        if not out:
+            raise FileNotFoundError(path)
+        return sorted(out, key=lambda item: item[0])
+
+    def _expand_unversioned(
+        self, paths: list[str], recursive: bool, maxdepth: int | None, **kwargs
+    ) -> dict[tuple[str, str | S3Path], None]:
+        """Expand paths without a version ID as fsspec's ``expand_path()`` does.
+
+        As :meth:`_expand_paths` describes: a path that the caller passes
+        names itself, and a listed entry names its bucket and key. As in
+        fsspec, a recursive glob pattern that matches nothing raises
+        ``FileNotFoundError`` when the matches are expanded below.
+
+        Args:
+            paths: The paths and glob patterns, without the protocol.
+            recursive: Whether to include the paths below the directories.
+            maxdepth: Maximum depth of the expansion.
+            **kwargs: Additional arguments passed to ``glob`` and ``find``,
+                and ``assume_literal``, as in fsspec.
+
+        Returns:
+            The insertion-ordered names and the paths that they name.
+
+        Raises:
+            FileNotFoundError: If nothing matches, or a recursive glob pattern
+                matches nothing.
+        """
+        assume_literal = kwargs.pop("assume_literal", False)
+        # The expansion asks glob() for the entries.
+        kwargs.pop("detail", None)
         out: dict[tuple[str, str | S3Path], None] = {}
         names: set[str] = set()
 
@@ -1993,10 +2046,7 @@ class S3FileSystem(AbstractFileSystem):
             out[(name, target)] = None
             names.add(name)
 
-        for p in versions:
-            if not recursive or self.exists(p):
-                add(p, p)
-        for p in others:
+        for p in paths:
             if not assume_literal and has_magic(p):
                 matches = cast(
                     dict[str, S3Object], self.glob(p, maxdepth=maxdepth, detail=True, **kwargs)
@@ -2005,10 +2055,17 @@ class S3FileSystem(AbstractFileSystem):
                     add(name, self._entry_path(match))
                 # As fsspec expands the matches, one level fewer deep.
                 if recursive and not (maxdepth is not None and maxdepth <= 1):
+                    if not matches:
+                        # As fsspec's expansion of no paths raises.
+                        raise FileNotFoundError([])
                     depth = maxdepth - 1 if maxdepth is not None else None
                     for match in matches.values():
                         for f, target in self._find_under(
-                            match, depth, withdirs=True, refresh=refresh
+                            match,
+                            depth,
+                            withdirs=True,
+                            prefix=kwargs.get("prefix", ""),
+                            refresh=kwargs.get("refresh", False),
                         ):
                             add(f.name, target)
                 continue
@@ -2018,8 +2075,8 @@ class S3FileSystem(AbstractFileSystem):
             if p not in names and (not recursive or self.exists(p)):
                 add(p, p)
         if not out:
-            raise FileNotFoundError(path)
-        return sorted(out, key=lambda item: item[0])
+            raise FileNotFoundError(paths)
+        return out
 
     @staticmethod
     def _entry_path(entry: S3Object) -> S3Path:
@@ -4360,10 +4417,15 @@ class S3FileSystem(AbstractFileSystem):
             return
         trailing = len(raw) - len(raw.rstrip("/"))
         for spelling in (stripped, stripped + "/" * trailing) if trailing else (stripped,):
-            s3_path = S3Path.parse(spelling)
-            self._invalidate(s3_path)
-            if s3_path.version_id and s3_path.key is not None:
-                self._invalidate(S3Path(s3_path.bucket, spelling.partition("/")[2]))
+            base, version_id = S3Path.split_version_id(spelling)
+            if version_id:
+                # The lookup of the version, as _lookup_cache_key() keys it,
+                # and the object path without the version.
+                self._evict_lookup((base, _VERSION_CACHE_KEY, version_id))
+                self._invalidate_name(base)
+            # The path as named, also the key that ends in a version ID query,
+            # or the directory of a trailing slash.
+            self._invalidate_name(spelling)
 
     def _invalidate(self, path: S3Path) -> None:
         """Remove the cached entries of a path and of the directories above it.
@@ -4378,16 +4440,35 @@ class S3FileSystem(AbstractFileSystem):
             path: The path of the bucket or the object.
         """
         if path.version_id:
-            version_key = self._lookup_cache_key(path)
-            self._evict_cache(version_key)
-            self._evict_cache((version_key, _LOOKUPS_CACHE_KEY))
-        name = path.name
+            self._evict_lookup(self._lookup_cache_key(path))
+        self._invalidate_name(path.name)
+
+    def _invalidate_name(self, name: str) -> None:
+        """Remove the cached entries of a name and of the directories above it.
+
+        The names of the directories are cut at their last slash without
+        parsing them, so that a directory named with a version ID query or
+        an empty segment is invalidated as it is listed.
+
+        Args:
+            name: The name of the bucket, the directory or the object, without
+                the protocol.
+        """
         while name:
-            # _ls_prefix caches listings under (name, delimiter), and lookups
-            # with parameters are cached under (name, _LOOKUPS_CACHE_KEY).
-            for cache_key in (name, (name, "/"), (name, ""), (name, _LOOKUPS_CACHE_KEY)):
+            # _ls_prefix caches listings under (name, delimiter).
+            for cache_key in ((name, "/"), (name, "")):
                 self._evict_cache(cache_key)
+            self._evict_lookup(name)
             name = name.rpartition("/")[0]
+
+    def _evict_lookup(self, key: str | tuple[str, str, str]) -> None:
+        """Remove the cached lookups under a lookup cache key, with and without parameters.
+
+        Args:
+            key: The lookup cache key (see :meth:`_lookup_cache_key`).
+        """
+        self._evict_cache(key)
+        self._evict_cache((key, _LOOKUPS_CACHE_KEY))
 
     def _evict_cache(self, key: str | tuple[Any, ...]) -> None:
         """Remove a dircache entry if it exists.

@@ -736,6 +736,32 @@ class TestAioS3FileSystem:
         assert await await_bounded(call(fs)) == result
         assert s3_request_targets(requests) == sent
 
+    @pytest.mark.asyncio
+    async def test_du_cancellation_sends_no_further_lookup(self):
+        # GH-1402: as fsspec's _du(), the lookups of the found entries are
+        # awaited one by one, so a cancellation during one sends no other.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs._sync_fs, {"a/x", "a/y"})
+        serve = fs._sync_fs._core.call
+        started, release = threading.Event(), threading.Event()
+
+        def call(method, **request):
+            if getattr(method, "__name__", "") == "head_object" and not started.is_set():
+                started.set()
+                release.wait(EVENT_TIMEOUT)
+            return serve(method, **request)
+
+        fs._sync_fs._call = fs._sync_fs._core.call = call
+        task = asyncio.ensure_future(fs._du("s3://bucket/a"))
+        assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await await_bounded(task)
+        assert [name for name, _ in requests].count("head_object") == 1
+
     @pytest.mark.parametrize("path", ["s3://bucket/dir", None])
     def test_invalidate_cache(self, path):
         # invalidate_cache() clears the listings that the asynchronous methods

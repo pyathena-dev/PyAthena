@@ -1267,6 +1267,61 @@ class TestS3FileSystem:
             "bucket/a/dir?versionId=v1/z",
         ]
 
+    @pytest.mark.parametrize(
+        ("call", "expected"),
+        [
+            pytest.param(
+                lambda fs: fs.expand_path("s3://bucket/a/*", recursive=True, prefix="keep"),
+                ["bucket/a/keepdir", "bucket/a/keepdir/keep.txt"],
+                id="prefix-below-matches",
+            ),
+            pytest.param(
+                lambda fs: fs.expand_path("s3://bucket/a/*", detail=False),
+                ["bucket/a/keepdir"],
+                id="detail",
+            ),
+        ],
+    )
+    def test_expand_path_passes_options_as_fsspec(self, call, expected):
+        # GH-1402: as in fsspec, the expansion below the matches of a
+        # recursive glob receives the prefix, and the caller's detail option
+        # is accepted.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs, {"a/keepdir/keep.txt", "a/keepdir/drop.txt"})
+        assert call(fs) == expected
+
+    def test_rm_of_unmatched_recursive_glob_deletes_nothing(self):
+        # GH-1402: as in fsspec, a recursive glob that matches nothing raises
+        # before anything is deleted.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, requests = serve_s3_keys(fs, {"a"})
+        with pytest.raises(FileNotFoundError):
+            fs.rm(["s3://bucket/a", "s3://bucket/missing*"], recursive=True)
+        assert store == {"a"}
+        assert not [t for t in s3_request_targets(requests) if t[0].startswith("delete")]
+
+    @pytest.mark.parametrize(
+        ("path", "cache_key"),
+        [
+            # The key that ends in the query of a version path.
+            ("s3://bucket/a/x?versionId=v1", "bucket/a/x?versionId=v1"),
+            ("s3://bucket/?versionId=v1", "bucket/?versionId=v1"),
+            # The directory of the common prefix "/" (keys such as "/x").
+            ("s3://bucket/", ("bucket/", "/")),
+        ],
+    )
+    def test_invalidate_cache_evicts_the_name_as_given(self, path, cache_key):
+        # GH-1402: a path string invalidates the entries named as it is
+        # spelled, besides the version that it may name.
+        fs = self._make_fs()
+        fs.dircache[cache_key] = []
+        fs.invalidate_cache(path)
+        assert cache_key not in fs.dircache
+
     def test_lookups_keep_versions_apart_from_listed_keys(self):
         # GH-1402: the lookup of a version is cached apart from that of a key
         # whose name ends in the same version ID query.

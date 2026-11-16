@@ -1082,8 +1082,10 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _du(self, path, total=True, maxdepth=None, **kwargs):
         """Return the sizes of the objects below a path, as fsspec's ``_du()`` does.
 
-        Runs :meth:`S3FileSystem._du_sizes`, which looks up each entry that
-        ``find()`` returns by its bucket and key, never by parsing its name.
+        As fsspec does, looks up the entries that ``find()`` returns one at
+        a time, each in a thread of the filesystem, so that a cancellation
+        sends no further lookup. A listed entry is looked up by its bucket
+        and key, never by parsing its name.
 
         Args:
             path: The path to search under.
@@ -1096,9 +1098,13 @@ class AioS3FileSystem(AsyncFileSystem):
         Returns:
             The total size, or the sizes by the names that ``info()`` gives.
         """
-        sizes = await self._thread_pool.run(
-            self._sync_fs._du_sizes, path, maxdepth=maxdepth, **kwargs
+        found = await self._thread_pool.run(
+            self._sync_fs._find_paths, path, maxdepth=maxdepth, **kwargs
         )
+        sizes: dict[str, int] = {}
+        for _, target in found:
+            info = await self._thread_pool.run(self._sync_fs._target_info, target)
+            sizes[info["name"]] = info["size"]
         return sum(sizes.values()) if total else sizes
 
     async def _cat_ranges(
