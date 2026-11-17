@@ -33,7 +33,7 @@ from fsspec.asyn import (
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
 from fsspec.implementations.local import make_path_posix
-from fsspec.utils import check_contained, stringify_path
+from fsspec.utils import stringify_path
 
 from pyathena.aio.util import create_in_thread
 from pyathena.filesystem.s3 import (
@@ -848,10 +848,15 @@ class AioS3FileSystem(AsyncFileSystem):
             OSError: If bucket versioning cannot be read for the checks.
         """
         path1, path2 = self._sync_fs._stringify_paths(path1), self._sync_fs._stringify_paths(path2)
+        if on_error is None:
+            on_error = "ignore" if recursive else "raise"
         pairs = await self._thread_pool.run(
             self._sync_fs._checked_copy_pairs,
-            S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth),
-            self.core.copy_source_params(kwargs),
+            path1,
+            path2,
+            recursive=recursive,
+            maxdepth=maxdepth,
+            source_params=self.core.copy_source_params(kwargs),
         )
         if not pairs:
             return
@@ -859,7 +864,6 @@ class AioS3FileSystem(AsyncFileSystem):
             super()._copy(
                 [p1 for p1, _ in pairs],
                 [p2 for _, p2 in pairs],
-                recursive=recursive,
                 on_error=on_error,
                 batch_size=batch_size,
                 **kwargs,
@@ -894,7 +898,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Raises:
             ValueError: If a destination named after a source lies outside
-                ``lpath``, or two sources have the same destination.
+                ``lpath``, or two downloads write the same local file.
         """
         rpath = self._sync_fs._stringify_paths(rpath)
         # Local paths are made absolute, as fsspec's _get() does, so that
@@ -905,30 +909,23 @@ class AioS3FileSystem(AsyncFileSystem):
             else [make_path_posix(p) if isinstance(p, (str, os.PathLike)) else p for p in lpath]
         )
         pairs = await self._thread_pool.run(
-            self._sync_fs._copy_pairs,
+            self._sync_fs._checked_get_pairs,
             S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
-            local=True,
+            kwargs,
         )
-        if isinstance(root, str):
-            check_contained(root, [lp for _, lp in pairs])
         if not pairs:
             return
         if kwargs.get("outfile") is not None:
             # _get_file() writes to the outfile instead of the local paths,
             # so the files are downloaded one after another, in order.
-            concurrency = 1
             kwargs = {**kwargs, "batch_size": 1}
-        else:
-            await self._thread_pool.run(
-                self._sync_fs._check_local_destinations, [lp for _, lp in pairs]
-            )
-            # fsspec's default batch size, when none is given, is not counted:
-            # at most max_workers downloads run at once in the threads of the
-            # filesystem, and more than max_workers get one range each anyway.
-            concurrency = len(pairs)
-            batch_size = kwargs.get("batch_size", self.batch_size)
-            if batch_size is not None and batch_size > 0:
-                concurrency = min(concurrency, batch_size)
+        # fsspec's default batch size, when none is given, is not counted:
+        # at most max_workers downloads run at once in the threads of the
+        # filesystem, and more than max_workers get one range each anyway.
+        concurrency = len(pairs)
+        batch_size = kwargs.get("batch_size", self.batch_size)
+        if batch_size is not None and batch_size > 0:
+            concurrency = min(concurrency, batch_size)
         await _S3BatchTasks().run(
             self._get_pairs(pairs, callback, **self._sync_fs._batch_kwargs(concurrency, kwargs))
         )
