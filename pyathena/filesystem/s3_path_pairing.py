@@ -27,10 +27,14 @@ class S3PathPairing:
     The sources are paired with their destinations as fsspec's ``copy()``
     pairs them, except that a path with a version ID names that version of an
     object: it is not a glob pattern, and its destination is named after its
-    key without the version. A move compares the paths by what they name
-    (see :attr:`~pyathena.filesystem.s3_path.S3Path.target`), keeping ``null``
-    versions distinct from their keys in the caller's versioning-enabled
-    buckets.
+    key without the version. A source may also be an
+    :class:`~pyathena.filesystem.s3_path.S3Path`, such as a key that a listing
+    returns, which names its bucket and key as they are, also when the key
+    ends in what looks like a version ID query, and which is never parsed
+    again (see :meth:`s3_copy_pairs`). A move compares the paths by what they
+    name (see :attr:`~pyathena.filesystem.s3_path.S3Path.target`), keeping
+    ``null`` versions distinct from their keys in the caller's
+    versioning-enabled buckets.
     :meth:`delete_paths` splits the paths of an ``rm()``.
 
     The pairing is a frozen dataclass of the paths as given, and holds no
@@ -97,10 +101,14 @@ class S3PathPairing:
 
     def copy_pairs(
         self,
-        sources: Sequence[str] | None = None,
+        sources: Sequence[str | S3Path] | None = None,
         destination_is_dir: bool | None = None,
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str | S3Path, str]]:
         """Pair the sources with their destinations as fsspec's ``copy()`` does.
+
+        A source string with a version ID is named after its key without the
+        version, and an ``S3Path`` source after its bucket and key (its
+        ``name``), whose suffix the destination keeps as it is.
 
         Args:
             sources: The expansion of ``path1``, without the directories that
@@ -136,17 +144,64 @@ class S3PathPairing:
         exists = source_is_str and (
             (glob and len(sources) == 1) or (not glob and dest_is_dir and not trailing_sep(path1))
         )
-        names = [S3Path.split_version_id(p)[0] for p in sources]
+        names = [
+            p.name if isinstance(p, S3Path) else S3Path.split_version_id(p)[0] for p in sources
+        ]
         destinations = other_paths(names, path2, exists=exists, flatten=not source_is_str)
         return list(zip(sources, destinations, strict=True))
 
+    def s3_copy_pairs(
+        self,
+        sources: Sequence[str | S3Path] | None = None,
+        destination_is_dir: bool | None = None,
+    ) -> list[tuple[str | S3Path, str | S3Path]]:
+        """Pair the sources with their S3 destinations, as :meth:`copy_pairs` does.
+
+        The destination of an ``S3Path`` source, when ``path2`` is a string,
+        is an ``S3Path`` too: ``path2`` parsed, with the suffix that
+        :meth:`copy_pairs` appends to it added to its key as it is, so that a
+        key such as ``a/x?versionId=null`` is copied to the key
+        ``b/x?versionId=null`` instead of being parsed as a version. The
+        other destinations are strings, as :meth:`copy_pairs` returns them.
+
+        Args:
+            sources: As for :meth:`copy_pairs`.
+            destination_is_dir: As for :meth:`copy_pairs`.
+
+        Returns:
+            The sources and their destinations.
+
+        Raises:
+            ValueError: If ``sources`` or ``destination_is_dir`` is needed and
+                None, or if ``path2`` names a version, which cannot be
+                written, and a destination is an ``S3Path``.
+        """
+        pairs = self.copy_pairs(sources, destination_is_dir)
+        if not isinstance(self.path2, str) or not any(isinstance(p1, S3Path) for p1, _ in pairs):
+            return list(pairs)
+        # Every destination that copy_pairs() names after a source starts with
+        # path2 without its trailing slashes, followed by the suffix.
+        root_name = self.path2.rstrip("/")
+        root = S3Path.parse(root_name)
+        if root.version_id:
+            raise ValueError("Cannot copy to a versioned file.")
+        typed: list[tuple[str | S3Path, str | S3Path]] = []
+        for p1, p2 in pairs:
+            if isinstance(p1, S3Path):
+                suffix = p2[len(root_name) :]
+                key = f"{root.key}{suffix}" if root.key else suffix.removeprefix("/")
+                typed.append((p1, S3Path(root.bucket, key)))
+            else:
+                typed.append((p1, p2))
+        return typed
+
     def conflict_candidates(
         self,
-        pairs: Sequence[tuple[str, str]],
+        pairs: Sequence[tuple[str | S3Path, str | S3Path]],
         *,
         versioning_enabled_buckets: Collection[str] = (),
         copy: bool = False,
-    ) -> list[str]:
+    ) -> list[str | S3Path]:
         """Return the sources of a move whose conflicts depend on an object at their key.
 
         A source with another source below it may be a directory. If no object
@@ -158,7 +213,9 @@ class S3PathPairing:
 
         Args:
             pairs: The sources and destinations of the move, as
-                :meth:`copy_pairs` of this pairing returns them.
+                :meth:`copy_pairs` or :meth:`s3_copy_pairs` of this pairing
+                returns them. A string is parsed; an ``S3Path`` is used as
+                it is.
             versioning_enabled_buckets: Buckets whose versioning is enabled.
                 Their ``null`` versions are distinct from their unversioned
                 keys. Use the same collection for :meth:`move_pairs`.
@@ -167,32 +224,36 @@ class S3PathPairing:
                 conflicts.
 
         Returns:
-            The sources, in ``bucket/key`` form (their
-            :attr:`~pyathena.filesystem.s3_path.S3Path.target`), that have
-            another source below them and a destination that conflicts, one
-            per pair in the order of the pairs; empty if nothing needs to be
-            looked up.
+            The sources that have another source below them and a
+            destination that conflicts, one per pair in the order of the
+            pairs, as their :attr:`~pyathena.filesystem.s3_path.S3Path.target`:
+            in ``bucket/key`` form for a source string, and as an ``S3Path``
+            for an ``S3Path`` source. Empty if nothing needs to be looked up.
 
         Raises:
             TypeError: If ``versioning_enabled_buckets`` is a string.
         """
-        return self._moves(pairs, versioning_enabled_buckets, copy)[2]
+        return [
+            pair.source if isinstance(pair.path1, S3Path) else str(pair.source)
+            for pair in self._moves(pairs, versioning_enabled_buckets, copy)[2]
+        ]
 
     def move_pairs(
         self,
-        pairs: Sequence[tuple[str, str]],
-        missing: Collection[str] | None = None,
+        pairs: Sequence[tuple[str | S3Path, str | S3Path]],
+        missing: Collection[str | S3Path] | None = None,
         *,
         versioning_enabled_buckets: Collection[str] = (),
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str | S3Path, str | S3Path]]:
         """Check the pairs of a move and leave out the sources that stay in place.
 
         Args:
             pairs: The sources and destinations of the move, as
-                :meth:`copy_pairs` of this pairing returns them.
+                :meth:`copy_pairs` or :meth:`s3_copy_pairs` of this pairing
+                returns them.
             missing: The :meth:`conflict_candidates` without an object at their
-                key, in any form that names them; needed when there are
-                candidates.
+                key, as strings in any form that names them or as ``S3Path``
+                objects; needed when there are candidates.
             versioning_enabled_buckets: Buckets whose versioning is enabled.
                 Their ``null`` versions are distinct from their unversioned
                 keys. Use the same collection for :meth:`conflict_candidates`.
@@ -211,12 +272,12 @@ class S3PathPairing:
                 Also if ``versioning_enabled_buckets`` is a string.
         """
         named = self._check(pairs, missing, versioning_enabled_buckets, "move")
-        return [(p1, p2) for p1, p2, _, source, dest in named if source != dest]
+        return [(pair.path1, pair.path2) for pair in named if pair.source != pair.destination]
 
     def check_copy_pairs(
         self,
-        pairs: Sequence[tuple[str, str]],
-        missing: Collection[str] | None = None,
+        pairs: Sequence[tuple[str | S3Path, str | S3Path]],
+        missing: Collection[str | S3Path] | None = None,
         *,
         versioning_enabled_buckets: Collection[str] = (),
     ) -> None:
@@ -230,10 +291,11 @@ class S3PathPairing:
 
         Args:
             pairs: The sources and destinations of the copy, as
-                :meth:`copy_pairs` of this pairing returns them.
+                :meth:`copy_pairs` or :meth:`s3_copy_pairs` of this pairing
+                returns them.
             missing: The :meth:`conflict_candidates` without an object at their
-                key, in any form that names them; needed when there are
-                candidates.
+                key, as strings in any form that names them or as ``S3Path``
+                objects; needed when there are candidates.
             versioning_enabled_buckets: Buckets whose versioning is enabled.
                 Use the same collection for :meth:`conflict_candidates`.
 
@@ -249,11 +311,11 @@ class S3PathPairing:
 
     def _check(
         self,
-        pairs: Sequence[tuple[str, str]],
-        missing: Collection[str] | None,
+        pairs: Sequence[tuple[str | S3Path, str | S3Path]],
+        missing: Collection[str | S3Path] | None,
         versioning_enabled_buckets: Collection[str],
         operation: str,
-    ) -> list[tuple[str, str, bool, str, str]]:
+    ) -> list[_NamedPair]:
         """Raise for the conflicts of a move or a copy.
 
         Args:
@@ -279,15 +341,15 @@ class S3PathPairing:
         if missing is None and candidates:
             raise ValueError("missing is needed to check the pairs.")
         # A directory without an object at its key writes no destination.
-        skipped = set(candidates).intersection(
-            self._target(S3Path.parse(path), versioning_enabled_buckets) for path in missing or ()
+        skipped = {pair.source for pair in candidates}.intersection(
+            self._target(S3Path.of(path), versioning_enabled_buckets) for path in missing or ()
         )
         # A path with a version always names an object, so it writes its
         # destination even when the key has no current object.
         writers = Counter(
-            dest
-            for _, _, versioned, source, dest in named
-            if source != dest and (versioned or source not in skipped)
+            pair.destination
+            for pair in named
+            if pair.source != pair.destination and (pair.versioned or pair.source not in skipped)
         )
         for dest in writers:
             if writers[dest] > 1:
@@ -337,7 +399,7 @@ class S3PathPairing:
         return has_magic(path) and not S3Path.has_version_id(path)
 
     @staticmethod
-    def _target(path: S3Path, versioning_enabled_buckets: Collection[str]) -> str:
+    def _target(path: S3Path, versioning_enabled_buckets: Collection[str]) -> S3Path:
         """Return a move target using the caller's bucket versioning state.
 
         Args:
@@ -345,17 +407,17 @@ class S3PathPairing:
             versioning_enabled_buckets: Buckets whose versioning is enabled.
 
         Returns:
-            The normalized path, retaining a ``null`` version only when its
-            bucket has versioning enabled.
+            The path, retaining a ``null`` version only when its bucket has
+            versioning enabled.
         """
-        return str(path if path.bucket in versioning_enabled_buckets else path.target)
+        return path if path.bucket in versioning_enabled_buckets else path.target
 
     @staticmethod
     def _moves(
-        pairs: Sequence[tuple[str, str]],
+        pairs: Sequence[tuple[str | S3Path, str | S3Path]],
         versioning_enabled_buckets: Collection[str] = (),
         copy: bool = False,
-    ) -> tuple[list[tuple[str, str, bool, str, str]], set[str], list[str]]:
+    ) -> tuple[list[_NamedPair], set[S3Path], list[_NamedPair]]:
         """Compare the paths of a move by what they name.
 
         Args:
@@ -366,8 +428,8 @@ class S3PathPairing:
         Returns:
             Each pair with whether its source has a version and the targets
             of its source and destination; the targets of all sources,
-            including those left in place; and the conflict candidates (see
-            :meth:`conflict_candidates`).
+            including those left in place; and the pairs of the conflict
+            candidates (see :meth:`conflict_candidates`).
 
         Raises:
             TypeError: If ``versioning_enabled_buckets`` is a string.
@@ -378,32 +440,52 @@ class S3PathPairing:
             )
         named = []
         for p1, p2 in pairs:
-            source_path = S3Path.parse(p1)
+            source_path = S3Path.of(p1)
             named.append(
-                (
+                _NamedPair(
                     p1,
                     p2,
                     bool(source_path.version_id),
                     S3PathPairing._target(source_path, versioning_enabled_buckets),
-                    S3PathPairing._target(S3Path.parse(p2), versioning_enabled_buckets),
+                    S3PathPairing._target(S3Path.of(p2), versioning_enabled_buckets),
                 )
             )
         # The sources left in place count too; a copy onto one overwrites it.
-        sources = {source for _, _, _, source, _ in named}
-        # A source with another source below it may be a directory.
+        sources = {pair.source for pair in named}
+        # A source with another source below it may be a directory, named
+        # as it is listed: the parents of a name are cut at its last slash.
         directories: set[str] = set()
         for source in sources:
-            parent = source.rpartition("/")[0]
+            parent = source.name.rpartition("/")[0]
             while parent and parent not in directories:
                 directories.add(parent)
                 parent = parent.rpartition("/")[0]
-        counts = Counter(dest for _, _, _, source, dest in named if source != dest)
+        counts = Counter(pair.destination for pair in named if pair.source != pair.destination)
         candidates = [
-            source
-            for _, _, versioned, source, dest in named
-            if source != dest
-            and (counts[dest] > 1 or dest in sources)
-            and (copy or source in directories)
-            and not versioned
+            pair
+            for pair in named
+            if pair.source != pair.destination
+            and (counts[pair.destination] > 1 or pair.destination in sources)
+            and (copy or pair.source.name in directories)
+            and not pair.versioned
         ]
         return named, sources, candidates
+
+
+@dataclass(frozen=True)
+class _NamedPair:
+    """A pair of a move or a copy with the paths that it names.
+
+    Attributes:
+        path1: The source, as given in the pairs.
+        path2: The destination, as given in the pairs.
+        versioned: Whether the source has a version.
+        source: The target of the source (see ``S3PathPairing._target``).
+        destination: The target of the destination.
+    """
+
+    path1: str | S3Path
+    path2: str | S3Path
+    versioned: bool
+    source: S3Path
+    destination: S3Path

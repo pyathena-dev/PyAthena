@@ -32,7 +32,7 @@ from fsspec.asyn import (
 )
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
-from fsspec.implementations.local import LocalFileSystem, make_path_posix
+from fsspec.implementations.local import make_path_posix
 from fsspec.utils import check_contained, stringify_path
 
 from pyathena.aio.util import create_in_thread
@@ -435,7 +435,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """Release the threads with :meth:`close`."""
         self.close()
 
-    async def _info(self, path: str | os.PathLike[str], **kwargs) -> S3Object:
+    async def _info(self, path: str | os.PathLike[str] | S3Path, **kwargs) -> S3Object:
         return await self._thread_pool.run(self._sync_fs.info, path, **kwargs)
 
     async def _ls(
@@ -445,7 +445,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
     async def _cat_file(
         self,
-        path: str | os.PathLike[str],
+        path: str | os.PathLike[str] | S3Path,
         start: int | None = None,
         end: int | None = None,
         **kwargs,
@@ -623,7 +623,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
     async def _get_file(
         self,
-        rpath: str | os.PathLike[str],
+        rpath: str | os.PathLike[str] | S3Path,
         lpath: str | os.PathLike[str],
         callback=_DEFAULT_CALLBACK,
         **kwargs,
@@ -824,11 +824,12 @@ class AioS3FileSystem(AsyncFileSystem):
     ) -> None:
         """Copy files within S3.
 
-        See :meth:`S3FileSystem.copy`. The copies run as in fsspec's
-        ``_copy()``, ``batch_size`` of them at once as tasks. A cancellation
-        cancels the copies and waits for them; a copy that is already being
-        cancelled, such as by the shutdown of the event loop, is not
-        cancelled again.
+        See :meth:`S3FileSystem.copy`. The paths are paired as there, but the
+        pairs are not checked for conflicts, and the copies run as in
+        fsspec's ``_copy()``, ``batch_size`` of them at once as tasks. A
+        cancellation cancels the copies and waits for them; a copy that is
+        already being cancelled, such as by the shutdown of the event loop,
+        is not cancelled again.
 
         Args:
             path1: Source S3 path, glob pattern, or list of them.
@@ -841,22 +842,23 @@ class AioS3FileSystem(AsyncFileSystem):
             **kwargs: Additional S3 copy parameters passed to ``_cp_file()``.
         """
         path1, path2 = self._sync_fs._stringify_paths(path1), self._sync_fs._stringify_paths(path2)
-        sources = [path1] if isinstance(path1, str) else path1
-        if isinstance(path2, str) and any(S3Path.has_version_id(p) for p in sources):
-            pairs = await self._thread_pool.run(
-                self._sync_fs._copy_pairs,
-                S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth),
-            )
-            if not pairs:
-                return
-            path1, path2 = [p1 for p1, _ in pairs], [p2 for _, p2 in pairs]
+        # Paired as the sync copy() pairs them, so that the keys that a
+        # listing returns are copied by their buckets and keys; fsspec copies
+        # the lists of the pairs.
+        pairing = S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
+        pairs = (
+            await self._thread_pool.run(self._sync_fs._copy_pairs, pairing)
+            if pairing.expands
+            else pairing.copy_pairs()
+        )
+        if not pairs:
+            return
         await _S3BatchTasks().run(
             super()._copy(
-                path1,
-                path2,
+                [p1 for p1, _ in pairs],
+                [p2 for _, p2 in pairs],
                 recursive=recursive,
                 on_error=on_error,
-                maxdepth=maxdepth,
                 batch_size=batch_size,
                 **kwargs,
             )
@@ -901,7 +903,7 @@ class AioS3FileSystem(AsyncFileSystem):
         pairs = await self._thread_pool.run(
             self._sync_fs._copy_pairs,
             S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
-            isdir=LocalFileSystem().isdir,
+            local=True,
         )
         if isinstance(root, str):
             check_contained(root, [lp for _, lp in pairs])
@@ -915,12 +917,41 @@ class AioS3FileSystem(AsyncFileSystem):
         if batch_size is not None and batch_size > 0:
             concurrency = min(concurrency, batch_size)
         await _S3BatchTasks().run(
-            super()._get(
-                [rp for rp, _ in pairs],
-                [lp for _, lp in pairs],
-                callback=callback,
-                **self._sync_fs._batch_kwargs(concurrency, kwargs),
-            )
+            self._get_pairs(pairs, callback, **self._sync_fs._batch_kwargs(concurrency, kwargs))
+        )
+
+    async def _get_pairs(
+        self, pairs: list[tuple[str | S3Path, Any]], callback: Any, **kwargs
+    ) -> None:
+        """Download the pairs of a ``get()`` as fsspec's ``_get()`` downloads lists of paths.
+
+        Each download gets a branch of the callback named after the string of
+        its source, and the sources that a listing returns are downloaded by
+        their buckets and keys.
+
+        Args:
+            pairs: The S3 sources and their local destinations.
+            callback: Progress callback.
+            **kwargs: Passed to ``_get_file()``, and ``batch_size``, the
+                number of downloads to run at once.
+        """
+        for _, lp in pairs:
+            os.makedirs(os.path.dirname(lp), exist_ok=True)
+        batch_size = kwargs.pop("batch_size", self.batch_size)
+        callback.set_size(len(pairs))
+
+        async def get_pair(rp: str | S3Path, lp: Any) -> None:
+            """Download a pair with a branch of the callback.
+
+            Args:
+                rp: The S3 source.
+                lp: The local destination.
+            """
+            with callback.branched(str(rp), lp, **kwargs) as child:
+                await self._get_file(rp, lp, callback=child, **kwargs)
+
+        await _run_coros_in_chunks(
+            [get_pair(rp, lp) for rp, lp in pairs], batch_size=batch_size, callback=callback
         )
 
     async def _put(
@@ -1043,12 +1074,7 @@ class AioS3FileSystem(AsyncFileSystem):
         )
         paths = list(targets)
         out = await _run_coros_in_chunks(
-            [
-                self._cat_file(target, **kwargs)
-                if isinstance(target, str)
-                else self._cat_object(target, **kwargs)
-                for target in targets.values()
-            ],
+            [self._cat_file(target, **kwargs) for target in targets.values()],
             batch_size=batch_size or self.batch_size,
             nofiles=True,
             return_exceptions=True,
@@ -1064,20 +1090,6 @@ class AioS3FileSystem(AsyncFileSystem):
                 if on_error != "omit" or not is_exception(v)
             }
         return out[0]
-
-    async def _cat_object(self, path: S3Path, **kwargs) -> bytes:
-        """Read the contents of the object of a path, as ``_cat_file()`` does.
-
-        Args:
-            path: The path of the object, whose bucket, key and version are
-                used as they are.
-            **kwargs: Additional parameters, as for ``_cat_file()``.
-
-        Returns:
-            The bytes read from the object.
-        """
-        _S3BatchTasks.track()
-        return await self._thread_pool.run(self._sync_fs._cat_object, path, **kwargs)
 
     async def _du(self, path, total=True, maxdepth=None, **kwargs):
         """Return the sizes of the objects below a path, as fsspec's ``_du()`` does.
@@ -1103,7 +1115,7 @@ class AioS3FileSystem(AsyncFileSystem):
         )
         sizes: dict[str, int] = {}
         for _, target in found:
-            info = await self._thread_pool.run(self._sync_fs._target_info, target)
+            info = await self._info(target)
             sizes[info["name"]] = info["size"]
         return sum(sizes.values()) if total else sizes
 
@@ -1150,8 +1162,8 @@ class AioS3FileSystem(AsyncFileSystem):
 
     async def _cp_file(
         self,
-        path1: str | os.PathLike[str],
-        path2: str | os.PathLike[str],
+        path1: str | os.PathLike[str] | S3Path,
+        path2: str | os.PathLike[str] | S3Path,
         recursive=False,
         maxdepth=None,
         on_error=None,
@@ -1163,8 +1175,9 @@ class AioS3FileSystem(AsyncFileSystem):
         the files under it, is skipped.
 
         Args:
-            path1: Source S3 path (s3://bucket/key).
-            path2: Destination S3 path (s3://bucket/key).
+            path1: Source S3 path (s3://bucket/key), or an ``S3Path``, as
+                for :meth:`S3FileSystem.cp_file`.
+            path2: Destination S3 path (s3://bucket/key), or an ``S3Path``.
             recursive: Unused parameter for fsspec compatibility.
             maxdepth: Unused parameter for fsspec compatibility.
             on_error: Unused parameter for fsspec compatibility.
@@ -1175,15 +1188,18 @@ class AioS3FileSystem(AsyncFileSystem):
             ValueError: If trying to copy to a versioned file or copy buckets.
         """
         _S3BatchTasks.track()
-        path1, path2 = stringify_path(path1), stringify_path(path2)
-        await self._copy_file(path1, path2, **kwargs)
+        await self._copy_file(
+            path1 if isinstance(path1, S3Path) else stringify_path(path1),
+            path2 if isinstance(path2, S3Path) else stringify_path(path2),
+            **kwargs,
+        )
 
-    async def _copy_file(self, path1: str, path2: str, **kwargs) -> bool:
+    async def _copy_file(self, path1: str | S3Path, path2: str | S3Path, **kwargs) -> bool:
         """Copy an S3 object as :meth:`_cp_file` does.
 
         Args:
-            path1: Source S3 path (s3://bucket/key).
-            path2: Destination S3 path (s3://bucket/key).
+            path1: Source S3 path (s3://bucket/key), or an ``S3Path``.
+            path2: Destination S3 path (s3://bucket/key), or an ``S3Path``.
             **kwargs: Additional S3 copy parameters, as for :meth:`_cp_file`.
 
         Returns:
@@ -1196,8 +1212,8 @@ class AioS3FileSystem(AsyncFileSystem):
         # Parameters of the multipart copy, not of the S3 requests.
         block_size = kwargs.pop("block_size", None)
         max_workers = kwargs.pop("max_workers", None)
-        source = S3Path.parse(path1)
-        destination = S3Path.parse(path2)
+        source = S3Path.of(path1)
+        destination = S3Path.of(path2)
         if destination.version_id:
             raise ValueError("Cannot copy to a versioned file.")
         if not source.key or not destination.key:
@@ -1224,7 +1240,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 )
         finally:
             # See S3FileSystem._copy_file.
-            self._sync_fs.invalidate_cache(path2)
+            self._sync_fs._invalidate(destination)
         return True
 
     async def _copy_object_with_multipart_upload(

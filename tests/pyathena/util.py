@@ -29,6 +29,7 @@ import pytest
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
+from fsspec.callbacks import Callback
 from fsspec.implementations.dirfs import DirFileSystem
 from fsspec.implementations.local import LocalFileSystem
 from jinja2 import Environment, FileSystemLoader
@@ -1810,6 +1811,39 @@ class OpaquePath:
             The path string.
         """
         return self._path
+
+
+class BranchRecordingCallback(Callback):
+    """A progress callback that records the source paths of its branches."""
+
+    def __init__(self):
+        super().__init__()
+        self.sources = []
+
+    def branched(self, path_1, path_2, **kwargs):
+        self.sources.append(path_1)
+        return super().branched(path_1, path_2, **kwargs)
+
+
+def s3_copy_targets(requests):
+    """Return the sources and destinations of recorded CopyObject requests.
+
+    Args:
+        requests: The requests that :func:`serve_s3_keys` records.
+
+    Returns:
+        The sorted tuples of the source key, the source version ID, and the
+        destination key.
+    """
+    return sorted(
+        (
+            request["CopySource"]["Key"],
+            request["CopySource"].get("VersionId"),
+            request["Key"],
+        )
+        for name, request in requests
+        if name == "copy_object"
+    )
 
 
 def s3_request_targets(requests):

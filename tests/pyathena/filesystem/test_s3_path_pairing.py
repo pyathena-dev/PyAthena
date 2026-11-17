@@ -7,6 +7,7 @@
 
 import pytest
 
+from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
 
 
@@ -125,6 +126,69 @@ class TestS3PathPairing:
     def test_copy_pairs(self, path1, path2, sources, destination_is_dir, expected):
         assert S3PathPairing(path1, path2).copy_pairs(sources, destination_is_dir) == expected
 
+    def test_copy_pairs_names_path_sources_by_key(self):
+        # GH-1403: an S3Path source, such as a listed key, is named after its
+        # bucket and key as they are, while a source string with a version ID
+        # is named after its key.
+        listed = S3Path("bucket", "d/x?versionId=null")
+        pairing = S3PathPairing("s3://bucket/d", "out", recursive=True)
+        assert pairing.copy_pairs(["bucket/d", listed], False) == [
+            ("bucket/d", "out"),
+            (listed, "out/x?versionId=null"),
+        ]
+
+    @pytest.mark.parametrize(
+        ("path1", "path2", "sources", "destination_is_dir", "expected"),
+        [
+            # The destination root parsed, with the suffix of the listed key.
+            (
+                "s3://bucket/d",
+                "s3://bucket/out",
+                ["bucket/d", S3Path("bucket", "d/x?versionId=null")],
+                False,
+                [
+                    ("bucket/d", "s3://bucket/out"),
+                    (
+                        S3Path("bucket", "d/x?versionId=null"),
+                        S3Path("bucket", "out/x?versionId=null"),
+                    ),
+                ],
+            ),
+            # A bucket root, given with a trailing slash.
+            (
+                "s3://bucket/d/*",
+                "s3://other/",
+                [S3Path("bucket", "d/x?versionId=null")],
+                None,
+                [(S3Path("bucket", "d/x?versionId=null"), S3Path("other", "x?versionId=null"))],
+            ),
+            # A list of sources, copied into the destination by name.
+            (
+                ["s3://bucket/d"],
+                "s3://bucket/out",
+                ["bucket/d", S3Path("bucket", "d/x?versionId=null")],
+                None,
+                [
+                    ("bucket/d", "s3://bucket/out/d"),
+                    (
+                        S3Path("bucket", "d/x?versionId=null"),
+                        S3Path("bucket", "out/x?versionId=null"),
+                    ),
+                ],
+            ),
+        ],
+    )
+    def test_s3_copy_pairs(self, path1, path2, sources, destination_is_dir, expected):
+        # GH-1403: the destination of an S3Path source is an S3Path, never a
+        # string that parsing would read as a version.
+        pairing = S3PathPairing(path1, path2, recursive=True)
+        assert pairing.s3_copy_pairs(sources, destination_is_dir) == expected
+
+    def test_s3_copy_pairs_versioned_destination(self):
+        pairing = S3PathPairing("s3://bucket/d", "s3://bucket/out?versionId=v1", recursive=True)
+        with pytest.raises(ValueError, match="versioned"):
+            pairing.s3_copy_pairs([S3Path("bucket", "d/x")], False)
+
     def test_copy_pairs_needs_destination_lookup(self):
         with pytest.raises(ValueError, match="destination_is_dir"):
             S3PathPairing("s3://bucket/a", "s3://bucket/b").copy_pairs(["bucket/a"])
@@ -213,6 +277,28 @@ class TestS3PathPairing:
         assert _pairing(pairs).move_pairs(pairs, missing={"bucket/d"}) == pairs
         # The missing sources can be given in any form that names them.
         assert _pairing(pairs).move_pairs(pairs, missing={"s3://bucket/d"}) == pairs
+
+    def test_move_pairs_keeps_listed_keys_apart_from_versions(self):
+        # GH-1403: the S3Path of a key that ends in a null version query is
+        # compared as that key, not as the null version, which is the key
+        # without the query.
+        pairs = [
+            (S3Path("bucket", "a/x"), S3Path("bucket", "b/x")),
+            (S3Path("bucket", "a/x?versionId=null"), S3Path("bucket", "b/x?versionId=null")),
+        ]
+        assert _pairing(pairs).move_pairs(pairs) == pairs
+
+    def test_move_pairs_path_conflict_candidates(self):
+        # GH-1403: the candidates of S3Path sources are S3Path objects, and
+        # missing ones may be given as such; their directories are named as
+        # they are listed.
+        directory = S3Path("bucket", "d?versionId=v1")
+        pairs = [
+            (directory, S3Path("bucket", "e")),
+            (S3Path("bucket", "d?versionId=v1/x"), S3Path("bucket", "e")),
+        ]
+        assert _pairing(pairs).conflict_candidates(pairs) == [directory]
+        assert _pairing(pairs).move_pairs(pairs, missing={directory}) == pairs
 
     def test_move_pairs_missing_is_a_collection(self):
         pairs = [("s3://bucket/d", "s3://bucket/e"), ("s3://bucket/d/x", "s3://bucket/e")]
