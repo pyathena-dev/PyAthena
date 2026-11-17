@@ -3179,7 +3179,9 @@ class TestS3FileSystem:
             else contextlib.nullcontext()
         ):
             fs.get(sources, f"{tmp_path}/out/", recursive=True)
-        assert fs.get_file.call_count == (0 if conflict else 4)
+        destinations = {c.args[1] for c in fs.get_file.call_args_list}
+        expected = {f"{tmp_path}/out/{name}" for name in ("data", "f1", "f2")}
+        assert destinations == (set() if conflict else expected)
 
     def test_put_directories_with_one_destination(self, tmp_path):
         # GH-1398: put_file() uploads nothing for a local directory, so

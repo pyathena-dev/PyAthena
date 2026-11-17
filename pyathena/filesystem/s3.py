@@ -3817,7 +3817,7 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs: Additional parameters passed to ``put_file()``.
 
         Raises:
-            ValueError: If two sources have the same destination, or
+            ValueError: If two files have the same destination, or
                 ``batch_size`` is neither positive, -1, nor None.
         """
         lpath, rpath = self._stringify_paths(lpath), self._stringify_paths(rpath)

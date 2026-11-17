@@ -998,7 +998,7 @@ class AioS3FileSystem(AsyncFileSystem):
             The return values of the ``_put_file()`` calls, as in fsspec.
 
         Raises:
-            ValueError: If two sources have the same destination.
+            ValueError: If two files have the same destination.
         """
         lpath, rpath = self._sync_fs._stringify_paths(lpath), self._sync_fs._stringify_paths(rpath)
         pairs = await self._thread_pool.run(

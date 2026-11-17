@@ -2571,18 +2571,28 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        overlap, state = overlapping_calls(2, timeout=0.2)
+        started = []
+        release = asyncio.Event()
 
-        def get_file(rpath, lpath, outfile, **kwargs):
-            overlap()
+        async def get_file(rpath, lpath, callback=None, outfile=None, **kwargs):
+            started.append(rpath)
+            await release.wait()
             outfile.write(rpath.encode() + b";")
 
-        fs._sync_fs.get_file = get_file
+        fs._get_file = get_file
         sources = [f"s3://bucket/src/{i}" for i in range(3)]
         outfile = io.BytesIO()
-        await fs._get(sources, [str(tmp_path / "unused")] * 3, outfile=outfile)
+        task = asyncio.ensure_future(
+            fs._get(sources, [str(tmp_path / "unused")] * 3, outfile=outfile)
+        )
+        await wait_until(lambda: started)
+        # Downloads scheduled at once would all have started by now.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert started == sources[:1]
+        release.set()
+        await await_bounded(task)
         assert outfile.getvalue() == b"".join(p.encode() + b";" for p in sources)
-        assert state["peak"] == 1
 
     @pytest.mark.asyncio
     async def test_expand_path_kwargs(self):
