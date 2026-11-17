@@ -4,6 +4,7 @@ import collections
 import contextlib
 import gc
 import gzip
+import io
 import os
 import pickle
 import threading
@@ -2521,6 +2522,67 @@ class TestAioS3FileSystem:
         await fs._put(f"{tmp_path}/src/", "s3://bucket/dst/", recursive=True)
         assert store == {"dst/a", "dst/sub/b"}
         assert [name for name, _ in requests] == ["put_object", "put_object"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "case", ["copy-destination", "copy-source", "pipe", "put", "get-destination"]
+    )
+    async def test_batch_conflicting_pairs(self, tmp_path, case):
+        # GH-1398: as in S3FileSystem, pairs whose outcome would depend on the
+        # order of the concurrent transfers raise before anything is
+        # transferred. They used to be transferred at the same time.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, requests = serve_s3_keys(fs._sync_fs, {"a", "b"})
+        local = [tmp_path / "x", tmp_path / "y"]
+        for path in local:
+            path.write_bytes(b"x")
+        operations = {
+            # Two sources with one destination.
+            "copy-destination": lambda: fs._copy(
+                ["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/c"] * 2
+            ),
+            # A destination that is another source.
+            "copy-source": lambda: fs._copy(
+                ["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/b", "s3://bucket/c"]
+            ),
+            # Two keys of one object.
+            "pipe": lambda: fs._pipe({"s3://bucket/a": b"1", "bucket/a": b"2"}),
+            "put": lambda: fs._put([str(p) for p in local], ["s3://bucket/a", "bucket/a"]),
+            # Two spellings of one local file.
+            "get-destination": lambda: fs._get(
+                ["s3://bucket/a", "s3://bucket/b"], [str(local[0]), f"{tmp_path}/./x"]
+            ),
+        }
+        with pytest.raises(ValueError, match="Cannot"):
+            await operations[case]()
+        assert store == {"a", "b"}
+        transfers = {"copy_object", "put_object", "get_object", "create_multipart_upload"}
+        assert not [name for name, _ in requests if name in transfers]
+        assert [p.read_bytes() for p in local] == [b"x", b"x"]
+
+    @pytest.mark.asyncio
+    async def test_get_outfile_runs_in_order(self, tmp_path):
+        # GH-1398: as in S3FileSystem.get(), downloads into one output stream
+        # run one after another, in the order of the sources, and the local
+        # paths, which _get_file() ignores then, do not conflict. They used
+        # to write into the stream at the same time.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        overlap, state = overlapping_calls(2, timeout=0.2)
+
+        def get_file(rpath, lpath, outfile, **kwargs):
+            overlap()
+            outfile.write(rpath.encode() + b";")
+
+        fs._sync_fs.get_file = get_file
+        sources = [f"s3://bucket/src/{i}" for i in range(3)]
+        outfile = io.BytesIO()
+        await fs._get(sources, [str(tmp_path / "unused")] * 3, outfile=outfile)
+        assert outfile.getvalue() == b"".join(p.encode() + b";" for p in sources)
+        assert state["peak"] == 1
 
     @pytest.mark.asyncio
     async def test_expand_path_kwargs(self):

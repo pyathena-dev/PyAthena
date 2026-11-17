@@ -2894,6 +2894,36 @@ class S3FileSystem(AbstractFileSystem):
             return list(pairing.copy_pairs(sources, destination_is_dir))
         return pairing.s3_copy_pairs(sources, destination_is_dir)
 
+    def _checked_copy_pairs(
+        self, pairing: S3PathPairing, source_params: Mapping[str, Any] | None = None
+    ) -> list[tuple[str, str]]:
+        """Expand, pair and check the paths of a copy whose objects are copied in parallel.
+
+        See :meth:`S3PathPairing.check_copy_pairs`.
+
+        Args:
+            pairing: The paths of the copy.
+            source_params: The parameters of the requests that read the
+                sources (see :meth:`S3Core.copy_source_params`), sent with
+                the lookups of the sources.
+
+        Returns:
+            The sources and their destinations.
+
+        Raises:
+            ValueError: If the copy has conflicting paths.
+            OSError: If bucket versioning cannot be read.
+        """
+        pairs = self._copy_pairs(pairing)
+        if pairs:
+            missing, versioned_buckets = self._conflict_lookups(
+                pairing, pairs, source_params, copy=True
+            )
+            pairing.check_copy_pairs(
+                pairs, missing=missing, versioning_enabled_buckets=versioned_buckets
+            )
+        return pairs
+
     def copy(
         self,
         path1,
@@ -2946,16 +2976,12 @@ class S3FileSystem(AbstractFileSystem):
         if on_error is None:
             on_error = "ignore" if recursive else "raise"
         limit = self._batch_limit(batch_size)
-        pairing = S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
-        pairs = self._copy_pairs(pairing)
+        pairs = self._checked_copy_pairs(
+            S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth),
+            self.core.copy_source_params(kwargs),
+        )
         if not pairs:
             return
-        missing, versioned_buckets = self._conflict_lookups(
-            pairing, pairs, self.core.copy_source_params(kwargs), copy=True
-        )
-        pairing.check_copy_pairs(
-            pairs, missing=missing, versioning_enabled_buckets=versioned_buckets
-        )
         concurrency = min(limit, len(pairs))
         call_kwargs = self._batch_kwargs(concurrency, kwargs)
 
@@ -3322,9 +3348,7 @@ class S3FileSystem(AbstractFileSystem):
             return
         if not isinstance(path, dict):
             raise ValueError("path must be str or dict")
-        items = [(self._strip_protocol(k), v) for k, v in path.items()]
-        if len({k for k, _ in items}) != len(items):
-            raise ValueError("Cannot pipe several values to the same destination.")
+        items = self._pipe_items(path)
         if not items:
             return
         concurrency = min(limit, len(items))
@@ -3339,6 +3363,23 @@ class S3FileSystem(AbstractFileSystem):
             self.pipe_file(*item, **call_kwargs)
 
         self._run_batch(pipe_item, items, concurrency)
+
+    def _pipe_items(self, values: Mapping[Any, Any]) -> list[tuple[str, Any]]:
+        """Return the paths and values of a ``pipe()`` of a dict, which are written in parallel.
+
+        Args:
+            values: The values to write by path.
+
+        Returns:
+            The paths without the protocol, and their values.
+
+        Raises:
+            ValueError: If two paths name the same object.
+        """
+        items = [(self._strip_protocol(k), v) for k, v in values.items()]
+        if len({k for k, _ in items}) != len(items):
+            raise ValueError("Cannot pipe several values to the same destination.")
+        return items
 
     def pipe_file(
         self,
@@ -3717,8 +3758,6 @@ class S3FileSystem(AbstractFileSystem):
         pairs = self._put_pairs(lpath, rpath, recursive=recursive, maxdepth=maxdepth, **kwargs)
         if not pairs:
             return
-        if len({rp for _, rp in pairs}) != len(pairs):
-            raise ValueError("Cannot put several paths to the same destination.")
         concurrency = min(limit, len(pairs))
         call_kwargs = self._batch_kwargs(concurrency, kwargs)
         locked = _S3LockedCallback(callback, threading.Lock())
@@ -3742,6 +3781,9 @@ class S3FileSystem(AbstractFileSystem):
     ) -> list[tuple[str, str]]:
         """Pair the local sources of ``put()`` with their S3 destinations as fsspec does.
 
+        The files are uploaded in parallel, so no two sources may have the
+        same destination.
+
         Args:
             lpath: Local source path, glob pattern, or list of them.
             rpath: S3 destination path, or list of paths when ``lpath`` is a
@@ -3754,28 +3796,35 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The local paths, including the directories of a recursive copy,
             with their destinations without the protocol.
+
+        Raises:
+            ValueError: If two sources have the same destination.
         """
         if isinstance(lpath, list) and isinstance(rpath, list):
-            return [(lp, self._strip_protocol(rp)) for lp, rp in zip(lpath, rpath, strict=False)]
-        source_is_str = isinstance(lpath, str)
-        if source_is_str:
-            lpath = make_path_posix(lpath)
-        local = LocalFileSystem()
-        lpaths = local.expand_path(lpath, recursive=recursive, maxdepth=maxdepth, **kwargs)
-        if source_is_str and (not recursive or maxdepth is not None):
-            # A string source without recursion does not copy directories.
-            lpaths = [p for p in lpaths if not (trailing_sep(p) or local.isdir(p))]
-            if not lpaths:
-                return []
-        dest_is_dir = isinstance(rpath, str) and (trailing_sep(rpath) or self.isdir(rpath))
-        # A list of destinations or one path, also path-like, as in fsspec.
-        rpath = self._strip_protocol(rpath)
-        exists = source_is_str and (
-            (has_magic(lpath) and len(lpaths) == 1)
-            or (not has_magic(lpath) and dest_is_dir and not trailing_sep(lpath))
-        )
-        rpaths = other_paths(lpaths, rpath, exists=exists, flatten=not source_is_str)
-        return list(zip(lpaths, rpaths, strict=True))
+            pairs = [(lp, self._strip_protocol(rp)) for lp, rp in zip(lpath, rpath, strict=False)]
+        else:
+            source_is_str = isinstance(lpath, str)
+            if source_is_str:
+                lpath = make_path_posix(lpath)
+            local = LocalFileSystem()
+            lpaths = local.expand_path(lpath, recursive=recursive, maxdepth=maxdepth, **kwargs)
+            if source_is_str and (not recursive or maxdepth is not None):
+                # A string source without recursion does not copy directories.
+                lpaths = [p for p in lpaths if not (trailing_sep(p) or local.isdir(p))]
+                if not lpaths:
+                    return []
+            dest_is_dir = isinstance(rpath, str) and (trailing_sep(rpath) or self.isdir(rpath))
+            # A list of destinations or one path, also path-like, as in fsspec.
+            rpath = self._strip_protocol(rpath)
+            exists = source_is_str and (
+                (has_magic(lpath) and len(lpaths) == 1)
+                or (not has_magic(lpath) and dest_is_dir and not trailing_sep(lpath))
+            )
+            rpaths = other_paths(lpaths, rpath, exists=exists, flatten=not source_is_str)
+            pairs = list(zip(lpaths, rpaths, strict=True))
+        if len({rp for _, rp in pairs}) != len(pairs):
+            raise ValueError("Cannot put several paths to the same destination.")
+        return pairs
 
     def put_file(
         self,
