@@ -263,8 +263,8 @@ class S3PathPairing:
         Raises:
             ValueError: If two sources have the same destination, or a
                 destination is another source, including one left in place,
-                except for a directory with no object at its key, which is not
-                copied. Also if ``missing`` is needed and None.
+                except for a source without a version in ``missing``, which
+                writes no destination. Also if ``missing`` is needed and None.
             TypeError: If ``missing`` is a string instead of a collection.
                 Also if ``versioning_enabled_buckets`` is a string.
         """
@@ -298,9 +298,9 @@ class S3PathPairing:
 
         Raises:
             ValueError: If two sources have the same destination, or a
-                destination is another source, except for a directory with no
-                object at its key, which is not copied. Also if ``missing`` is
-                needed and None.
+                destination is another source, except for a source without a
+                version in ``missing``, which writes no destination. Also if
+                ``missing`` is needed and None.
             TypeError: If ``missing`` is a string instead of a collection.
                 Also if ``versioning_enabled_buckets`` is a string.
         """
@@ -335,7 +335,8 @@ class S3PathPairing:
         named, sources, candidates = self._moves(pairs, versioning_enabled_buckets)
         if missing is None and candidates:
             raise ValueError("missing is needed to check the pairs.")
-        # A directory without an object at its key writes no destination.
+        # A source without an object at its key, such as a directory, writes
+        # no destination.
         skipped = {pair.source for pair in candidates}.intersection(
             self._target(S3Path.of(path), versioning_enabled_buckets) for path in missing or ()
         )

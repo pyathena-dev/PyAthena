@@ -763,8 +763,11 @@ class AioS3FileSystem(AsyncFileSystem):
         Raises:
             ValueError: If two sources have the same destination, or a
                 destination is another source, including one left in place,
-                which is checked before anything is copied. A directory with
-                no object at its key, which is not copied, does not conflict.
+                which is checked before anything is copied. A source without
+                an object at its key, such as a directory, writes no
+                destination and does not conflict.
+            FileNotFoundError: If a source does not exist, once the other
+                copies have ended; nothing is deleted.
             OSError: If bucket versioning cannot be read.
         """
         path1, path2 = self._sync_fs._stringify_paths(path1), self._sync_fs._stringify_paths(path2)

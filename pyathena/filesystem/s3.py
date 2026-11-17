@@ -2735,9 +2735,12 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             ValueError: If two sources have the same destination, or a
                 destination is another source, including one left in place,
-                which is checked before anything is copied. A directory with
-                no object at its key, which is not copied, does not conflict.
-                Also if ``batch_size`` is neither positive, -1, nor None.
+                which is checked before anything is copied. A source without
+                an object at its key, such as a directory, writes no
+                destination and does not conflict. Also if ``batch_size`` is
+                neither positive, -1, nor None.
+            FileNotFoundError: If a source does not exist, once the running
+                copies have ended; nothing is deleted.
             OSError: If bucket versioning cannot be read.
         """
         path1, path2 = self._stringify_paths(path1), self._stringify_paths(path2)
@@ -2975,9 +2978,9 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             ValueError: If two sources have the same destination, or a
-                destination is another source, except for a directory with no
-                object at its key, which is not copied. Also if
-                ``batch_size`` is neither positive, -1, nor None.
+                destination is another source, except for a source without an
+                object at its key, such as a directory, which is not copied.
+                Also if ``batch_size`` is neither positive, -1, nor None.
             OSError: If bucket versioning cannot be read for the checks.
         """
         path1, path2 = self._stringify_paths(path1), self._stringify_paths(path2)
