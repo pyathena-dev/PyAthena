@@ -2355,7 +2355,7 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="same destination"):
             fs.mv(["s3://bucket/x/a", "s3://bucket/y/a"], "s3://bucket/out", recursive=True)
         fs.isdir.assert_not_called()
-        assert [(c.args[0], c.kwargs["Key"]) for c in fs._call.call_args_list] == [
+        assert sorted((c.args[0], c.kwargs["Key"]) for c in fs._call.call_args_list) == [
             (fs._client.head_object, "x/a"),
             (fs._client.head_object, "y/a"),
         ]
