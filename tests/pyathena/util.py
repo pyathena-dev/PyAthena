@@ -1542,21 +1542,17 @@ def stub_move_with_source_params(stubber):
         "RequestPayer": "requester",
         "ExpectedBucketOwner": "111111111111",
     }
-
-    def missing_a():
-        """Queue a lookup of bucket/a, which finds no object."""
-        stubber.add_client_error(
-            "head_object",
-            service_error_code="404",
-            http_status_code=404,
-            expected_params={"Bucket": "bucket", "Key": "a", **lookup},
-        )
-
-    missing_a()
+    # A lookup of bucket/a, which finds no object.
+    missing_a = {
+        "service_error_code": "404",
+        "http_status_code": 404,
+        "expected_params": {"Bucket": "bucket", "Key": "a", **lookup},
+    }
+    stubber.add_client_error("head_object", **missing_a)
     stubber.add_response(
         "head_object", {"ContentLength": 1}, {"Bucket": "bucket", "Key": "a/x", **lookup}
     )
-    missing_a()
+    stubber.add_client_error("head_object", **missing_a)
     stubber.add_response(
         "list_objects_v2",
         {"KeyCount": 1, "Contents": [{"Key": "a/x"}]},

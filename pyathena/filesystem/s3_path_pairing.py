@@ -337,9 +337,9 @@ class S3PathPairing:
             raise ValueError("missing is needed to check the pairs.")
         # A source without an object at its key, such as a directory, writes
         # no destination.
-        skipped = {pair.source for pair in candidates}.intersection(
+        skipped = {
             self._target(S3Path.of(path), versioning_enabled_buckets) for path in missing or ()
-        )
+        }
         # A path with a version always names an object, so it writes its
         # destination even when the key has no current object.
         writers = Counter(

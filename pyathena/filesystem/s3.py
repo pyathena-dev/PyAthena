@@ -2710,9 +2710,7 @@ class S3FileSystem(AbstractFileSystem):
         requires ``s3:GetBucketVersioning``. The result is not cached across
         moves. Directory buckets do not support versioning and need no lookup.
         A source without a version whose destination conflicts with another
-        pair is looked up during the planning too; one without an object at
-        its key, such as a key prefix given in a list, writes no destination
-        and does not conflict.
+        pair is looked up with HeadObject during the planning too.
 
         The files are copied in parallel as ``copy()`` copies them, and are
         deleted once every copy has succeeded; nothing is deleted after a
