@@ -878,7 +878,8 @@ class AioS3FileSystem(AsyncFileSystem):
         gets ``max(1, max_workers // n)`` parallel range reads, or the
         caller's smaller ``max_workers``, where ``n`` is the number of files,
         or ``batch_size`` when it is positive and smaller. With ``outfile``,
-        the files are written to it one after another, in order.
+        the files are written to it one after another, in order, and ``n`` is
+        1.
 
         Args:
             rpath: Source S3 path, glob pattern, or list of them.

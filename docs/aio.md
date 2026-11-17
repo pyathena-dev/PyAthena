@@ -352,7 +352,7 @@ Each download of `_get()` gets `max(1, max_workers // n)` range reads, as with
 smaller. Pairs of `_get()`, `_put()`, `_copy()`, and `_pipe()` whose result would depend
 on the order of the transfers raise `ValueError` before anything is transferred, as with
 `S3FileSystem` (see {ref}`filesystem`), and `_get()` with `outfile` writes the objects
-into it one after another, in order.
+into it one after another, in order, with `n` = 1.
 A recursive `_put()` sends no request for the local directories. `_rm()` sends
 `batch_size` DeleteObjects requests at a time, `max_workers` by default and with `-1`; its
 `max_workers` argument is a deprecated alias of `batch_size`.
