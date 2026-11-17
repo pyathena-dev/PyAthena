@@ -2571,27 +2571,34 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
+        sources = [f"s3://bucket/src/{i}" for i in range(3)]
         started = []
-        release = asyncio.Event()
+        # Each download waits for its own release.
+        releases = [asyncio.Event() for _ in sources]
 
         async def get_file(rpath, lpath, callback=None, outfile=None, **kwargs):
             started.append(rpath)
-            await release.wait()
+            await releases[len(started) - 1].wait()
             outfile.write(rpath.encode() + b";")
 
         fs._get_file = get_file
-        sources = [f"s3://bucket/src/{i}" for i in range(3)]
         outfile = io.BytesIO()
         task = asyncio.ensure_future(
             fs._get(sources, [str(tmp_path / "unused")] * 3, outfile=outfile)
         )
-        await wait_until(lambda: started)
-        # Downloads scheduled at once would all have started by now.
-        for _ in range(10):
-            await asyncio.sleep(0)
-        assert started == sources[:1]
-        release.set()
-        await await_bounded(task)
+        try:
+            for count, release in enumerate(releases, 1):
+                await wait_until(lambda count=count: len(started) >= count)
+                # A download scheduled with the waiting one would have
+                # started by now.
+                for _ in range(10):
+                    await asyncio.sleep(0)
+                assert started == sources[:count]
+                release.set()
+        finally:
+            for release in releases:
+                release.set()
+            await await_bounded(task)
         assert outfile.getvalue() == b"".join(p.encode() + b";" for p in sources)
 
     @pytest.mark.asyncio
