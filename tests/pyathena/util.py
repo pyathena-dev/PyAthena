@@ -1526,12 +1526,12 @@ def stub_move_with_source_params(stubber):
     """Queue the requests of a move of bucket/a and bucket/a/x onto bucket/c.
 
     The move is made with MOVE_SOURCE_PARAMS, and no object exists at
-    bucket/a. Because bucket/a has bucket/a/x below it and the same
-    destination, the move depends on whether bucket/a is an object; the copy
-    of bucket/a looks it up again, and skips it as a directory. The lookups
-    of the sources receive the parameters that authorize the access to the
-    source, and the deletion of the copied source those that DeleteObjects
-    accepts.
+    bucket/a. Because both sources have the same destination, the move
+    depends on whether they are objects, so both are looked up. The copy of
+    bucket/a looks it up again and skips it as a directory, and the copy of
+    bucket/a/x uses its cached lookup. The lookups of the sources receive
+    the parameters that authorize the access to the source, and the deletion
+    of the copied source those that DeleteObjects accepts.
 
     Args:
         stubber: The Stubber of the S3 client.
@@ -1542,13 +1542,21 @@ def stub_move_with_source_params(stubber):
         "RequestPayer": "requester",
         "ExpectedBucketOwner": "111111111111",
     }
-    for _ in range(2):
+
+    def missing_a():
+        """Queue a lookup of bucket/a, which finds no object."""
         stubber.add_client_error(
             "head_object",
             service_error_code="404",
             http_status_code=404,
             expected_params={"Bucket": "bucket", "Key": "a", **lookup},
         )
+
+    missing_a()
+    stubber.add_response(
+        "head_object", {"ContentLength": 1}, {"Bucket": "bucket", "Key": "a/x", **lookup}
+    )
+    missing_a()
     stubber.add_response(
         "list_objects_v2",
         {"KeyCount": 1, "Contents": [{"Key": "a/x"}]},
@@ -1560,9 +1568,6 @@ def stub_move_with_source_params(stubber):
             "RequestPayer": "requester",
             "ExpectedBucketOwner": "111111111111",
         },
-    )
-    stubber.add_response(
-        "head_object", {"ContentLength": 1}, {"Bucket": "bucket", "Key": "a/x", **lookup}
     )
     stubber.add_response(
         "copy_object",

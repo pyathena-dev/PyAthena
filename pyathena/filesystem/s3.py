@@ -2709,6 +2709,10 @@ class S3FileSystem(AbstractFileSystem):
         GetBucketVersioning once per bucket during the move's planning and
         requires ``s3:GetBucketVersioning``. The result is not cached across
         moves. Directory buckets do not support versioning and need no lookup.
+        A source without a version whose destination conflicts with another
+        pair is looked up during the planning too; one without an object at
+        its key, such as a key prefix given in a list, writes no destination
+        and does not conflict.
 
         The files are copied in parallel as ``copy()`` copies them, and are
         deleted once every copy has succeeded; nothing is deleted after a
@@ -2810,7 +2814,6 @@ class S3FileSystem(AbstractFileSystem):
         pairing: S3PathPairing,
         pairs: list[tuple[str | S3Path, str | S3Path]],
         source_params: Mapping[str, Any] | None = None,
-        copy: bool = False,
     ) -> tuple[set[str | S3Path], set[str]]:
         """Look up what the conflict checks of a move or a copy need.
 
@@ -2822,7 +2825,6 @@ class S3FileSystem(AbstractFileSystem):
             source_params: The parameters of the requests that read the
                 sources (see :meth:`S3Core.copy_source_params`), sent with
                 the lookups of the sources.
-            copy: Whether the pairs are those of a copy.
 
         Returns:
             The conflict candidates with no object at their key, and the
@@ -2846,7 +2848,7 @@ class S3FileSystem(AbstractFileSystem):
         missing = {
             source
             for source in pairing.conflict_candidates(
-                pairs, versioning_enabled_buckets=versioned_buckets, copy=copy
+                pairs, versioning_enabled_buckets=versioned_buckets
             )
             if self._head_object(S3Path.of(source), lookup_kwargs=lookup_kwargs) is None
         }
@@ -2924,9 +2926,7 @@ class S3FileSystem(AbstractFileSystem):
         pairing = S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
         pairs = self._copy_pairs(pairing)
         if pairs:
-            missing, versioned_buckets = self._conflict_lookups(
-                pairing, pairs, source_params, copy=True
-            )
+            missing, versioned_buckets = self._conflict_lookups(pairing, pairs, source_params)
             pairing.check_copy_pairs(
                 pairs, missing=missing, versioning_enabled_buckets=versioned_buckets
             )
