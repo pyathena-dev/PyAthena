@@ -668,10 +668,11 @@ fs.get_file(path, "local-file")
 fs.put_file("local-file", path)
 ```
 
-`info()`, `cat_file()`, `cp_file()`, `get_file()` and `put_file()`, their asynchronous
-counterparts, `S3Core` and `S3PathPairing` accept an `S3Path`. `S3Path.of()` parses a
-path string and returns an `S3Path` as it is. `S3Path("YOUR_S3_BUCKET", "")` is the
-bucket path, as `S3Path("YOUR_S3_BUCKET")` is.
+`info()`, `cat_file()`, `cp_file()`, `get_file()`, `put_file()`, `sign()`, `metadata()`,
+`getxattr()` and `setxattr()`, their asynchronous counterparts, `S3File`, `S3Core` and
+`S3PathPairing` accept an `S3Path`. `S3Path.of()` parses a path string and returns an
+`S3Path` as it is. `S3Path("YOUR_S3_BUCKET", "")` is the bucket path, as
+`S3Path("YOUR_S3_BUCKET")` is.
 
 `find()`, `walk()`, `tree()`, `glob()` and `expand_path()` list such keys by their
 buckets and keys, and `rm()`, `chmod()`, `cat()`, `du()`, `copy()`, `mv()` and `get()`
@@ -682,8 +683,9 @@ path string, names the version. The same holds for the compositions that pass pa
 strings, such as `fsspec.open()`, `fsspec.open_files()` and `get_mapper()` (`FSMap`).
 
 A file opened with an `S3Path` of such a key, without a version, has the name of the
-key as its `path`. The `sign()`, `metadata()`, `getxattr()` and `setxattr()` of the
-file, and a pickled copy of the file, use that path string.
+key as its `path`. Its `url()`, `metadata()`, `getxattr()` and `setxattr()` address its
+bucket, key and version, and a pickled copy of the file reopens its `path`, which names
+the version.
 
 ### Bucket paths with a trailing double slash
 

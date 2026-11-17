@@ -1370,13 +1370,22 @@ class TestS3FileSystem:
         assert [t for t in s3_request_targets(requests) if t[0] != "head_object"] == sent
 
     @pytest.mark.parametrize(
-        ("source", "kwargs", "sent"),
+        ("source", "kwargs", "sent", "labels"),
         [
             pytest.param(
-                "x?versionId=v1", {}, [("put_object", "up/x?versionId=v1", None)], id="file"
+                "x?versionId=v1",
+                {},
+                [("put_object", "up/x?versionId=v1", None)],
+                ["bucket/up/x?versionId=v1"],
+                id="file",
             ),
             pytest.param(
-                "", {"recursive": True}, [("put_object", "up/x?versionId=v1", None)], id="dir"
+                "",
+                {"recursive": True},
+                [("put_object", "up/x?versionId=v1", None)],
+                # The directory itself is paired with the destination root.
+                ["bucket/up", "bucket/up/x?versionId=v1"],
+                id="dir",
             ),
             pytest.param(
                 "x?versionId=v1",
@@ -1385,11 +1394,12 @@ class TestS3FileSystem:
                     ("head_object", "up/x?versionId=v1", None),
                     ("put_object", "up/x?versionId=v1", "*"),
                 ],
+                ["bucket/up/x?versionId=v1"],
                 id="create",
             ),
         ],
     )
-    def test_put_names_destinations_after_local_files(self, tmp_path, source, kwargs, sent):
+    def test_put_names_destinations_after_local_files(self, tmp_path, source, kwargs, sent, labels):
         # GH-1404: put() writes a local file to the key named after it as it
         # is, also when its name ends in what looks like a version ID query,
         # and names the branch of the callback after the key as a string.
@@ -1406,7 +1416,7 @@ class TestS3FileSystem:
             for name, request in requests
             if name != "list_objects_v2"
         ] == sent
-        assert "bucket/up/x?versionId=v1" in callback.destinations
+        assert sorted(callback.destinations) == labels
 
     def test_put_in_transaction_names_destinations_after_local_files(self, tmp_path):
         # GH-1404: the file of a destination named after a local file joins
@@ -1420,21 +1430,6 @@ class TestS3FileSystem:
             fs.put(str(tmp_path / "x?versionId=v1"), "s3://bucket/up/")
             assert store == set()
         assert store == {"up/x?versionId=v1"}
-
-    def test_open_appends_to_path_as_it_is(self):
-        # GH-1404: a file opened in append mode with an S3Path looks up,
-        # reads and writes the key as it is.
-        fs = S3FileSystem(
-            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
-        )
-        _, requests = serve_s3_keys(fs, self.NULL_KEYS)
-        with S3File(fs, S3Path("bucket", "a/x?versionId=null"), "ab") as f:
-            f.write(b"bb")
-        assert s3_request_targets(requests) == [
-            ("get_object", "a/x?versionId=null", None),
-            ("head_object", "a/x?versionId=null", None),
-            ("put_object", "a/x?versionId=null", None),
-        ]
 
     def test_expand_path_expands_below_listed_matches(self):
         # GH-1402: a recursive glob expands below each match by its key prefix.
@@ -8563,6 +8558,59 @@ class TestS3FileSystem:
 
 
 class TestS3File:
+    def test_append_to_path_as_it_is(self):
+        # GH-1404: a file opened in append mode with an S3Path looks up,
+        # reads and writes the key as it is.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs, {"a/x", "a/x?versionId=null"})
+        with S3File(fs, S3Path("bucket", "a/x?versionId=null"), "ab") as f:
+            f.write(b"bb")
+        assert s3_request_targets(requests) == [
+            ("get_object", "a/x?versionId=null", None),
+            ("head_object", "a/x?versionId=null", None),
+            ("put_object", "a/x?versionId=null", None),
+        ]
+
+    @pytest.mark.parametrize(
+        ("call", "sent"),
+        [
+            pytest.param(
+                lambda f: f.url(),
+                [("generate_presigned_url", S3Path("bucket", "a/x?versionId=null"))],
+                id="url",
+            ),
+            pytest.param(
+                lambda f: f.metadata(), [("head_object", "a/x?versionId=null")], id="metadata"
+            ),
+            pytest.param(
+                lambda f: f.getxattr("m"), [("head_object", "a/x?versionId=null")], id="getxattr"
+            ),
+            pytest.param(
+                lambda f: f.setxattr(n="2"),
+                [("head_object", "a/x?versionId=null"), ("copy_object", "a/x?versionId=null")],
+                id="setxattr",
+            ),
+        ],
+    )
+    def test_path_methods_address_path_as_it_is(self, call, sent):
+        # GH-1404: the methods of a file opened with an S3Path address its
+        # bucket, key and version, not its path string, which would name the
+        # null version of a/x.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs, {"a/x", "a/x?versionId=null"})
+        with S3File(fs, S3Path("bucket", "a/x?versionId=null"), "rb") as f:
+            del requests[:]
+            call(f)
+        assert [
+            (name, request["args"][0] if "args" in request else request.get("Key"))
+            for name, request in requests
+            if request.get("VersionId") is None and name != "list_objects_v2"
+        ] == sent
+
     @pytest.mark.parametrize("mode", ["wb", "ab"])
     def test_repeated_creation_interrupt(self, mode):
         # GH-1077: an interrupt of the write's wait for the creation of its

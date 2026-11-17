@@ -184,6 +184,8 @@ class S3PathPairing:
         # path2 without its trailing slashes, followed by the suffix.
         root_name = self.path2.rstrip("/")
         root = S3Path.parse(root_name)
+        if root.version_id:
+            raise ValueError("Cannot copy to a versioned file.")
         return [
             (p1, root.with_key_suffix(p2[len(root_name) :]) if isinstance(p1, S3Path) else p2)
             for p1, p2 in pairs
