@@ -159,8 +159,9 @@ class S3PathPairing:
 
         The destination of an ``S3Path`` source, when ``path2`` is a string,
         is an ``S3Path`` too: ``path2`` parsed, with the suffix that
-        :meth:`copy_pairs` appends to it added to its key as it is, so that a
-        key such as ``a/x?versionId=null`` is copied to the key
+        :meth:`copy_pairs` appends to it added to its key as it is (see
+        :meth:`~pyathena.filesystem.s3_path.S3Path.with_key_suffix`), so that
+        a key such as ``a/x?versionId=null`` is copied to the key
         ``b/x?versionId=null`` instead of being parsed as a version. The
         other destinations are strings, as :meth:`copy_pairs` returns them.
 
@@ -183,17 +184,10 @@ class S3PathPairing:
         # path2 without its trailing slashes, followed by the suffix.
         root_name = self.path2.rstrip("/")
         root = S3Path.parse(root_name)
-        if root.version_id:
-            raise ValueError("Cannot copy to a versioned file.")
-        typed: list[tuple[str | S3Path, str | S3Path]] = []
-        for p1, p2 in pairs:
-            if isinstance(p1, S3Path):
-                suffix = p2[len(root_name) :]
-                key = f"{root.key}{suffix}" if root.key else suffix.removeprefix("/")
-                typed.append((p1, S3Path(root.bucket, key)))
-            else:
-                typed.append((p1, p2))
-        return typed
+        return [
+            (p1, root.with_key_suffix(p2[len(root_name) :]) if isinstance(p1, S3Path) else p2)
+            for p1, p2 in pairs
+        ]
 
     def conflict_candidates(
         self,

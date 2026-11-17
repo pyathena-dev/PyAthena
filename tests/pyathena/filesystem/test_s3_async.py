@@ -797,6 +797,60 @@ class TestAioS3FileSystem:
         ]
         assert sorted(callback.sources) == ["bucket/a", "bucket/a/x", "bucket/a/x?versionId=null"]
 
+    @pytest.mark.parametrize(
+        ("source", "kwargs", "sent"),
+        [
+            pytest.param(
+                "x?versionId=v1", {}, [("put_object", "up/x?versionId=v1", None)], id="file"
+            ),
+            pytest.param(
+                "", {"recursive": True}, [("put_object", "up/x?versionId=v1", None)], id="dir"
+            ),
+            pytest.param(
+                "x?versionId=v1",
+                {"mode": "create"},
+                [
+                    ("head_object", "up/x?versionId=v1", None),
+                    ("put_object", "up/x?versionId=v1", "*"),
+                ],
+                id="create",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_put_names_destinations_after_local_files(self, tmp_path, source, kwargs, sent):
+        # GH-1404: _put() writes the keys named after local files as put()
+        # does, with the branches of the callback named after them as strings.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, requests = serve_s3_keys(fs._sync_fs, set())
+        (tmp_path / "x?versionId=v1").write_bytes(b"aa")
+        callback = BranchRecordingCallback()
+        await await_bounded(
+            fs._put(f"{tmp_path}/{source}", "s3://bucket/up/", callback=callback, **kwargs)
+        )
+        assert store == {"up/x?versionId=v1"}
+        assert [
+            (name, request.get("Key"), request.get("IfNoneMatch"))
+            for name, request in requests
+            if name != "list_objects_v2"
+        ] == sent
+        assert callback.destinations == ["bucket/up/x?versionId=v1"]
+
+    def test_put_in_transaction_names_destinations_after_local_files(self, tmp_path):
+        # GH-1404: in a transaction, the file of a destination named after a
+        # local file joins the transaction of this filesystem.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = serve_s3_keys(fs._sync_fs, set())
+        (tmp_path / "x?versionId=v1").write_bytes(b"aa")
+        with fs.transaction:
+            fs.put(str(tmp_path / "x?versionId=v1"), "s3://bucket/up/")
+            assert store == set()
+        assert store == {"up/x?versionId=v1"}
+
     @pytest.mark.asyncio
     async def test_du_cancellation_sends_no_further_lookup(self):
         # GH-1402: as fsspec's _du(), the lookups of the found entries are

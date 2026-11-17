@@ -62,6 +62,22 @@ class TestS3Path:
         assert S3Path.of(listed) is listed
         assert S3Path.of("s3://bucket/a/x?versionId=null") == S3Path("bucket", "a/x", "null")
 
+    @pytest.mark.parametrize(
+        ("path", "suffix", "expected"),
+        [
+            (S3Path("bucket", "up"), "/x?versionId=v1", S3Path("bucket", "up/x?versionId=v1")),
+            (S3Path("bucket"), "/x?versionId=v1", S3Path("bucket", "x?versionId=v1")),
+            (S3Path("bucket", "up"), "", S3Path("bucket", "up")),
+        ],
+    )
+    def test_with_key_suffix(self, path, suffix, expected):
+        # GH-1404: the suffix is added to the key as it is, never parsed.
+        assert path.with_key_suffix(suffix) == expected
+
+    def test_with_key_suffix_of_version(self):
+        with pytest.raises(ValueError, match="versioned"):
+            S3Path("bucket", "up", "v1").with_key_suffix("/x")
+
     def test_empty_key_is_the_bucket(self):
         # GH-1401: an empty key names the bucket, which the path prints as.
         assert S3Path("bucket", "") == S3Path("bucket")

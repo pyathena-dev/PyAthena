@@ -1369,6 +1369,73 @@ class TestS3FileSystem:
         call(fs)
         assert [t for t in s3_request_targets(requests) if t[0] != "head_object"] == sent
 
+    @pytest.mark.parametrize(
+        ("source", "kwargs", "sent"),
+        [
+            pytest.param(
+                "x?versionId=v1", {}, [("put_object", "up/x?versionId=v1", None)], id="file"
+            ),
+            pytest.param(
+                "", {"recursive": True}, [("put_object", "up/x?versionId=v1", None)], id="dir"
+            ),
+            pytest.param(
+                "x?versionId=v1",
+                {"mode": "create"},
+                [
+                    ("head_object", "up/x?versionId=v1", None),
+                    ("put_object", "up/x?versionId=v1", "*"),
+                ],
+                id="create",
+            ),
+        ],
+    )
+    def test_put_names_destinations_after_local_files(self, tmp_path, source, kwargs, sent):
+        # GH-1404: put() writes a local file to the key named after it as it
+        # is, also when its name ends in what looks like a version ID query,
+        # and names the branch of the callback after the key as a string.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, requests = serve_s3_keys(fs, set())
+        (tmp_path / "x?versionId=v1").write_bytes(b"aa")
+        callback = BranchRecordingCallback()
+        fs.put(f"{tmp_path}/{source}", "s3://bucket/up/", callback=callback, **kwargs)
+        assert store == {"up/x?versionId=v1"}
+        assert [
+            (name, request.get("Key"), request.get("IfNoneMatch"))
+            for name, request in requests
+            if name != "list_objects_v2"
+        ] == sent
+        assert "bucket/up/x?versionId=v1" in callback.destinations
+
+    def test_put_in_transaction_names_destinations_after_local_files(self, tmp_path):
+        # GH-1404: the file of a destination named after a local file joins
+        # the transaction, as one opened with open() does.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = serve_s3_keys(fs, set())
+        (tmp_path / "x?versionId=v1").write_bytes(b"aa")
+        with fs.transaction:
+            fs.put(str(tmp_path / "x?versionId=v1"), "s3://bucket/up/")
+            assert store == set()
+        assert store == {"up/x?versionId=v1"}
+
+    def test_open_appends_to_path_as_it_is(self):
+        # GH-1404: a file opened in append mode with an S3Path looks up,
+        # reads and writes the key as it is.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs, self.NULL_KEYS)
+        with S3File(fs, S3Path("bucket", "a/x?versionId=null"), "ab") as f:
+            f.write(b"bb")
+        assert s3_request_targets(requests) == [
+            ("get_object", "a/x?versionId=null", None),
+            ("head_object", "a/x?versionId=null", None),
+            ("put_object", "a/x?versionId=null", None),
+        ]
+
     def test_expand_path_expands_below_listed_matches(self):
         # GH-1402: a recursive glob expands below each match by its key prefix.
         fs = S3FileSystem(

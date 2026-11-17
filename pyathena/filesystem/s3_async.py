@@ -42,6 +42,7 @@ from pyathena.filesystem.s3 import (
     S3File,
     S3FileSystem,
     S3FileTarget,
+    _S3LockedCallback,
 )
 from pyathena.filesystem.s3_core import S3Core
 from pyathena.filesystem.s3_executor import ItemT, S3Executor, S3MapResult, S3ThreadPool, T
@@ -190,11 +191,12 @@ class _S3TransactionWrite:
         if stopped:
             raise CancelledError("Stopped before the transaction could commit the write.")
 
-    def open(self, path: str, mode: str, **kwargs) -> S3File:
+    def open(self, path: str | S3Path, mode: str, **kwargs) -> S3File:
         """Open the file of the write, which joins the transaction unless the write is stopped.
 
         Args:
-            path: S3 path (s3://bucket/key) of the file.
+            path: S3 path (s3://bucket/key) of the file, or an ``S3Path``,
+                which is opened by its bucket and key.
             mode: The binary write mode of the file.
             **kwargs: The other arguments of ``open()``, except
                 ``compression``. With ``autocommit=True``, as with
@@ -205,7 +207,12 @@ class _S3TransactionWrite:
             The file.
         """
         autocommit = kwargs.pop("autocommit", False)
-        file = self._fs._open(self._fs._strip_protocol(path), mode, autocommit=autocommit, **kwargs)
+        file = self._fs._open(
+            path if isinstance(path, S3Path) else self._fs._strip_protocol(path),
+            mode,
+            autocommit=autocommit,
+            **kwargs,
+        )
         with self._lock:
             self._files.append(file)
             # Under the lock, so that a cancellation either finds the file
@@ -541,29 +548,29 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _put_file(
         self,
         lpath: str | os.PathLike[str],
-        rpath: str | os.PathLike[str],
+        rpath: str | os.PathLike[str] | S3Path,
         callback=_DEFAULT_CALLBACK,
         mode: str = "overwrite",
         **kwargs,
     ) -> None:
         _S3BatchTasks.track()
-        rpath = stringify_path(rpath)
+        target: str | S3Path = rpath if isinstance(rpath, S3Path) else stringify_path(rpath)
         if self._intrans:
             # See _pipe_file.
             await self._write_in_transaction(
                 functools.partial(
-                    self._put_file_in_transaction, lpath, rpath, callback, mode, **kwargs
+                    self._put_file_in_transaction, lpath, target, callback, mode, **kwargs
                 )
             )
             return
         await self._thread_pool.run(
-            self._sync_fs.put_file, lpath, rpath, callback=callback, mode=mode, **kwargs
+            self._sync_fs.put_file, lpath, target, callback=callback, mode=mode, **kwargs
         )
 
     def _put_file_in_transaction(
         self,
         lpath: str | os.PathLike[str],
-        rpath: str,
+        rpath: str | S3Path,
         callback,
         mode: str,
         open_file: Callable[..., S3File],
@@ -576,7 +583,8 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Args:
             lpath: Local file path to upload.
-            rpath: S3 destination path (s3://bucket/key).
+            rpath: S3 destination path (s3://bucket/key), or an ``S3Path``,
+                whose bucket and key are written as they are.
             callback: Progress callback for tracking upload progress.
             mode: "overwrite" or "create". With "create", the file is
                 opened in ``xb`` mode: raise FileExistsError when the object
@@ -595,7 +603,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         if os.path.isdir(lpath):
             return
-        if not S3Path.parse(rpath).key:
+        if not S3Path.of(rpath).key:
             return
 
         size = os.path.getsize(lpath)
@@ -619,7 +627,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 max_workers=max_workers,
                 s3_additional_kwargs=s3_additional_kwargs,
             )._write_file_and_close(local, callback)
-        self.invalidate_cache(rpath)
+        self._sync_fs._invalidate(S3Path.of(rpath))
 
     async def _get_file(
         self,
@@ -930,41 +938,13 @@ class AioS3FileSystem(AsyncFileSystem):
         if batch_size is not None and batch_size > 0:
             concurrency = min(concurrency, batch_size)
         await _S3BatchTasks().run(
-            self._get_pairs(pairs, callback, **self._sync_fs._batch_kwargs(concurrency, kwargs))
-        )
-
-    async def _get_pairs(
-        self, pairs: list[tuple[str | S3Path, Any]], callback: Any, **kwargs
-    ) -> None:
-        """Download the pairs of a ``get()`` as fsspec's ``_get()`` downloads lists of paths.
-
-        Each download gets a branch of the callback named after the string of
-        its source, and the sources that a listing returns are downloaded by
-        their buckets and keys.
-
-        Args:
-            pairs: The S3 sources and their local destinations.
-            callback: Progress callback.
-            **kwargs: Passed to ``_get_file()``, and ``batch_size``, the
-                number of downloads to run at once.
-        """
-        for _, lp in pairs:
-            os.makedirs(os.path.dirname(lp), exist_ok=True)
-        batch_size = kwargs.pop("batch_size", self.batch_size)
-        callback.set_size(len(pairs))
-
-        async def get_pair(rp: str | S3Path, lp: Any) -> None:
-            """Download a pair with a branch of the callback.
-
-            Args:
-                rp: The S3 source.
-                lp: The local destination.
-            """
-            with callback.branched(str(rp), lp, **kwargs) as child:
-                await self._get_file(rp, lp, callback=child, **kwargs)
-
-        await _run_coros_in_chunks(
-            [get_pair(rp, lp) for rp, lp in pairs], batch_size=batch_size, callback=callback
+            super()._get(
+                [rp for rp, _ in pairs],
+                [lp for _, lp in pairs],
+                # Names the branches after the sources as strings.
+                callback=_S3LockedCallback(callback, threading.Lock()),
+                **self._sync_fs._batch_kwargs(concurrency, kwargs),
+            )
         )
 
     async def _put(
@@ -1012,7 +992,8 @@ class AioS3FileSystem(AsyncFileSystem):
             super()._put(
                 [lp for lp, _ in files],
                 [rp for _, rp in files],
-                callback=callback,
+                # Names the branches after the destinations as strings.
+                callback=_S3LockedCallback(callback, threading.Lock()),
                 batch_size=batch_size,
                 **kwargs,
             )
@@ -1659,7 +1640,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
     def _open(
         self,
-        path: str,
+        path: str | S3Path,
         mode: str = "rb",
         block_size: int | None = None,
         cache_type: str | None = None,

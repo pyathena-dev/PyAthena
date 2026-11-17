@@ -199,6 +199,9 @@ class _S3LockedCallback(Callback):
     def branched(self, path_1, path_2, **kwargs) -> Callback:
         """Return a branch of the callback for the transfer of one file.
 
+        The paths are passed on as strings: an ``S3Path``, such as a listed
+        key or a destination named after a local file, as its string.
+
         Args:
             path_1: The source of the transfer.
             path_2: The destination of the transfer.
@@ -207,6 +210,8 @@ class _S3LockedCallback(Callback):
         Returns:
             The branch, whose uses take the lock of this callback.
         """
+        path_1 = str(path_1) if isinstance(path_1, S3Path) else path_1
+        path_2 = str(path_2) if isinstance(path_2, S3Path) else path_2
         with self._lock:
             return _S3LockedCallback(self._callback.branched(path_1, path_2, **kwargs), self._lock)
 
@@ -3074,7 +3079,7 @@ class S3FileSystem(AbstractFileSystem):
                     is named after the source as a string.
             """
             rp, lp = pair
-            with locked.branched(str(rp), lp) as child:
+            with locked.branched(rp, lp) as child:
                 self.get_file(rp, lp, callback=child, **call_kwargs)
             locked.relative_update(1)
 
@@ -3830,7 +3835,7 @@ class S3FileSystem(AbstractFileSystem):
         call_kwargs = self._batch_kwargs(concurrency, kwargs)
         locked = _S3LockedCallback(callback, threading.Lock())
 
-        def put_pair(pair: tuple[str, str]) -> None:
+        def put_pair(pair: tuple[str, str | S3Path]) -> None:
             """Upload a pair with a branch of the callback.
 
             Args:
@@ -3846,11 +3851,18 @@ class S3FileSystem(AbstractFileSystem):
 
     def _put_pairs(
         self, lpath, rpath, recursive=False, maxdepth=None, **kwargs
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str, str | S3Path]]:
         """Pair the local sources of ``put()`` with their S3 destinations as fsspec does.
 
         The files are uploaded in parallel, so no two files may have the
         same destination; a local directory uploads nothing.
+
+        A destination named after a local file is an ``S3Path``: ``rpath``
+        parsed, with the rest of the local name added to its key as it is
+        (see :meth:`S3Path.with_key_suffix`), so that a file named, e.g.,
+        ``x?versionId=v1`` is written to that key instead of naming a
+        version. A destination that is ``rpath`` itself, or one of a list of
+        destinations, is the string that the caller passed.
 
         Args:
             lpath: Local source path, glob pattern, or list of them.
@@ -3866,10 +3878,14 @@ class S3FileSystem(AbstractFileSystem):
             with their destinations without the protocol.
 
         Raises:
-            ValueError: If two files have the same destination.
+            ValueError: If two files have the same destination, or ``rpath``
+                names a version and a destination is named after a local file
+                below it.
         """
         if isinstance(lpath, list) and isinstance(rpath, list):
-            pairs = [(lp, self._strip_protocol(rp)) for lp, rp in zip(lpath, rpath, strict=False)]
+            pairs: list[tuple[str, str | S3Path]] = [
+                (lp, self._strip_protocol(rp)) for lp, rp in zip(lpath, rpath, strict=False)
+            ]
         else:
             source_is_str = isinstance(lpath, str)
             if source_is_str:
@@ -3888,7 +3904,19 @@ class S3FileSystem(AbstractFileSystem):
                 (has_magic(lpath) and len(lpaths) == 1)
                 or (not has_magic(lpath) and dest_is_dir and not trailing_sep(lpath))
             )
-            rpaths = other_paths(lpaths, rpath, exists=exists, flatten=not source_is_str)
+            rpaths: list[str | S3Path] = other_paths(
+                lpaths, rpath, exists=exists, flatten=not source_is_str
+            )
+            if isinstance(rpath, str) and any(rp != rpath for rp in rpaths):
+                root = S3Path.parse(rpath)
+                if root.version_id:
+                    raise ValueError("Cannot write to the file with the version specified.")
+                # Every destination starts with rpath, which has no trailing
+                # slash, followed by the rest of the local name.
+                rpaths = [
+                    rp if rp == rpath else root.with_key_suffix(cast(str, rp)[len(rpath) :])
+                    for rp in rpaths
+                ]
             pairs = list(zip(lpaths, rpaths, strict=True))
         # put_file() uploads nothing for a local directory.
         files = [rp for lp, rp in pairs if not os.path.isdir(lp)]
@@ -3899,7 +3927,7 @@ class S3FileSystem(AbstractFileSystem):
     def put_file(
         self,
         lpath: str | os.PathLike[str],
-        rpath: str | os.PathLike[str],
+        rpath: str | os.PathLike[str] | S3Path,
         callback=_DEFAULT_CALLBACK,
         mode: str = "overwrite",
         **kwargs,
@@ -3914,7 +3942,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             lpath: Local file path to upload.
-            rpath: S3 destination path (s3://bucket/key).
+            rpath: S3 destination path (s3://bucket/key), or an ``S3Path``,
+                whose bucket and key are written as they are.
             callback: Progress callback for tracking upload progress.
             mode: "overwrite" (default) or "create". With "create", the file
                 is written as with ``open()`` in ``xb`` mode: raise
@@ -3936,12 +3965,12 @@ class S3FileSystem(AbstractFileSystem):
             the method returns without performing any operation. Bucket-only
             destinations (without key) are also not supported.
         """
-        rpath = stringify_path(rpath)
+        target: str | S3Path = rpath if isinstance(rpath, S3Path) else stringify_path(rpath)
         if os.path.isdir(lpath):
             # No support for directory uploads.
             return
 
-        if not S3Path.parse(rpath).key:
+        if not S3Path.of(target).key:
             # No support for bucket copy.
             return
 
@@ -3960,15 +3989,15 @@ class S3FileSystem(AbstractFileSystem):
         # The local file is opened first, so that an unreadable one fails
         # before the remote file is opened.
         with open(lpath, "rb") as local:
-            self.open(
-                rpath,
+            self._open_path(
+                target,
                 "xb" if mode == "create" else "wb",
                 block_size=block_size,
                 max_workers=max_workers,
                 s3_additional_kwargs=s3_additional_kwargs,
             )._write_file_and_close(local, callback)
 
-        self.invalidate_cache(rpath)
+        self._invalidate(S3Path.of(target))
 
     def get_file(
         self,
@@ -4044,11 +4073,7 @@ class S3FileSystem(AbstractFileSystem):
         # The remote file is opened first so that no local file is created
         # when open() finds no object at the path.
         with contextlib.ExitStack() as stack:
-            remote = stack.enter_context(
-                self._open(rpath, "rb", **kwargs)
-                if isinstance(rpath, S3Path)
-                else self.open(rpath, "rb", **kwargs)
-            )
+            remote = stack.enter_context(self._open_path(rpath, "rb", **kwargs))
             reader: Any = None
             if codec is not None:
                 # As fsspec's open() wraps the file, but closed with it.
@@ -4771,6 +4796,30 @@ class S3FileSystem(AbstractFileSystem):
             # The bucket listing holds only the buckets that the caller owns,
             # so a bucket missing from it is looked up with HeadBucket.
         return None
+
+    def _open_path(self, path: str | os.PathLike[str] | S3Path, mode: str, **kwargs) -> S3File:
+        """Open a binary file as ``open()`` does, also for an ``S3Path``.
+
+        A path string is opened with ``open()``. An ``S3Path`` is opened by
+        its bucket, key and version, and a file written in a transaction of
+        the filesystem joins it, as with ``open()``.
+
+        Args:
+            path: S3 path (s3://bucket/key), or an ``S3Path``.
+            mode: A binary mode of ``open()``.
+            **kwargs: The other arguments of ``open()``, except
+                ``compression``.
+
+        Returns:
+            The file.
+        """
+        if not isinstance(path, S3Path):
+            return cast(S3File, self.open(path, mode, **kwargs))
+        autocommit = kwargs.pop("autocommit", not self._intrans)
+        file = self._open(path, mode, autocommit=autocommit, **kwargs)
+        if not autocommit and "r" not in mode:
+            self.transaction.files.append(file)
+        return file
 
     def _open(
         self,
