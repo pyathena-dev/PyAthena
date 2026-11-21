@@ -31,19 +31,19 @@ def _outside_package(name):
 def _imports_outside_package(path):
     """List the imports of PyAthena modules outside the package, with their lines.
 
-    All imports count, including those under ``TYPE_CHECKING`` and the calls
-    of ``importlib.import_module()`` or ``__import__()`` with a literal name;
-    relative imports are resolved against the module.
+    All imports count, including those under ``TYPE_CHECKING``; relative
+    imports are resolved against the module. Any call of
+    ``importlib.import_module()`` or ``__import__()`` is reported too.
     """
     module = _module_name(path)
     # The package that a relative import of level 1 starts from.
     package = module if path.stem == "__init__" else module.rpartition(".")[0]
 
-    def resolve(name, level, anchor=package):
-        """Resolve a module name relative to ``anchor`` by ``level`` dots."""
+    def resolve(name, level):
+        """Resolve a module name relative to the package by ``level`` dots."""
         if not level:
             return name
-        parent = anchor.rsplit(".", level - 1)[0] if level > 1 else anchor
+        parent = package.rsplit(".", level - 1)[0] if level > 1 else package
         return f"{parent}.{name}" if name else parent
 
     found = []
@@ -51,46 +51,20 @@ def _imports_outside_package(path):
         if isinstance(node, ast.Import):
             names = [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom):
+            if node.module == "importlib" and any(a.name == "import_module" for a in node.names):
+                # Also catches a call through an alias of the function.
+                found.append((node.lineno, "<dynamic import>"))
             base = resolve(node.module or "", node.level)
             # ``from pyathena import filesystem`` names a submodule of the package.
             names = [base] if base != "pyathena" else [f"pyathena.{a.name}" for a in node.names]
-        elif (
-            isinstance(node, ast.Call)
-            and (
-                (isinstance(node.func, ast.Attribute) and node.func.attr == "import_module")
-                or (
-                    isinstance(node.func, ast.Name)
-                    and node.func.id in ("import_module", "__import__")
-                )
-            )
-            and isinstance(
-                target := next(
-                    iter([*node.args[:1], *(k.value for k in node.keywords if k.arg == "name")]),
-                    None,
-                ),
-                ast.Constant,
-            )
-            and isinstance(target.value, str)
+        elif isinstance(node, ast.Call) and (
+            (isinstance(node.func, ast.Attribute) and node.func.attr == "import_module")
+            or (isinstance(node.func, ast.Name) and node.func.id in ("import_module", "__import__"))
         ):
-            # A relative name, such as ``import_module("..util", __package__)``,
-            # resolves against its ``package``: ``__package__``, ``__name__``,
-            # or a string literal. Another anchor is not followed.
-            name = target.value
-            level = len(name) - len(name.lstrip("."))
-            anchor = next(
-                iter([*node.args[1:2], *(k.value for k in node.keywords if k.arg == "package")]),
-                None,
-            )
-            if not level:
-                names = [name]
-            elif anchor is None or (isinstance(anchor, ast.Name) and anchor.id == "__package__"):
-                names = [resolve(name[level:], level)]
-            elif isinstance(anchor, ast.Name) and anchor.id == "__name__":
-                names = [resolve(name[level:], level, module)]
-            elif isinstance(anchor, ast.Constant) and isinstance(anchor.value, str):
-                names = [resolve(name[level:], level, anchor.value)]
-            else:
-                continue
+            # A dynamic import cannot be resolved statically, and the package
+            # needs none; any one fails the check.
+            found.append((node.lineno, "<dynamic import>"))
+            continue
         else:
             continue
         found.extend((node.lineno, name) for name in names if _outside_package(name))
