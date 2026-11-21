@@ -2894,6 +2894,44 @@ class S3FileSystem(AbstractFileSystem):
             return list(pairing.copy_pairs(sources, destination_is_dir))
         return pairing.s3_copy_pairs(sources, destination_is_dir)
 
+    def _checked_copy_pairs(
+        self,
+        path1: str | list[str],
+        path2: str | list[str],
+        recursive: bool = False,
+        maxdepth: int | None = None,
+        source_params: Mapping[str, Any] | None = None,
+    ) -> list[tuple[str | S3Path, str | S3Path]]:
+        """Pair and check the paths of a copy (see :meth:`S3PathPairing.check_copy_pairs`).
+
+        Args:
+            path1: Source S3 path, glob pattern, or list of them.
+            path2: Destination S3 path, or list of paths when ``path1`` is a
+                list.
+            recursive: Whether to include the contents of the directories.
+            maxdepth: Maximum depth of the expansion.
+            source_params: The parameters of the requests that read the
+                sources (see :meth:`S3Core.copy_source_params`), sent with
+                the lookups of the sources.
+
+        Returns:
+            The sources and destinations that are copied.
+
+        Raises:
+            ValueError: If the copy has conflicting paths.
+            OSError: If bucket versioning cannot be read.
+        """
+        pairing = S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
+        pairs = self._copy_pairs(pairing)
+        if pairs:
+            missing, versioned_buckets = self._conflict_lookups(
+                pairing, pairs, source_params, copy=True
+            )
+            pairing.check_copy_pairs(
+                pairs, missing=missing, versioning_enabled_buckets=versioned_buckets
+            )
+        return pairs
+
     def copy(
         self,
         path1,
@@ -2946,16 +2984,15 @@ class S3FileSystem(AbstractFileSystem):
         if on_error is None:
             on_error = "ignore" if recursive else "raise"
         limit = self._batch_limit(batch_size)
-        pairing = S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
-        pairs = self._copy_pairs(pairing)
+        pairs = self._checked_copy_pairs(
+            path1,
+            path2,
+            recursive=recursive,
+            maxdepth=maxdepth,
+            source_params=self.core.copy_source_params(kwargs),
+        )
         if not pairs:
             return
-        missing, versioned_buckets = self._conflict_lookups(
-            pairing, pairs, self.core.copy_source_params(kwargs), copy=True
-        )
-        pairing.check_copy_pairs(
-            pairs, missing=missing, versioning_enabled_buckets=versioned_buckets
-        )
         concurrency = min(limit, len(pairs))
         call_kwargs = self._batch_kwargs(concurrency, kwargs)
 
@@ -3011,25 +3048,19 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             ValueError: If a destination named after a source lies outside
-                ``lpath``, two sources have the same destination, or
+                ``lpath``, two downloads write the same local file, or
                 ``batch_size`` is neither positive, -1, nor None.
         """
         rpath = self._stringify_paths(rpath)
         limit = self._batch_limit(batch_size)
         root = make_path_posix(lpath) if isinstance(lpath, (str, os.PathLike)) else lpath
-        pairs = self._copy_pairs(
-            S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
-            local=True,
-            **kwargs,
+        pairs = self._checked_get_pairs(
+            S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth), kwargs, **kwargs
         )
-        if isinstance(root, str):
-            check_contained(root, [lp for _, lp in pairs])
         if not pairs:
             return
         # get_file() writes to an outfile instead of the local paths.
         outfile = kwargs.get("outfile") is not None
-        if not outfile:
-            self._check_local_destinations([lp for _, lp in pairs])
         concurrency = 1 if outfile else min(limit, len(pairs))
         call_kwargs = self._batch_kwargs(concurrency, kwargs)
         locked = _S3LockedCallback(callback, threading.Lock())
@@ -3055,22 +3086,58 @@ class S3FileSystem(AbstractFileSystem):
             return
         self._run_batch(get_pair, pairs, concurrency)
 
-    @staticmethod
-    def _check_local_destinations(destinations: list[Any]) -> None:
+    def _checked_get_pairs(
+        self, pairing: S3PathPairing, file_kwargs: Mapping[str, Any], **kwargs: Any
+    ) -> list[tuple[str | S3Path, Any]]:
+        """Expand, pair and check the paths of a ``get()``.
+
+        The destinations named after the sources are checked to lie under the
+        local destination. Without ``outfile``, the files are downloaded in
+        parallel, so no two of them may write the same local file (see
+        :meth:`_check_local_destinations`).
+
+        Args:
+            pairing: The paths of the copy, with the local destination.
+            file_kwargs: The arguments of ``get_file()``, whose ``outfile``
+                and ``version_id`` the checks follow.
+            **kwargs: Passed to ``expand_path()``.
+
+        Returns:
+            The S3 sources and their local destinations.
+
+        Raises:
+            ValueError: If a destination named after a source lies outside
+                the local destination, or two downloads write the same local
+                file.
+        """
+        pairs = self._copy_pairs(pairing, local=True, **kwargs)
+        if isinstance(pairing.path2, str):
+            check_contained(pairing.path2, [lp for _, lp in pairs])
+        if pairs and file_kwargs.get("outfile") is None:
+            self._check_local_destinations(pairs, file_kwargs.get("version_id"))
+        return pairs
+
+    def _check_local_destinations(
+        self, pairs: list[tuple[str | S3Path, Any]], version_id: str | None = None
+    ) -> None:
         """Check that no two downloads of a batch write the same local file.
 
         Destinations are compared by the object for file-like ones, by the
         file for existing paths, such as hard links to one file, and by the
-        resolved path otherwise.
+        resolved path otherwise. A source that ``get_file()`` creates as a
+        local directory writes no file, so several of them may share a local
+        path; the sources are looked up only when their local path is shared.
 
         Args:
-            destinations: The local paths or file-like objects.
+            pairs: The S3 sources and their local paths or file-like objects.
+            version_id: The version ID that ``get_file()`` receives.
 
         Raises:
-            ValueError: If two destinations write the same file.
+            ValueError: If two downloads write the same file, or one creates
+                a directory where another writes a file.
         """
-        seen: set[tuple[Any, ...]] = set()
-        for destination in destinations:
+        sources: dict[tuple[Any, ...], list[str | S3Path]] = {}
+        for rpath, destination in pairs:
             key: tuple[Any, ...]
             if isfilelike(destination):
                 key = ("object", id(destination))
@@ -3085,9 +3152,35 @@ class S3FileSystem(AbstractFileSystem):
                         # Directories are created, not written.
                         continue
                     key = ("file", stat.st_dev, stat.st_ino)
-            if key in seen:
+            sources.setdefault(key, []).append(rpath)
+        for key, rpaths in sources.items():
+            # get_file() writes into a file-like object whatever the source.
+            if len(rpaths) > 1 and (
+                key[0] == "object"
+                or not all(self._is_directory_source(rp, version_id) for rp in rpaths)
+            ):
                 raise ValueError("Cannot get several paths to the same destination.")
-            seen.add(key)
+
+    def _is_directory_source(
+        self, rpath: str | os.PathLike[str] | S3Path, version_id: str | None = None
+    ) -> bool:
+        """Return whether ``get_file()`` creates a local directory for a source.
+
+        A requested version always names an object, while ``isdir()`` would
+        look up the latest version, or the prefix of the same name when the
+        version does not exist.
+
+        Args:
+            rpath: The S3 source, or an ``S3Path``, as for ``get_file()``.
+            version_id: The version ID that ``get_file()`` receives.
+
+        Returns:
+            True if the source has no version and is a directory.
+        """
+        path = rpath if isinstance(rpath, S3Path) else S3Path.parse(self._strip_protocol(rpath))
+        if version_id or path.version_id:
+            return False
+        return bool(self.isdir(rpath))
 
     def cp_file(
         self,
@@ -3322,9 +3415,7 @@ class S3FileSystem(AbstractFileSystem):
             return
         if not isinstance(path, dict):
             raise ValueError("path must be str or dict")
-        items = [(self._strip_protocol(k), v) for k, v in path.items()]
-        if len({k for k, _ in items}) != len(items):
-            raise ValueError("Cannot pipe several values to the same destination.")
+        items = self._pipe_items(path)
         if not items:
             return
         concurrency = min(limit, len(items))
@@ -3339,6 +3430,23 @@ class S3FileSystem(AbstractFileSystem):
             self.pipe_file(*item, **call_kwargs)
 
         self._run_batch(pipe_item, items, concurrency)
+
+    def _pipe_items(self, values: Mapping[Any, Any]) -> list[tuple[str, Any]]:
+        """Return the paths and values of a ``pipe()`` of a dict, which are written in parallel.
+
+        Args:
+            values: The values to write by path.
+
+        Returns:
+            The paths without the protocol, and their values.
+
+        Raises:
+            ValueError: If two paths name the same object.
+        """
+        items = [(self._strip_protocol(k), v) for k, v in values.items()]
+        if len({k for k, _ in items}) != len(items):
+            raise ValueError("Cannot pipe several values to the same destination.")
+        return items
 
     def pipe_file(
         self,
@@ -3709,7 +3817,7 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs: Additional parameters passed to ``put_file()``.
 
         Raises:
-            ValueError: If two sources have the same destination, or
+            ValueError: If two files have the same destination, or
                 ``batch_size`` is neither positive, -1, nor None.
         """
         lpath, rpath = self._stringify_paths(lpath), self._stringify_paths(rpath)
@@ -3717,8 +3825,6 @@ class S3FileSystem(AbstractFileSystem):
         pairs = self._put_pairs(lpath, rpath, recursive=recursive, maxdepth=maxdepth, **kwargs)
         if not pairs:
             return
-        if len({rp for _, rp in pairs}) != len(pairs):
-            raise ValueError("Cannot put several paths to the same destination.")
         concurrency = min(limit, len(pairs))
         call_kwargs = self._batch_kwargs(concurrency, kwargs)
         locked = _S3LockedCallback(callback, threading.Lock())
@@ -3742,6 +3848,9 @@ class S3FileSystem(AbstractFileSystem):
     ) -> list[tuple[str, str]]:
         """Pair the local sources of ``put()`` with their S3 destinations as fsspec does.
 
+        The files are uploaded in parallel, so no two files may have the
+        same destination; a local directory uploads nothing.
+
         Args:
             lpath: Local source path, glob pattern, or list of them.
             rpath: S3 destination path, or list of paths when ``lpath`` is a
@@ -3754,28 +3863,37 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The local paths, including the directories of a recursive copy,
             with their destinations without the protocol.
+
+        Raises:
+            ValueError: If two files have the same destination.
         """
         if isinstance(lpath, list) and isinstance(rpath, list):
-            return [(lp, self._strip_protocol(rp)) for lp, rp in zip(lpath, rpath, strict=False)]
-        source_is_str = isinstance(lpath, str)
-        if source_is_str:
-            lpath = make_path_posix(lpath)
-        local = LocalFileSystem()
-        lpaths = local.expand_path(lpath, recursive=recursive, maxdepth=maxdepth, **kwargs)
-        if source_is_str and (not recursive or maxdepth is not None):
-            # A string source without recursion does not copy directories.
-            lpaths = [p for p in lpaths if not (trailing_sep(p) or local.isdir(p))]
-            if not lpaths:
-                return []
-        dest_is_dir = isinstance(rpath, str) and (trailing_sep(rpath) or self.isdir(rpath))
-        # A list of destinations or one path, also path-like, as in fsspec.
-        rpath = self._strip_protocol(rpath)
-        exists = source_is_str and (
-            (has_magic(lpath) and len(lpaths) == 1)
-            or (not has_magic(lpath) and dest_is_dir and not trailing_sep(lpath))
-        )
-        rpaths = other_paths(lpaths, rpath, exists=exists, flatten=not source_is_str)
-        return list(zip(lpaths, rpaths, strict=True))
+            pairs = [(lp, self._strip_protocol(rp)) for lp, rp in zip(lpath, rpath, strict=False)]
+        else:
+            source_is_str = isinstance(lpath, str)
+            if source_is_str:
+                lpath = make_path_posix(lpath)
+            local = LocalFileSystem()
+            lpaths = local.expand_path(lpath, recursive=recursive, maxdepth=maxdepth, **kwargs)
+            if source_is_str and (not recursive or maxdepth is not None):
+                # A string source without recursion does not copy directories.
+                lpaths = [p for p in lpaths if not (trailing_sep(p) or local.isdir(p))]
+                if not lpaths:
+                    return []
+            dest_is_dir = isinstance(rpath, str) and (trailing_sep(rpath) or self.isdir(rpath))
+            # A list of destinations or one path, also path-like, as in fsspec.
+            rpath = self._strip_protocol(rpath)
+            exists = source_is_str and (
+                (has_magic(lpath) and len(lpaths) == 1)
+                or (not has_magic(lpath) and dest_is_dir and not trailing_sep(lpath))
+            )
+            rpaths = other_paths(lpaths, rpath, exists=exists, flatten=not source_is_str)
+            pairs = list(zip(lpaths, rpaths, strict=True))
+        # put_file() uploads nothing for a local directory.
+        files = [rp for lp, rp in pairs if not os.path.isdir(lp)]
+        if len(set(files)) != len(files):
+            raise ValueError("Cannot put several paths to the same destination.")
+        return pairs
 
     def put_file(
         self,
@@ -3902,14 +4020,7 @@ class S3FileSystem(AbstractFileSystem):
         s3_path = S3Path.of(rpath if isinstance(rpath, S3Path) else self._strip_protocol(rpath))
         if outfile is None and isfilelike(lpath):
             outfile = lpath
-        elif (
-            outfile is None
-            and not (s3_path.version_id or kwargs.get("version_id"))
-            and self.isdir(rpath)
-        ):
-            # A requested version always names an object, while isdir()
-            # would look up the latest version, or the prefix of the same
-            # name when the version does not exist.
+        elif outfile is None and self._is_directory_source(rpath, kwargs.get("version_id")):
             os.makedirs(lpath, exist_ok=True)
             return
 

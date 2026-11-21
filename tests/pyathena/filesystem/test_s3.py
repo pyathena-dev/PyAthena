@@ -3155,6 +3155,51 @@ class TestS3FileSystem:
             fs.get(["s3://bucket/a", "s3://bucket/b"], [str(tmp_path / "a"), str(tmp_path / "b")])
         fs.get_file.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("keys", "conflict"),
+        [
+            # Two directories, which get_file() creates as local directories.
+            ({"p1/data/f1", "p2/data/f2"}, False),
+            # A directory, and an object written where it is created.
+            ({"p1/data/f1", "p2/data"}, True),
+        ],
+    )
+    def test_get_directories_with_one_destination(self, tmp_path, keys, conflict):
+        # GH-1398: a directory source writes no local file, so directories
+        # with one local path do not conflict unless an object is written
+        # there too. They used to conflict.
+        fs = self._make_fs()
+        self._serve_keys(fs, keys)
+        fs.get_file = mock.MagicMock()
+        sources = ["s3://bucket/p1/data", "s3://bucket/p2/data"]
+
+        with (
+            pytest.raises(ValueError, match="same destination")
+            if conflict
+            else contextlib.nullcontext()
+        ):
+            fs.get(sources, f"{tmp_path}/out/", recursive=True)
+        destinations = {c.args[1] for c in fs.get_file.call_args_list}
+        expected = {f"{tmp_path}/out/{name}" for name in ("data", "f1", "f2")}
+        assert destinations == (set() if conflict else expected)
+
+    def test_put_directories_with_one_destination(self, tmp_path):
+        # GH-1398: put_file() uploads nothing for a local directory, so
+        # directories with one destination do not conflict. They used to.
+        fs = self._make_fs()
+        fs.put_file = mock.MagicMock()
+        for name, file in (("a", "f1"), ("b", "f2")):
+            (tmp_path / name / "data").mkdir(parents=True)
+            (tmp_path / name / "data" / file).write_bytes(b"x")
+
+        fs.put(
+            [str(tmp_path / "a" / "data"), str(tmp_path / "b" / "data")],
+            "s3://bucket/x/",
+            recursive=True,
+        )
+        files = [c.args[1] for c in fs.put_file.call_args_list if not os.path.isdir(c.args[0])]
+        assert sorted(files) == ["bucket/x/f1", "bucket/x/f2"]
+
     def test_copy_skipped_directory_does_not_conflict(self):
         # GH-1322: a listed source without an object at its key, a prefix
         # that cp_file() skips, writes no destination, so its destination

@@ -33,7 +33,7 @@ from fsspec.asyn import (
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
 from fsspec.implementations.local import make_path_posix
-from fsspec.utils import check_contained, stringify_path
+from fsspec.utils import stringify_path
 
 from pyathena.aio.util import create_in_thread
 from pyathena.filesystem.s3 import (
@@ -824,12 +824,12 @@ class AioS3FileSystem(AsyncFileSystem):
     ) -> None:
         """Copy files within S3.
 
-        See :meth:`S3FileSystem.copy`. The paths are paired as there, but the
-        pairs are not checked for conflicts, and the copies run as in
-        fsspec's ``_copy()``, ``batch_size`` of them at once as tasks. A
-        cancellation cancels the copies and waits for them; a copy that is
-        already being cancelled, such as by the shutdown of the event loop,
-        is not cancelled again.
+        See :meth:`S3FileSystem.copy`. The paths are paired and checked as
+        there before anything is copied, and the copies run as in fsspec's
+        ``_copy()``, ``batch_size`` of them at once as tasks. A cancellation
+        cancels the copies and waits for them; a copy that is already being
+        cancelled, such as by the shutdown of the event loop, is not
+        cancelled again.
 
         Args:
             path1: Source S3 path, glob pattern, or list of them.
@@ -840,16 +840,23 @@ class AioS3FileSystem(AsyncFileSystem):
             maxdepth: Maximum depth of a recursive copy.
             batch_size: Number of copies to run at the same time.
             **kwargs: Additional S3 copy parameters passed to ``_cp_file()``.
+
+        Raises:
+            ValueError: If two sources have the same destination, or a
+                destination is another source, except for a directory with no
+                object at its key, which is not copied.
+            OSError: If bucket versioning cannot be read for the checks.
         """
         path1, path2 = self._sync_fs._stringify_paths(path1), self._sync_fs._stringify_paths(path2)
-        # Paired as the sync copy() pairs them, so that the keys that a
-        # listing returns are copied by their buckets and keys; fsspec copies
-        # the lists of the pairs.
-        pairing = S3PathPairing(path1, path2, recursive=recursive, maxdepth=maxdepth)
-        pairs = (
-            await self._thread_pool.run(self._sync_fs._copy_pairs, pairing)
-            if pairing.expands
-            else pairing.copy_pairs()
+        if on_error is None:
+            on_error = "ignore" if recursive else "raise"
+        pairs = await self._thread_pool.run(
+            self._sync_fs._checked_copy_pairs,
+            path1,
+            path2,
+            recursive=recursive,
+            maxdepth=maxdepth,
+            source_params=self.core.copy_source_params(kwargs),
         )
         if not pairs:
             return
@@ -857,7 +864,6 @@ class AioS3FileSystem(AsyncFileSystem):
             super()._copy(
                 [p1 for p1, _ in pairs],
                 [p2 for _, p2 in pairs],
-                recursive=recursive,
                 on_error=on_error,
                 batch_size=batch_size,
                 **kwargs,
@@ -869,13 +875,15 @@ class AioS3FileSystem(AsyncFileSystem):
     ) -> None:
         """Copy files from S3 to the local filesystem.
 
-        See :meth:`S3FileSystem.get`. The paths are paired as there, and the
-        downloads run as in fsspec's ``_get()``; a cancellation cancels them
-        and waits for them, as in :meth:`_copy`. As in
-        :meth:`S3FileSystem.get`, each download gets ``max(1, max_workers //
-        n)`` parallel range reads, or the caller's smaller ``max_workers``,
-        where ``n`` is the number of files, or ``batch_size`` when it is
-        positive and smaller.
+        See :meth:`S3FileSystem.get`. The paths are paired and checked as
+        there before anything is downloaded, and the downloads run as in
+        fsspec's ``_get()``; a cancellation cancels them and waits for them,
+        as in :meth:`_copy`. As in :meth:`S3FileSystem.get`, each download
+        gets ``max(1, max_workers // n)`` parallel range reads, or the
+        caller's smaller ``max_workers``, where ``n`` is the number of files,
+        or ``batch_size`` when it is positive and smaller. With ``outfile``,
+        the files are written to it one after another, in order, and ``n`` is
+        1.
 
         Args:
             rpath: Source S3 path, glob pattern, or list of them.
@@ -890,7 +898,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Raises:
             ValueError: If a destination named after a source lies outside
-                ``lpath``.
+                ``lpath``, or two downloads write the same local file.
         """
         rpath = self._sync_fs._stringify_paths(rpath)
         # Local paths are made absolute, as fsspec's _get() does, so that
@@ -901,14 +909,16 @@ class AioS3FileSystem(AsyncFileSystem):
             else [make_path_posix(p) if isinstance(p, (str, os.PathLike)) else p for p in lpath]
         )
         pairs = await self._thread_pool.run(
-            self._sync_fs._copy_pairs,
+            self._sync_fs._checked_get_pairs,
             S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
-            local=True,
+            kwargs,
         )
-        if isinstance(root, str):
-            check_contained(root, [lp for _, lp in pairs])
         if not pairs:
             return
+        if kwargs.get("outfile") is not None:
+            # _get_file() writes to the outfile instead of the local paths,
+            # so the files are downloaded one after another, in order.
+            kwargs = {**kwargs, "batch_size": 1}
         # fsspec's default batch size, when none is given, is not counted:
         # at most max_workers downloads run at once in the threads of the
         # filesystem, and more than max_workers get one range each anyway.
@@ -966,11 +976,12 @@ class AioS3FileSystem(AsyncFileSystem):
     ) -> list[Any]:
         """Copy files from the local filesystem to S3.
 
-        See :meth:`S3FileSystem.put`. The uploads run as in fsspec's
-        ``_put()``, and a cancellation cancels them and waits for them, as
-        in :meth:`_copy`. Unlike fsspec's ``_put()``, which creates a
-        directory for each local directory, it makes no other request: S3
-        has no directories, and creating one checks or creates the bucket.
+        See :meth:`S3FileSystem.put`. The paths are paired and checked as
+        there before anything is uploaded, and the uploads run as in fsspec's
+        ``_put()``; a cancellation cancels them and waits for them, as in
+        :meth:`_copy`. Unlike fsspec's ``_put()``, which creates a directory
+        for each local directory, it makes no other request: S3 has no
+        directories, and creating one checks or creates the bucket.
 
         Args:
             lpath: Local source path, glob pattern, or list of them, as
@@ -985,6 +996,9 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Returns:
             The return values of the ``_put_file()`` calls, as in fsspec.
+
+        Raises:
+            ValueError: If two files have the same destination.
         """
         lpath, rpath = self._sync_fs._stringify_paths(lpath), self._sync_fs._stringify_paths(rpath)
         pairs = await self._thread_pool.run(
@@ -1004,9 +1018,10 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _pipe(self, path, value=None, batch_size=None, **kwargs) -> list[Any]:
         """Write bytes into one or more paths.
 
-        See :meth:`S3FileSystem.pipe`. The writes run as in fsspec's
-        ``_pipe()``, and a cancellation cancels them and waits for them, as
-        in :meth:`_copy`.
+        See :meth:`S3FileSystem.pipe`. The paths of a dictionary are checked
+        as there before anything is written, and the writes run as in
+        fsspec's ``_pipe()``; a cancellation cancels them and waits for them,
+        as in :meth:`_copy`.
 
         Args:
             path: S3 path, or a dictionary of paths and their bytes.
@@ -1016,8 +1031,13 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Returns:
             The return values of the ``_pipe_file()`` calls, as in fsspec.
+
+        Raises:
+            ValueError: If two paths of a dictionary name the same object.
         """
-        if not isinstance(path, dict):
+        if isinstance(path, dict):
+            path = dict(self._sync_fs._pipe_items(path))
+        else:
             path = stringify_path(path)
         return await _S3BatchTasks().run(
             super()._pipe(path, value, batch_size=batch_size, **kwargs)

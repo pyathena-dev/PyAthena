@@ -143,7 +143,10 @@ succeeded. `on_error` of `cat`, `cat_ranges`, and `cp` keeps its fsspec meaning;
 Pairs whose result would depend on the order of the transfers raise `ValueError` before
 anything is transferred: two sources of `get`, `put`, `cp`, or `pipe` with the same
 destination, including two paths of one existing local file or one file-like object,
-and a `cp` destination that is another source. Local paths that do not exist yet are
+and a `cp` destination that is another source. A local directory, which `put` skips,
+does not conflict, and neither do two directories that `get` creates at one local path;
+the sources of `get` are looked up for that only when their local paths are the same.
+Local paths that do not exist yet are
 compared as strings, after `os.path.normcase`, so on a case-insensitive filesystem other
 than Windows, such as the default one of macOS, give `get` destinations that differ by
 more than case. A `cp` of an object onto itself, such as with
