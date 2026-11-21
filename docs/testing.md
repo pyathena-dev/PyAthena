@@ -27,7 +27,7 @@ just lint
 ```
 
 Run `just lint` before tests, including when invoking pytest directly.
-For documentation checks, install the tools pinned in `.mise.toml` with [mise](https://mise.jdx.dev/):
+For documentation checks, use Python 3.11.5 or later, which the Furo theme's dependencies require, and install the tools pinned in `.mise.toml` with [mise](https://mise.jdx.dev/):
 
 ```bash
 mise install
