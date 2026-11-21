@@ -1418,6 +1418,29 @@ class TestS3FileSystem:
         ] == sent
         assert sorted(callback.destinations) == labels
 
+    @pytest.mark.parametrize("with_file", [False, True])
+    def test_put_below_versioned_root(self, tmp_path, with_file):
+        # GH-1404: a file named below a root that names a version raises
+        # before anything is uploaded; local directories, which upload
+        # nothing, do not.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, requests = serve_s3_keys(fs, set())
+        (tmp_path / "src" / "empty").mkdir(parents=True)
+        if with_file:
+            (tmp_path / "src" / "x").write_bytes(b"aa")
+        put = lambda: fs.put(  # noqa: E731
+            f"{tmp_path}/src/", "s3://bucket/up?versionId=v1/", recursive=True
+        )
+        if with_file:
+            with pytest.raises(ValueError, match="version"):
+                put()
+        else:
+            put()
+        assert store == set()
+        assert [name for name, _ in requests if name != "list_objects_v2"] == []
+
     def test_put_in_transaction_names_destinations_after_local_files(self, tmp_path):
         # GH-1404: the file of a destination named after a local file joins
         # the transaction, as one opened with open() does.

@@ -981,9 +981,9 @@ class AioS3FileSystem(AsyncFileSystem):
             The return values of the ``_put_file()`` calls, as in fsspec.
 
         Raises:
-            ValueError: If two files have the same destination, or ``rpath``
-                names a version and a destination is named after a local file
-                below it.
+            ValueError: If two files have the same destination, or a
+                destination names a version, also when ``rpath`` names one
+                and a local file is named below it.
         """
         lpath, rpath = self._sync_fs._stringify_paths(lpath), self._sync_fs._stringify_paths(rpath)
         pairs = await self._thread_pool.run(
@@ -1007,8 +1007,9 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Each transfer receives its paths as they are, so that a listed key or
         a destination named after a local file is transferred by its bucket
-        and key, and gets a branch of the callback named after its paths, an
-        ``S3Path`` as its string.
+        and key, and runs through the callback's ``branch_coro()``, as in
+        fsspec, with the paths as the names of its branch, an ``S3Path`` as
+        its string.
 
         Args:
             transfer: ``_get_file()`` or ``_put_file()``.
@@ -1023,22 +1024,39 @@ class AioS3FileSystem(AsyncFileSystem):
         batch_size = kwargs.pop("batch_size", self.batch_size)
         callback.set_size(len(pairs))
 
-        async def run(path1: Any, path2: Any) -> Any:
-            """Run a transfer with a branch of the callback.
+        def run(path1: Any, path2: Any) -> Awaitable[Any]:
+            """Return the transfer of a pair, run through the callback's ``branch_coro()``.
 
             Args:
                 path1: The source.
                 path2: The destination.
 
             Returns:
-                The result of the transfer.
+                The coroutine of the transfer.
             """
-            with callback.branched(
-                str(path1) if isinstance(path1, S3Path) else path1,
-                str(path2) if isinstance(path2, S3Path) else path2,
-                **kwargs,
-            ) as child:
-                return await transfer(path1, path2, callback=child, **kwargs)
+
+            async def transfer_pair(label1: Any, label2: Any, **transfer_kwargs: Any) -> Any:
+                """Transfer the pair, whose branch the labels name.
+
+                Args:
+                    label1: The name of the source in the branch.
+                    label2: The name of the destination in the branch.
+                    **transfer_kwargs: The arguments of the transfer, with the
+                        branch of the callback.
+
+                Returns:
+                    The result of the transfer.
+                """
+                return await transfer(path1, path2, **transfer_kwargs)
+
+            return cast(
+                Awaitable[Any],
+                callback.branch_coro(transfer_pair)(
+                    str(path1) if isinstance(path1, S3Path) else path1,
+                    str(path2) if isinstance(path2, S3Path) else path2,
+                    **kwargs,
+                ),
+            )
 
         return cast(
             list[Any],

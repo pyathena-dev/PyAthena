@@ -852,6 +852,39 @@ class TestAioS3FileSystem:
         assert store == {"up/x?versionId=v1"}
 
     @pytest.mark.asyncio
+    async def test_transfers_run_through_branch_coro(self, tmp_path):
+        # GH-1404: as in fsspec, each download and upload runs through the
+        # callback's branch_coro(), with the paths named as strings.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, {"a/x?versionId=null"})
+        (tmp_path / "x?versionId=v1").write_bytes(b"aa")
+        finished = []
+
+        class Recording(Callback):
+            def branch_coro(self, fn):
+                run = super().branch_coro(fn)
+
+                async def recorded(path1, path2, **kwargs):
+                    result = await run(path1, path2, **kwargs)
+                    finished.append((path1, path2))
+                    return result
+
+                return recorded
+
+        await await_bounded(
+            fs._get("s3://bucket/a/*", str(tmp_path / "out") + "/", callback=Recording())
+        )
+        await await_bounded(
+            fs._put(str(tmp_path / "x?versionId=v1"), "s3://bucket/up/", callback=Recording())
+        )
+        assert finished == [
+            ("bucket/a/x?versionId=null", str(tmp_path / "out" / "x?versionId=null")),
+            (str(tmp_path / "x?versionId=v1"), "bucket/up/x?versionId=v1"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_du_cancellation_sends_no_further_lookup(self):
         # GH-1402: as fsspec's _du(), the lookups of the found entries are
         # awaited one by one, so a cancellation during one sends no other.

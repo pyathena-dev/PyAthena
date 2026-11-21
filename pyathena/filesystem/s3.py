@@ -3818,10 +3818,10 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs: Additional parameters passed to ``put_file()``.
 
         Raises:
-            ValueError: If two files have the same destination, ``rpath``
-                names a version and a destination is named after a local
-                file below it, or ``batch_size`` is neither positive, -1, nor
-                None.
+            ValueError: If two files have the same destination, a
+                destination names a version, also when ``rpath`` names one
+                and a local file is named below it, or ``batch_size`` is
+                neither positive, -1, nor None.
         """
         lpath, rpath = self._stringify_paths(lpath), self._stringify_paths(rpath)
         limit = self._batch_limit(batch_size)
@@ -3855,12 +3855,13 @@ class S3FileSystem(AbstractFileSystem):
         The files are uploaded in parallel, so no two files may have the
         same destination; a local directory uploads nothing.
 
-        A destination named after a local file is an ``S3Path``: ``rpath``
-        parsed, with the rest of the local name added to its key as it is
-        (see :meth:`S3Path.with_key_suffix`), so that a file named, e.g.,
-        ``x?versionId=v1`` is written to that key instead of naming a
-        version. A destination that is ``rpath`` itself, or one of a list of
-        destinations, is the string that the caller passed.
+        The destination of a local file named after it below ``rpath`` is an
+        ``S3Path``: ``rpath`` parsed, with the rest of the local name added to
+        its key as it is (see :meth:`S3Path.with_key_suffix`), so that a file
+        named, e.g., ``x?versionId=v1`` is written to that key instead of
+        naming a version. Any other destination, such as ``rpath`` itself,
+        one of a list of destinations, or that of a local directory, is a
+        string without the protocol.
 
         Args:
             lpath: Local source path, glob pattern, or list of them.
@@ -3877,8 +3878,7 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             ValueError: If two files have the same destination, or ``rpath``
-                names a version and a destination is named after a local file
-                below it.
+                names a version and a local file is named below it.
         """
         if isinstance(lpath, list) and isinstance(rpath, list):
             pairs: list[tuple[str, str | S3Path]] = [
@@ -3905,15 +3905,20 @@ class S3FileSystem(AbstractFileSystem):
             rpaths: list[str | S3Path] = other_paths(
                 lpaths, rpath, exists=exists, flatten=not source_is_str
             )
-            if isinstance(rpath, str) and any(rp != rpath for rp in rpaths):
+            # The files named after their local names below rpath; a local
+            # directory, which put_file() skips, keeps its string.
+            named = [
+                rp != rpath and not os.path.isdir(lp) for lp, rp in zip(lpaths, rpaths, strict=True)
+            ]
+            if isinstance(rpath, str) and any(named):
                 root = S3Path.parse(rpath)
                 if root.version_id:
                     raise ValueError("Cannot write to the file with the version specified.")
                 # Every destination starts with rpath, which has no trailing
                 # slash, followed by the rest of the local name.
                 rpaths = [
-                    rp if rp == rpath else root.with_key_suffix(cast(str, rp)[len(rpath) :])
-                    for rp in rpaths
+                    root.with_key_suffix(cast(str, rp)[len(rpath) :]) if typed else rp
+                    for rp, typed in zip(rpaths, named, strict=True)
                 ]
             pairs = list(zip(lpaths, rpaths, strict=True))
         # put_file() uploads nothing for a local directory.
