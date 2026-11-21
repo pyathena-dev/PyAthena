@@ -73,14 +73,24 @@ def _imports_outside_package(path):
             and isinstance(target.value, str)
         ):
             # A relative name, such as ``import_module("..util", __package__)``,
-            # resolves against a literal ``package`` if one is given.
+            # resolves against its ``package``: ``__package__``, ``__name__``,
+            # or a string literal. Another anchor is not followed.
             name = target.value
             level = len(name) - len(name.lstrip("."))
-            anchors = [*node.args[1:2], *(k.value for k in node.keywords if k.arg == "package")]
-            literal = [
-                a.value for a in anchors if isinstance(a, ast.Constant) and isinstance(a.value, str)
-            ]
-            names = [resolve(name[level:], level, *literal[:1])]
+            anchor = next(
+                iter([*node.args[1:2], *(k.value for k in node.keywords if k.arg == "package")]),
+                None,
+            )
+            if not level:
+                names = [name]
+            elif anchor is None or (isinstance(anchor, ast.Name) and anchor.id == "__package__"):
+                names = [resolve(name[level:], level)]
+            elif isinstance(anchor, ast.Name) and anchor.id == "__name__":
+                names = [resolve(name[level:], level, module)]
+            elif isinstance(anchor, ast.Constant) and isinstance(anchor.value, str):
+                names = [resolve(name[level:], level, anchor.value)]
+            else:
+                continue
         else:
             continue
         found.extend((node.lineno, name) for name in names if _outside_package(name))
