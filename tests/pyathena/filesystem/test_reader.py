@@ -14,7 +14,7 @@ import pyarrow.csv as pa_csv
 import pytest
 
 from pyathena.filesystem.reader import ReadAheadStream
-from tests.pyathena.util import EVENT_TIMEOUT, ImmediateExecutor, poll_until
+from tests.pyathena.util import EVENT_TIMEOUT, ImmediateExecutor
 
 
 class _RecordingRangeFile:
@@ -30,6 +30,9 @@ class _RecordingRangeFile:
         self.closes = 0
         # The offsets of the reads in the order they ended, and "close" when closed.
         self.events = []
+        # Set when the file is closed, and by _signal_close_wait() when close()
+        # starts to wait for the reads.
+        self.close_progressed = threading.Event()
 
     def read_range(self, offset, size):
         self.reads.append((offset, size))
@@ -48,24 +51,23 @@ class _RecordingRangeFile:
     def close(self):
         self.events.append("close")
         self.closes += 1
+        self.close_progressed.set()
 
-    def assert_closed_after_reads(self, stream, waiting):
-        """Close a stream in a thread while the gated reads are blocked, and check
-        that the file is closed after the reads end.
+    def assert_closed_after_reads(self, stream):
+        """Check that closing the stream while the gated reads block closes the file last.
 
-        The reads are released once the close waits for them or, if it does not
+        The stream is closed in a thread, and the reads are released once the
+        close waits for them (see ``_signal_close_wait()``) or, if it does not
         wait, has closed the file, which then precedes their end.
 
         Args:
             stream: The stream over the file.
-            waiting: The event from ``_signal_close_wait()``.
         """
         closer = threading.Thread(target=stream.close, daemon=True)
         try:
             closer.start()
-            poll_until(
-                lambda: waiting.is_set() or self.closed,
-                "close() neither waited for the reads nor closed the file",
+            assert self.close_progressed.wait(EVENT_TIMEOUT), (
+                "close() neither waited for the reads nor closed the file"
             )
         finally:
             self._gate.set()
@@ -108,27 +110,35 @@ class _InterruptedWaitExecutor(ImmediateExecutor):
         return _InterruptedFuture()
 
 
-def _signal_close_wait(monkeypatch, interrupts=0):
+def _signal_close_wait(monkeypatch, file, interrupts=0):
     """Make the wait of ``ReadAheadStream.close()`` for the running reads observable.
 
     Args:
         monkeypatch: The pytest monkeypatch fixture.
+        file: The ``_RecordingRangeFile`` whose ``close_progressed`` a wait sets.
         interrupts: The number of first waits that raise ``KeyboardInterrupt``.
-
-    Returns:
-        An event set when a wait that is not interrupted starts.
     """
-    waiting = threading.Event()
     remaining = [KeyboardInterrupt() for _ in range(interrupts)]
 
     def signalling_wait(futures, *args, **kwargs):
         if remaining:
             raise remaining.pop()
-        waiting.set()
+        file.close_progressed.set()
         return wait(futures, *args, **kwargs)
 
     monkeypatch.setattr("pyathena.filesystem.reader.wait", signalling_wait)
-    return waiting
+
+
+@pytest.fixture
+def gate():
+    """An event that blocks the gated reads of a ``_RecordingRangeFile`` until set.
+
+    It is set at teardown, so that a test that fails before releasing the reads
+    does not leave them blocked.
+    """
+    gate = threading.Event()
+    yield gate
+    gate.set()
 
 
 class TestReadAheadStream:
@@ -230,13 +240,12 @@ class TestReadAheadStream:
         assert sorted(file.reads) == [(0, 10), (10, 10), (20, 10)]
         stream.close()
 
-    def test_interrupted_close(self, monkeypatch):
+    def test_interrupted_close(self, monkeypatch, gate):
         """An interrupted close leaves the file open, and closing again waits for the
         running reads before closing the file."""
-        gate = threading.Event()
         file = _RecordingRangeFile(bytes(100), gate=gate)
         stream = file.open_stream(part_size=10, max_parts=2)
-        waiting = _signal_close_wait(monkeypatch, interrupts=1)
+        _signal_close_wait(monkeypatch, file, interrupts=1)
         assert stream.read(10) == bytes(10)
         assert file.gated_read_started.wait(EVENT_TIMEOUT)
         with pytest.raises(KeyboardInterrupt):
@@ -246,34 +255,32 @@ class TestReadAheadStream:
         # The stream reads nothing more once closing started.
         with pytest.raises(ValueError, match="I/O operation on closed file"):
             stream.read(10)
-        file.assert_closed_after_reads(stream, waiting)
+        file.assert_closed_after_reads(stream)
         assert stream.closed
 
-    def test_close_with_queued_reads(self, monkeypatch):
+    def test_close_with_queued_reads(self, monkeypatch, gate):
         """Closing cancels a part that no worker has started and does not wait for it."""
         monkeypatch.setattr(
             "pyathena.filesystem.reader.ThreadPoolExecutor",
             lambda max_workers: ThreadPoolExecutor(max_workers=1),
         )
-        gate = threading.Event()
         file = _RecordingRangeFile(bytes(100), gate=gate)
         stream = file.open_stream(part_size=10, max_parts=2)
-        waiting = _signal_close_wait(monkeypatch)
+        _signal_close_wait(monkeypatch, file)
         # The one worker blocks in the read of the second part, and the third waits.
         assert stream.read(10) == bytes(10)
         assert file.gated_read_started.wait(EVENT_TIMEOUT)
-        file.assert_closed_after_reads(stream, waiting)
+        file.assert_closed_after_reads(stream)
         assert (20, 10) not in file.reads
 
-    def test_close_waits_for_running_reads(self, monkeypatch):
+    def test_close_waits_for_running_reads(self, monkeypatch, gate):
         """Closing waits for the reads in flight before closing the file."""
-        gate = threading.Event()
         file = _RecordingRangeFile(bytes(100), gate=gate)
         stream = file.open_stream(part_size=10, max_parts=2)
-        waiting = _signal_close_wait(monkeypatch)
+        _signal_close_wait(monkeypatch, file)
         assert stream.read(10) == bytes(10)
         assert file.gated_read_started.wait(EVENT_TIMEOUT)
-        file.assert_closed_after_reads(stream, waiting)
+        file.assert_closed_after_reads(stream)
 
     def test_csv(self):
         """pyarrow reads a CSV through the stream with its own block size."""

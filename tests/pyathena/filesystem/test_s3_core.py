@@ -1789,6 +1789,22 @@ class TestS3Core:
             ("replace_object_metadata", (S3Path("bucket", "key", "v1"), S3Metadata({}), {})),
             ("replace_object_metadata", (S3Path("bucket", "key", "null"), S3Metadata({}), {})),
         ],
+        ids=[
+            "head_object-args0-has no key",
+            "delete_object-args1-has no key",
+            "put_object-args2-has no key",
+            "put_object-args3-Cannot write to a version",
+            "put_object-args4-Cannot write to a version",
+            "create_multipart_upload-args5-has no key",
+            "create_multipart_upload-args6-Cannot write to a version",
+            "upload_part_copy-args7-has no key",
+            "get_object_tagging-args8-has no key",
+            "put_object_tagging-args9-has no key",
+            "put_object_acl-args10-has no key",
+            "replace_object_metadata-args11-has no key",
+            "replace_object_metadata-args12-Cannot write to a version",
+            "replace_object_metadata-args13-Cannot write to a version",
+        ],
     )
     def test_object_operations_reject_paths(self, method, args):
         core, stubber = _make_core()
