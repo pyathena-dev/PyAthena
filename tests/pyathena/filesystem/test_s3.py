@@ -3276,7 +3276,8 @@ class TestS3FileSystem:
             "s3://bucket/x/",
             recursive=True,
         )
-        files = [c.args[1] for c in fs.put_file.call_args_list if not os.path.isdir(c.args[0])]
+        # The destinations named after the local files are S3Path objects.
+        files = [str(c.args[1]) for c in fs.put_file.call_args_list if not os.path.isdir(c.args[0])]
         assert sorted(files) == ["bucket/x/f1", "bucket/x/f2"]
 
     def test_copy_skipped_directory_does_not_conflict(self):
