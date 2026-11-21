@@ -31,8 +31,9 @@ def _outside_package(name):
 def _imports_outside_package(path):
     """List the imports of PyAthena modules outside the package, with their lines.
 
-    All imports count, including those under ``TYPE_CHECKING``; relative
-    imports are resolved against the module.
+    All imports count, including those under ``TYPE_CHECKING`` and the calls
+    of ``importlib.import_module()`` or ``__import__()`` with a literal name;
+    relative imports are resolved against the module.
     """
     module = _module_name(path)
     # The package that a relative import of level 1 starts from.
@@ -48,6 +49,20 @@ def _imports_outside_package(path):
                 base = f"{parent}.{base}" if base else parent
             # ``from pyathena import filesystem`` names a submodule of the package.
             names = [base] if base != "pyathena" else [f"pyathena.{a.name}" for a in node.names]
+        elif (
+            isinstance(node, ast.Call)
+            and (
+                (isinstance(node.func, ast.Attribute) and node.func.attr == "import_module")
+                or (
+                    isinstance(node.func, ast.Name)
+                    and node.func.id in ("import_module", "__import__")
+                )
+            )
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            names = [node.args[0].value]
         else:
             continue
         found.extend((node.lineno, name) for name in names if _outside_package(name))
@@ -55,7 +70,9 @@ def _imports_outside_package(path):
 
 
 @pytest.mark.parametrize(
-    "path", sorted(_ROOT.rglob("*.py")), ids=lambda p: str(p.relative_to(_ROOT))
+    "path",
+    sorted(p for pattern in ("*.py", "*.pyi") for p in _ROOT.rglob(pattern)),
+    ids=lambda p: str(p.relative_to(_ROOT)),
 )
 def test_imports_nothing_outside_package(path):
     # GH-1388: the filesystem depends on nothing in PyAthena outside its package.

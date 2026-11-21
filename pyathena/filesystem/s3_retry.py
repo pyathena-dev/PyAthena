@@ -188,6 +188,19 @@ def unstoppable_retries() -> Iterator[None]:
         _RETRY_STOP_EVENTS.reset(token)
 
 
+def retry_stop_events() -> tuple[threading.Event, ...]:
+    """Return the events of the enclosing stop scopes.
+
+    :mod:`pyathena.util` reads them, so that these scopes also stop the
+    retries of PyAthena's own AWS API calls.
+
+    Returns:
+        The events of the enclosing :func:`stop_retries_on` scopes, apart
+        from those that :func:`unstoppable_retries` clears, outermost first.
+    """
+    return _RETRY_STOP_EVENTS.get()
+
+
 def retries_stopped() -> bool:
     """Return whether an event of the enclosing stop scopes is set.
 
