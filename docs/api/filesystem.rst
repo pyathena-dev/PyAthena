@@ -53,7 +53,11 @@ Retries
 
 .. autofunction:: pyathena.filesystem.s3_retry.unstoppable_retries
 
+.. autofunction:: pyathena.filesystem.s3_retry.retries_stopped
+
 .. autofunction:: pyathena.filesystem.s3_retry.raise_if_stopped
+
+.. autofunction:: pyathena.filesystem.s3_retry.retry_stop_events
 
 Read-ahead Stream
 -----------------
