@@ -132,6 +132,7 @@ Each cursor type lives in its own subpackage (`pandas/`, `arrow/`, `polars/`, `s
 - Match `s3fs` library behavior where possible (users migrate from it)
 - Use `delimiter="/"` in S3 API calls to minimize requests
 - Handle edge cases: empty paths, trailing slashes, bucket-only paths
+- Import nothing from PyAthena outside `pyathena/filesystem/`; PyAthena-side helpers such as `pyathena.fs.s3_filesystem()` live outside the package (`tests/pyathena/filesystem/test_package.py` checks it)
 
 ### Version Management
 
@@ -140,4 +141,4 @@ Versions are derived from git tags via `hatch-vcs` — never edit `pyathena/_ver
 ### Google-style Docstrings
 
 Follow the [docstring rules](docs/contributing.md#write-docstrings), which `just lint` checks with ruff's pydocstyle rules for `pyathena/`.
-Mark overrides with `pyathena.util.override` instead of repeating the base method's docstring.
+Mark overrides with `pyathena.util.override` (`pyathena.filesystem.util.override` in `pyathena/filesystem/`) instead of repeating the base method's docstring.

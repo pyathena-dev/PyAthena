@@ -23,7 +23,6 @@ import pytest
 from botocore.stub import Stubber
 from fsspec.callbacks import Callback
 
-from pyathena.filesystem import s3_filesystem
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import (
     AioS3File,
@@ -42,8 +41,10 @@ from pyathena.filesystem.s3_object import (
     S3ObjectVersion,
 )
 from pyathena.filesystem.s3_path import S3Path
+from pyathena.filesystem.s3_retry import raise_if_stopped
 from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
-from pyathena.util import RetryConfig, raise_if_stopped, stop_retries_on
+from pyathena.fs import s3_filesystem
+from pyathena.util import RetryConfig, stop_retries_on
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (

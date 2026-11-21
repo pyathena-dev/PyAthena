@@ -46,7 +46,7 @@ from fsspec.implementations.local import LocalFileSystem
 from fsspec.implementations.memory import MemoryFileSystem
 
 import pyathena
-from pyathena.filesystem import register_s3_filesystem, s3_filesystem
+from pyathena.filesystem import register_s3_filesystem
 from pyathena.filesystem.s3 import (
     CompressedBuffer,
     S3File,
@@ -58,8 +58,10 @@ from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool, _S3Batch, _S3PoolScope
 from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
+from pyathena.filesystem.s3_retry import raise_if_stopped
 from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
-from pyathena.util import RetryConfig, raise_if_stopped, stop_retries_on
+from pyathena.fs import s3_filesystem
+from pyathena.util import RetryConfig, stop_retries_on
 from tests import ENV
 from tests.pyathena.conftest import connect
 from tests.pyathena.util import (

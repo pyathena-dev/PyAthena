@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from pyathena.filesystem.s3_path import S3Path
-from pyathena.util import override
+from pyathena.filesystem.util import override
 
 if TYPE_CHECKING:
     from pyathena.filesystem.s3_core import S3Bucket, S3ObjectSummary

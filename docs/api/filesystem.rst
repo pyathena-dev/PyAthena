@@ -16,7 +16,7 @@ This section covers S3 filesystem integration and object management.
 S3 FileSystem
 -------------
 
-.. autofunction:: pyathena.filesystem.s3_filesystem
+.. autofunction:: pyathena.fs.s3_filesystem
 
 .. autoclass:: pyathena.filesystem.s3.S3FileSystem
    :members:
@@ -38,6 +38,26 @@ Async S3 FileSystem
 
 .. autoclass:: pyathena.filesystem.s3_async.AioS3StreamedFile
    :members:
+
+Retries
+-------
+
+.. autoclass:: pyathena.filesystem.s3_retry.S3RetryConfig
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_retry.RetryPolicy
+
+.. autofunction:: pyathena.filesystem.s3_retry.retry_api_call
+
+.. autofunction:: pyathena.filesystem.s3_retry.stop_retries_on
+
+.. autofunction:: pyathena.filesystem.s3_retry.unstoppable_retries
+
+.. autofunction:: pyathena.filesystem.s3_retry.retries_stopped
+
+.. autofunction:: pyathena.filesystem.s3_retry.raise_if_stopped
+
+.. autofunction:: pyathena.filesystem.s3_retry.retry_stop_events
 
 Read-ahead Stream
 -----------------
