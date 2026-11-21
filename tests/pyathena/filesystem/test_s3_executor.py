@@ -320,6 +320,18 @@ class TestS3ThreadPool:
 
         assert events == ["pending finished"]
 
+    @pytest.mark.parametrize("released", [False, True], ids=["unused", "released"])
+    def test_shutdown_without_threads(self, released):
+        # A pool that has no threads, never used or released, rejects calls after
+        # its shutdown instead of creating threads.
+        pool = S3ThreadPool(1)
+        if released:
+            assert pool.submit(sum, [1, 2]).result(timeout=EVENT_TIMEOUT) == 3
+            pool.release()
+        pool.shutdown()
+        with pytest.raises(RuntimeError):
+            pool.submit(sum, [1, 2])
+
     def test_release_after_calls(self):
         # GH-1209: release() keeps the threads, and the max_workers bound,
         # until no call runs or waits, and then ends them.
@@ -1024,19 +1036,6 @@ class TestS3Executor:
             executor.submit_to(future, work)
             assert future.result(EVENT_TIMEOUT) == "submitter"
         assert operation.calls == 1
-
-    def test_submit_to(self):
-        # The callable's outcome resolves the future of the caller.
-        with S3ThreadPool(max_workers=1) as executor:
-            succeeded: Future[int] = Future()
-            failed: Future[int] = Future()
-            executor.submit_to(succeeded, sum, [1, 2])
-            executor.submit_to(failed, int, "x")
-            wait([succeeded, failed], timeout=5)
-
-        assert succeeded.result() == 3
-        with pytest.raises(ValueError, match="invalid literal"):
-            failed.result()
 
     def test_submit_to_failure_frees_arguments(self):
         # GH-1186: the arguments of a failed callable, such as the body of a
