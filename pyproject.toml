@@ -212,7 +212,7 @@ ignore = [
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 # Overrides marked with @override inherit the base method's documentation.
-ignore-decorators = ["pyathena.util.override"]
+ignore-decorators = ["pyathena.util.override", "pyathena.filesystem.util.override"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [

@@ -1,0 +1,62 @@
+# Copyright 2026 The PyAthena authors
+#
+# Licensed under the MIT License.
+# See LICENSE or https://opensource.org/licenses/MIT.
+#
+# SPDX-License-Identifier: MIT
+
+import ast
+from pathlib import Path
+
+import pytest
+
+import pyathena.filesystem
+
+_PACKAGE = "pyathena.filesystem"
+_ROOT = Path(pyathena.filesystem.__file__).parent
+
+
+def _module_name(path):
+    return ".".join((_PACKAGE, *path.relative_to(_ROOT).with_suffix("").parts)).removesuffix(
+        ".__init__"
+    )
+
+
+def _outside_package(name):
+    return (name == "pyathena" or name.startswith("pyathena.")) and not (
+        name == _PACKAGE or name.startswith(f"{_PACKAGE}.")
+    )
+
+
+def _imports_outside_package(path):
+    """List the imports of PyAthena modules outside the package, with their lines.
+
+    All imports count, including those under ``TYPE_CHECKING``; relative
+    imports are resolved against the module.
+    """
+    module = _module_name(path)
+    # The package that a relative import of level 1 starts from.
+    package = module if path.name == "__init__.py" else module.rpartition(".")[0]
+    found = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                parent = package.rsplit(".", node.level - 1)[0] if node.level > 1 else package
+                base = f"{parent}.{base}" if base else parent
+            # ``from pyathena import filesystem`` names a submodule of the package.
+            names = [base] if base != "pyathena" else [f"pyathena.{a.name}" for a in node.names]
+        else:
+            continue
+        found.extend((node.lineno, name) for name in names if _outside_package(name))
+    return found
+
+
+@pytest.mark.parametrize(
+    "path", sorted(_ROOT.rglob("*.py")), ids=lambda p: str(p.relative_to(_ROOT))
+)
+def test_imports_nothing_outside_package(path):
+    # GH-1388: the filesystem depends on nothing in PyAthena outside its package.
+    assert _imports_outside_package(path) == []

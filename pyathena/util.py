@@ -24,6 +24,7 @@ from tenacity import (
 )
 
 from pyathena import DataError
+from pyathena.filesystem import s3_retry
 
 _T = TypeVar("_T")
 
@@ -310,6 +311,10 @@ def stop_retries_on(event: threading.Event) -> Iterator[None]:
     cooperative: a request that has been sent, and the retries of botocore
     itself, still run to their end.
 
+    The block is also a scope of
+    :func:`pyathena.filesystem.s3_retry.stop_retries_on`, which stops the
+    retries of the requests of the S3 filesystem in the same way.
+
     Args:
         event: The event that stops the retries.
 
@@ -318,7 +323,8 @@ def stop_retries_on(event: threading.Event) -> Iterator[None]:
     """
     token = _RETRY_STOP_EVENTS.set((*_RETRY_STOP_EVENTS.get(), event))
     try:
-        yield
+        with s3_retry.stop_retries_on(event):
+            yield
     finally:
         _RETRY_STOP_EVENTS.reset(token)
 
@@ -334,12 +340,17 @@ def unstoppable_retries() -> Iterator[None]:
     was cancelled, or a request that stops a query. A scope that
     :func:`stop_retries_on` opens in the block stops the retries again.
 
+    The block is also a scope of
+    :func:`pyathena.filesystem.s3_retry.unstoppable_retries`, in which the
+    requests of the S3 filesystem retry to their end too.
+
     Yields:
         None.
     """
     token = _RETRY_STOP_EVENTS.set(())
     try:
-        yield
+        with s3_retry.unstoppable_retries():
+            yield
     finally:
         _RETRY_STOP_EVENTS.reset(token)
 

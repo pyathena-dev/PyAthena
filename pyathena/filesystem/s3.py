@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from glob import has_magic
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, BinaryIO, ClassVar, cast
+from typing import Any, BinaryIO, ClassVar, Protocol, cast
 from urllib.parse import unquote_plus
 
 import fsspec
@@ -38,7 +38,6 @@ from fsspec.implementations.local import LocalFileSystem, make_path_posix, trail
 from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import check_contained, isfilelike, other_paths, stringify_path, tokenize
 
-import pyathena
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3DeleteResult
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import (
@@ -60,13 +59,31 @@ from pyathena.filesystem.s3_object import (
 )
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
+from pyathena.filesystem.s3_retry import (
+    RetryPolicy,
+    S3RetryConfig,
+    raise_if_stopped,
+    unstoppable_retries,
+)
 from pyathena.filesystem.s3_writer import _S3WriteSession
-from pyathena.util import RetryConfig, override, raise_if_stopped, unstoppable_retries
-
-if TYPE_CHECKING:
-    from pyathena.connection import Connection
+from pyathena.filesystem.util import override, user_agent_extra
 
 _logger = logging.getLogger(__name__)
+
+
+class _Connection(Protocol):
+    """The attributes of a PyAthena connection that the deprecated ``connection`` reads."""
+
+    @property
+    def s3_client(self) -> BaseClient:
+        """The S3 client of the connection."""
+        ...
+
+    @property
+    def retry_config(self) -> RetryPolicy:
+        """The retry policy of the connection."""
+        ...
+
 
 # The message of the TypeError that a filesystem with an injected client, and
 # the files that it opens for reading, raise when they are pickled.
@@ -79,7 +96,7 @@ _UNPICKLABLE_CLIENT_MESSAGE = (
 # The DeprecationWarning of the connection argument of the filesystems.
 _CONNECTION_DEPRECATION_MESSAGE = (
     "The connection argument of {cls} is deprecated and will be removed in the next "
-    "major version. Use pyathena.filesystem.s3_filesystem(connection), or pass "
+    "major version. Use pyathena.fs.s3_filesystem(connection), or pass "
     "client=connection.s3_client and retry_config=connection.retry_config."
 )
 
@@ -408,7 +425,7 @@ class S3FileSystem(AbstractFileSystem):
 
     def __init__(
         self,
-        connection: Connection[Any] | None = None,
+        connection: _Connection | None = None,
         default_block_size: int | None = None,
         default_cache_type: str | None = None,
         max_workers: int | None = None,
@@ -419,20 +436,20 @@ class S3FileSystem(AbstractFileSystem):
         *args,
         batch_size: int | None = None,
         client: BaseClient | None = None,
-        retry_config: RetryConfig | None = None,
+        retry_config: RetryPolicy | None = None,
         **kwargs,
     ) -> None:
         """Create a filesystem for Amazon S3.
 
         The filesystem sends its requests with the boto3 S3 client given as
         ``client``, or with a client that it builds from s3fs-compatible
-        arguments in ``kwargs``. :func:`pyathena.filesystem.s3_filesystem`
+        arguments in ``kwargs``. :func:`pyathena.fs.s3_filesystem`
         creates one with the S3 client and retry policy of a PyAthena
         connection.
 
         Args:
             connection: Deprecated; use ``client`` and ``retry_config``, or
-                :func:`pyathena.filesystem.s3_filesystem`. A PyAthena connection
+                :func:`pyathena.fs.s3_filesystem`. A PyAthena connection
                 whose S3 client (``Connection.s3_client``) and retry policy the
                 filesystem uses, with a ``DeprecationWarning``.
             default_block_size: The block size for reads and writes; defaults to
@@ -477,8 +494,10 @@ class S3FileSystem(AbstractFileSystem):
             client: The boto3 S3 client that the filesystem sends its requests
                 with. The filesystem does not close it. A filesystem with a
                 given client cannot be pickled.
-            retry_config: The retry policy of the requests; defaults to
-                ``RetryConfig()``. A policy with the default ``exceptions``
+            retry_config: The retry policy of the requests, such as an
+                :class:`~pyathena.filesystem.s3_retry.S3RetryConfig` or a
+                :class:`pyathena.util.RetryConfig`; defaults to
+                ``S3RetryConfig()``. A policy with the default ``exceptions``
                 also retries the transient S3 error codes
                 (:attr:`~pyathena.filesystem.s3_core.S3Core.RETRY_ERROR_CODES`).
             **kwargs: Passed to ``fsspec.AbstractFileSystem``; without
@@ -526,7 +545,7 @@ class S3FileSystem(AbstractFileSystem):
             request_kwargs.setdefault("RequestPayer", "requester")
         self._core = S3Core(
             client,
-            retry_config=retry_config if retry_config is not None else RetryConfig(),
+            retry_config=retry_config if retry_config is not None else S3RetryConfig(),
             request_kwargs={**request_kwargs, **S3Core.copy_from_source_params(request_kwargs)},
         )
 
@@ -534,11 +553,11 @@ class S3FileSystem(AbstractFileSystem):
     def _resolve_injected_client(
         cls,
         filesystem_class: type[AbstractFileSystem],
-        connection: Connection[Any] | None,
+        connection: _Connection | None,
         client: BaseClient | None,
-        retry_config: RetryConfig | None,
+        retry_config: RetryPolicy | None,
         kwargs: Mapping[str, Any],
-    ) -> tuple[BaseClient | None, RetryConfig | None]:
+    ) -> tuple[BaseClient | None, RetryPolicy | None]:
         """Check the injected client of a filesystem and resolve it from a connection.
 
         Warns that ``connection`` is deprecated, and rejects the arguments that
@@ -625,7 +644,7 @@ class S3FileSystem(AbstractFileSystem):
         return self._core.client
 
     @property
-    def _retry_config(self) -> RetryConfig:
+    def _retry_config(self) -> RetryPolicy:
         """The retry policy of the requests (``core.retry_config``)."""
         return self._core.retry_config
 
@@ -683,10 +702,10 @@ class S3FileSystem(AbstractFileSystem):
         if max_workers is not None:
             config_kwargs.setdefault("max_pool_connections", max_workers)
 
-        user_agent_extra = config_kwargs.pop("user_agent_extra", None)
-        if user_agent_extra and pyathena.user_agent_extra not in user_agent_extra:
-            user_agent_extra = f"{pyathena.user_agent_extra} {user_agent_extra}"
-        config_kwargs.update({"user_agent_extra": user_agent_extra or pyathena.user_agent_extra})
+        extra = config_kwargs.pop("user_agent_extra", None)
+        if extra and user_agent_extra not in extra:
+            extra = f"{user_agent_extra} {extra}"
+        config_kwargs.update({"user_agent_extra": extra or user_agent_extra})
         if connect_timeout := kwargs.pop("connect_timeout", None):
             config_kwargs.update({"connect_timeout": connect_timeout})
         if read_timeout := kwargs.pop("read_timeout", None):
@@ -5960,7 +5979,7 @@ class S3File(AbstractBufferedFile):
         ones make no further attempt, and its error is raised once they have
         ended. Once an enclosing stop scope is stopped, such as that of a
         batch operation after another object failed, no further request is
-        sent (see :func:`~pyathena.util.raise_if_stopped`).
+        sent (see :func:`~pyathena.filesystem.s3_retry.raise_if_stopped`).
 
         Args:
             start: The offset of the first byte to read.

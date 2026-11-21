@@ -33,14 +33,16 @@ from pyathena.filesystem.s3_object import (
     S3PutObject,
 )
 from pyathena.filesystem.s3_path import S3Path
-from pyathena.util import (
+from pyathena.filesystem.s3_retry import (
     THROTTLING_ERROR_CODES,
-    RetryConfig,
-    _with_exceptions,
-    override,
+    RetryPolicy,
+    S3RetryConfig,
+    _PolicyT,
     retry_api_call,
     unstoppable_retries,
+    with_exceptions,
 )
+from pyathena.filesystem.util import override
 
 _logger = logging.getLogger(__name__)
 
@@ -594,27 +596,29 @@ class S3Core:
     def __init__(
         self,
         client: BaseClient,
-        retry_config: RetryConfig | None = None,
+        retry_config: RetryPolicy | None = None,
         request_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
         """Create the operations on a client.
 
         Args:
             client: The boto3 S3 client to send the requests with.
-            retry_config: The retry policy of the requests; defaults to
-                ``RetryConfig()``. The requests are sent with the policy that
+            retry_config: The retry policy of the requests, such as an
+                :class:`~pyathena.filesystem.s3_retry.S3RetryConfig` or a
+                :class:`pyathena.util.RetryConfig`; defaults to
+                ``S3RetryConfig()``. The requests are sent with the policy that
                 :meth:`resolve_retry_config` returns for it.
             request_kwargs: Parameters sent with every operation that accepts
                 them, such as ``{"RequestPayer": "requester"}``.
         """
         self._client = client
-        self._retry_config = self.resolve_retry_config(
-            retry_config if retry_config else RetryConfig()
+        self._retry_config: RetryPolicy = self.resolve_retry_config(
+            retry_config if retry_config else S3RetryConfig()
         )
         self._request_kwargs = dict(request_kwargs) if request_kwargs else {}
 
     @classmethod
-    def resolve_retry_config(cls, retry_config: RetryConfig) -> RetryConfig:
+    def resolve_retry_config(cls, retry_config: _PolicyT) -> _PolicyT:
         """Resolve the retry policy that S3 requests are sent with.
 
         A policy whose ``exceptions`` are the default codes
@@ -626,13 +630,12 @@ class S3Core:
             retry_config: The retry policy.
 
         Returns:
-            A copy of the policy that also retries ``RETRY_ERROR_CODES`` with
-            the same attempts and waits, or the policy itself.
+            A copy of the policy, of the same type, that also retries
+            ``RETRY_ERROR_CODES`` with the same attempts and waits, or the
+            policy itself.
         """
         if set(retry_config.exceptions) == set(THROTTLING_ERROR_CODES):
-            return _with_exceptions(
-                retry_config, (*retry_config.exceptions, *cls.RETRY_ERROR_CODES)
-            )
+            return with_exceptions(retry_config, (*retry_config.exceptions, *cls.RETRY_ERROR_CODES))
         return retry_config
 
     @property
@@ -641,7 +644,7 @@ class S3Core:
         return self._client
 
     @property
-    def retry_config(self) -> RetryConfig:
+    def retry_config(self) -> RetryPolicy:
         """The retry policy of the requests, with ``RETRY_ERROR_CODES`` if they were added."""
         return self._retry_config
 
@@ -725,7 +728,7 @@ class S3Core:
                 position = body.tell()
                 body.seek(position)
             except (AttributeError, OSError, ValueError):
-                config = _with_exceptions(config, ())
+                config = with_exceptions(config, ())
             else:
                 # Each attempt calls the client again, which sends the stream
                 # from its current position, where the last attempt left it.
@@ -1184,7 +1187,7 @@ class S3Core:
         """Abort a multipart upload with AbortMultipartUpload.
 
         An abort cleans up, so the stop scopes of the caller do not stop its
-        retries (see :func:`~pyathena.util.unstoppable_retries`).
+        retries (see :func:`~pyathena.filesystem.s3_retry.unstoppable_retries`).
 
         Args:
             upload: The multipart upload returned by creation or listing.

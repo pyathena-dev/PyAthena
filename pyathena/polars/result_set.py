@@ -34,8 +34,8 @@ from pyathena import OperationalError
 from pyathena.arrow.reader import ParquetChunkReader
 from pyathena.converter import Converter, _to_default
 from pyathena.error import DataError, ProgrammingError
-from pyathena.filesystem import s3_filesystem
 from pyathena.filesystem.s3 import S3FileSystem
+from pyathena.fs import s3_filesystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.polars.converter import _to_datetimes
 from pyathena.polars.util import to_column_info, to_microseconds

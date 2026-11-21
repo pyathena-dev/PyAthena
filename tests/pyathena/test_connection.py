@@ -37,7 +37,7 @@ from pyathena.connection import Connection
 from pyathena.converter import DefaultTypeConverter
 from pyathena.cursor import Cursor, DictCursor
 from pyathena.error import OperationalError, ProgrammingError
-from pyathena.filesystem import s3_filesystem
+from pyathena.fs import s3_filesystem
 from pyathena.pandas.async_cursor import AsyncPandasCursor
 from pyathena.pandas.cursor import PandasCursor
 from pyathena.polars.async_cursor import AsyncPolarsCursor

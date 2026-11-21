@@ -1,3 +1,4 @@
+import contextvars
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -7,6 +8,7 @@ import tenacity.nap
 from botocore.exceptions import ClientError
 
 from pyathena import DataError
+from pyathena.filesystem import s3_retry
 from pyathena.util import (
     RetryConfig,
     _is_throttling_error,
@@ -410,6 +412,42 @@ def test_retry_api_call_scope_ends_with_block():
         event.set()
     operation = ThrottledOperation(failures=2)
     assert retry_api_call(operation, RetryConfig(multiplier=0)) == "success"
+    assert operation.calls == 3
+
+
+@pytest.mark.parametrize("thread", [False, True], ids=["same-thread", "copied-context"])
+def test_stop_retries_on_stops_filesystem_retries(thread):
+    """GH-1388: a scope of stop_retries_on() also stops the retries of the S3 filesystem."""
+    event = threading.Event()
+    event.set()
+    operation = ThrottledOperation(failures=2)
+    config = s3_retry.S3RetryConfig(multiplier=0)
+
+    def call():
+        if not thread:
+            return s3_retry.retry_api_call(operation, config)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(
+                contextvars.copy_context().run, s3_retry.retry_api_call, operation, config
+            ).result(EVENT_TIMEOUT)
+
+    with stop_retries_on(event), pytest.raises(ClientError):
+        call()
+    assert operation.calls == 1
+
+
+@pytest.mark.parametrize("scope", ["pyathena", "filesystem"])
+def test_unstoppable_retries_covers_filesystem_retries(scope):
+    """GH-1388: in unstoppable_retries(), the retries of the S3 filesystem run to their end.
+
+    That holds for the stop scopes of PyAthena and those of the filesystem itself.
+    """
+    event = threading.Event()
+    event.set()
+    operation = ThrottledOperation(failures=2)
+    enclosing = stop_retries_on if scope == "pyathena" else s3_retry.stop_retries_on
+    with enclosing(event), unstoppable_retries():
+        assert s3_retry.retry_api_call(operation, s3_retry.S3RetryConfig(multiplier=0)) == "success"
     assert operation.calls == 3
 
 
