@@ -494,7 +494,8 @@ def test_wait_with_retry_stop_relays_filesystem_stop():
         # The scope stops after the waiter's second check, so only a wait
         # that keeps checking sees the stop.
         for _ in range(2):
-            checks.acquire(timeout=EVENT_TIMEOUT)
+            if not checks.acquire(timeout=EVENT_TIMEOUT):
+                return False
         event.set()
         return stop.wait(EVENT_TIMEOUT)
 
