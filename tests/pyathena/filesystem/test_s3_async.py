@@ -885,6 +885,40 @@ class TestAioS3FileSystem:
         ]
 
     @pytest.mark.asyncio
+    async def test_cancelled_put_starts_no_waiting_transfer(self, tmp_path):
+        # GH-1404: a transfer whose branch_coro() wrapper waits before it
+        # starts belongs to the batch, so a cancellation of _put() stops it
+        # and it uploads nothing afterwards.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = serve_s3_keys(fs._sync_fs, set())
+        (tmp_path / "x").write_bytes(b"aa")
+        waiting, release = asyncio.Event(), asyncio.Event()
+
+        class Waiting(Callback):
+            def branch_coro(self, fn):
+                run = super().branch_coro(fn)
+
+                async def wait_then_run(path1, path2, **kwargs):
+                    waiting.set()
+                    await release.wait()
+                    return await run(path1, path2, **kwargs)
+
+                return wait_then_run
+
+        task = asyncio.ensure_future(
+            fs._put(str(tmp_path / "x"), "s3://bucket/up/", callback=Waiting())
+        )
+        await await_bounded(waiting.wait())
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await await_bounded(task)
+        release.set()
+        await asyncio.sleep(0.1)
+        assert store == set()
+
+    @pytest.mark.asyncio
     async def test_du_cancellation_sends_no_further_lookup(self):
         # GH-1402: as fsspec's _du(), the lookups of the found entries are
         # awaited one by one, so a cancellation during one sends no other.

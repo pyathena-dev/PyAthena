@@ -3818,10 +3818,10 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs: Additional parameters passed to ``put_file()``.
 
         Raises:
-            ValueError: If two files have the same destination, a
-                destination names a version, also when ``rpath`` names one
-                and a local file is named below it, or ``batch_size`` is
-                neither positive, -1, nor None.
+            ValueError: If two files have the same destination, the
+                destination of a local file names a version, also when
+                ``rpath`` names one and the file is named below it, or
+                ``batch_size`` is neither positive, -1, nor None.
         """
         lpath, rpath = self._stringify_paths(lpath), self._stringify_paths(rpath)
         limit = self._batch_limit(batch_size)
