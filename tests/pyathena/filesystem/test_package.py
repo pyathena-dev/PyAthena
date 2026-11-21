@@ -39,11 +39,11 @@ def _imports_outside_package(path):
     # The package that a relative import of level 1 starts from.
     package = module if path.stem == "__init__" else module.rpartition(".")[0]
 
-    def resolve(name, level):
-        """Resolve a module name relative to the package by ``level`` dots."""
+    def resolve(name, level, anchor=package):
+        """Resolve a module name relative to ``anchor`` by ``level`` dots."""
         if not level:
             return name
-        parent = package.rsplit(".", level - 1)[0] if level > 1 else package
+        parent = anchor.rsplit(".", level - 1)[0] if level > 1 else anchor
         return f"{parent}.{name}" if name else parent
 
     found = []
@@ -67,10 +67,13 @@ def _imports_outside_package(path):
             and isinstance(node.args[0], ast.Constant)
             and isinstance(node.args[0].value, str)
         ):
-            # A relative name, such as ``import_module("..util", __package__)``.
+            # A relative name, such as ``import_module("..util", __package__)``,
+            # resolves against a literal ``package`` if one is given.
             name = node.args[0].value
             level = len(name) - len(name.lstrip("."))
-            names = [resolve(name[level:], level)]
+            anchors = [*node.args[1:2], *(k.value for k in node.keywords if k.arg == "package")]
+            literal = [a.value for a in anchors if isinstance(a, ast.Constant)]
+            names = [resolve(name[level:], level, *literal[:1])]
         else:
             continue
         found.extend((node.lineno, name) for name in names if _outside_package(name))

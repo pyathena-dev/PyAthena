@@ -419,11 +419,14 @@ def test_retry_api_call_scope_ends_with_block():
 @pytest.mark.parametrize("stop_in", ["request", "backoff"])
 def test_stop_retries_on_stops_filesystem_retries(stop_in):
     """GH-1388: a scope of stop_retries_on() also stops the retries of the S3 filesystem."""
+    # Without the stop, the backoff wait would take at least EVENT_TIMEOUT seconds.
     event = threading.Event()
     call = StoppingOperation(event.set, stop_in)
+    started = time.monotonic()
     with stop_retries_on(event), pytest.raises(ClientError):
         s3_retry.retry_api_call(call, s3_retry.S3RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
     call.join()
+    assert time.monotonic() - started < EVENT_TIMEOUT
     assert call.calls == 1
 
 
@@ -435,11 +438,13 @@ def test_filesystem_scope_stops_retries(stop_in):
     """
     event = threading.Event()
     call = StoppingOperation(event.set, stop_in)
+    started = time.monotonic()
     with s3_retry.stop_retries_on(event):
         assert not retries_stopped()
         with pytest.raises(ClientError):
             retry_api_call(call, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
         call.join()
+        assert time.monotonic() - started < EVENT_TIMEOUT
         assert retries_stopped()
         with pytest.raises(CancelledError):
             raise_if_stopped("continue")
@@ -474,11 +479,17 @@ def test_filesystem_unstoppable_block_covers_retries():
 
 def test_wait_with_retry_stop_relays_filesystem_stop():
     """GH-1388: the stop of a scope that the S3 filesystem opens is relayed to the work."""
-    event, stop = threading.Event(), threading.Event()
+    event, stop = _CheckedEvent(), threading.Event()
+
+    def work():
+        # The scope stops once the waiter has checked it, during the wait.
+        event.checked.wait(EVENT_TIMEOUT)
+        event.set()
+        return stop.wait(EVENT_TIMEOUT)
+
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(stop.wait, EVENT_TIMEOUT)
+        future = executor.submit(work)
         with s3_retry.stop_retries_on(event):
-            event.set()
             assert wait_with_retry_stop(future, stop=stop) is True
 
 
