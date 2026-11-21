@@ -479,11 +479,22 @@ def test_filesystem_unstoppable_block_covers_retries():
 
 def test_wait_with_retry_stop_relays_filesystem_stop():
     """GH-1388: the stop of a scope that the S3 filesystem opens is relayed to the work."""
-    event, stop = _CheckedEvent(), threading.Event()
+    stop = threading.Event()
+    checks = threading.Semaphore(0)
+
+    class CountedEvent(threading.Event):
+        def is_set(self):
+            result = super().is_set()
+            checks.release()
+            return result
+
+    event = CountedEvent()
 
     def work():
-        # The scope stops once the waiter has checked it, during the wait.
-        event.checked.wait(EVENT_TIMEOUT)
+        # The scope stops after the waiter's second check, so only a wait
+        # that keeps checking sees the stop.
+        for _ in range(2):
+            checks.acquire(timeout=EVENT_TIMEOUT)
         event.set()
         return stop.wait(EVENT_TIMEOUT)
 
