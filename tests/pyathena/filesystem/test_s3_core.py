@@ -1189,9 +1189,10 @@ class TestS3Core:
         core, stubber = _make_core()
         response = {"Bucket": "bucket", "Key": "key", "UploadId": "u"}
         del response[missing]
+        upload = S3MultipartUpload(response)
         # Rejected before a request: the stub has no response to send.
         with stubber, pytest.raises(ValueError):  # noqa: PT011
-            getattr(core, method)(S3MultipartUpload(response), *args)
+            getattr(core, method)(upload, *args)
 
     def test_upload_part_uses_creation_algorithm_and_identity(self):
         core, stubber = _make_core()
@@ -1966,8 +1967,9 @@ class TestS3DeleteBatch:
         assert batches[2].objects == (S3Path("b2", "a", "v1"),)
         assert S3DeleteBatch.from_paths([]) == []
         # A path without a key is rejected, also among other paths.
+        mixed = [S3Path("b1", "a"), S3Path("b1")]
         with pytest.raises(ValueError):  # noqa: PT011
-            S3DeleteBatch.from_paths([S3Path("b1", "a"), S3Path("b1")])
+            S3DeleteBatch.from_paths(mixed)
 
     @pytest.mark.parametrize(
         ("objects", "match"),

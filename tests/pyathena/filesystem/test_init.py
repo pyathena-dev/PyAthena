@@ -53,6 +53,8 @@ def test_register_s3_filesystem(registry_state):
 
 def test_register_s3_filesystem_overwrites_existing_registration(registry_state, caplog):
     fsspec.register_implementation("s3", _DummyFileSystem, clobber=True)
+    # Only the s3 registration is replaced.
+    fsspec.register_implementation("s3a", S3FileSystem, clobber=True)
 
     with caplog.at_level(logging.WARNING, logger="pyathena.filesystem"):
         register_s3_filesystem()

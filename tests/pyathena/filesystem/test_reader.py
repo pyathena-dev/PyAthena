@@ -63,7 +63,15 @@ class _RecordingRangeFile:
         Args:
             stream: The stream over the file.
         """
-        closer = threading.Thread(target=stream.close, daemon=True)
+        errors = []
+
+        def close():
+            try:
+                stream.close()
+            except BaseException as e:
+                errors.append(e)
+
+        closer = threading.Thread(target=close, daemon=True)
         closer.start()
         assert self.close_progressed.wait(EVENT_TIMEOUT), (
             "close() neither waited for the reads nor closed the file"
@@ -71,6 +79,7 @@ class _RecordingRangeFile:
         self._gate.set()
         closer.join(EVENT_TIMEOUT)
         assert not closer.is_alive()
+        assert not errors
         # Every read that started ended before the file was closed.
         assert self.events[-1] == "close"
         assert len(self.events) == len(self.reads) + 1
