@@ -26,7 +26,8 @@ from dataclasses import dataclass
 from multiprocessing import cpu_count
 from typing import Any, ClassVar, Generic, TypeVar, cast
 
-from pyathena.util import override, stop_retries_on
+from pyathena.filesystem.s3_retry import stop_retries_on
+from pyathena.filesystem.util import override
 
 T = TypeVar("T")
 ItemT = TypeVar("ItemT")
@@ -500,8 +501,9 @@ class S3Executor(metaclass=ABCMeta):
     Both ``submit`` and ``shutdown`` mirror the ``concurrent.futures.Executor``
     interface so that ``as_completed()`` and ``Future.cancel()`` work unchanged.
     Each submitted callable runs with a copy of the context variables of its
-    submitter, so that the stop scopes of :func:`~pyathena.util.stop_retries_on`
-    reach the requests that it makes.
+    submitter, so that the stop scopes of
+    :func:`~pyathena.filesystem.s3_retry.stop_retries_on` reach the requests
+    that it makes.
     """
 
     @abstractmethod
@@ -523,13 +525,13 @@ class S3Executor(metaclass=ABCMeta):
         """Run a blocking call in the executor and wait for it.
 
         Cancelling the waiting task cancels a call that has not started. A
-        running call makes no further attempt of its AWS API calls, as with
-        :func:`~pyathena.aio.util.run_in_thread`, and a write in it sends no
-        further part and does not commit (see
-        :func:`~pyathena.util.raise_if_stopped`); the task waits for the call
-        to end before it re-raises the cancellation, also when the event loop
-        shuts down with ``asyncio.run()``. A repeated cancellation stops that
-        wait, and the call then ends in the executor.
+        running call makes no further attempt of its AWS API calls (see
+        :func:`~pyathena.filesystem.s3_retry.stop_retries_on`), and a write in
+        it sends no further part and does not commit (see
+        :func:`~pyathena.filesystem.s3_retry.raise_if_stopped`); the task waits
+        for the call to end before it re-raises the cancellation, also when the
+        event loop shuts down with ``asyncio.run()``. A repeated cancellation
+        stops that wait, and the call then ends in the executor.
 
         Args:
             fn: The blocking callable.
@@ -689,8 +691,8 @@ class S3Executor(metaclass=ABCMeta):
 
         Every item is submitted at once, and the executor applies its own
         limit, such as the ``max_workers`` of a scope. Each call runs in a
-        scope of :func:`~pyathena.util.stop_retries_on` that the stop of the
-        batch ends.
+        scope of :func:`~pyathena.filesystem.s3_retry.stop_retries_on` that the
+        stop of the batch ends.
 
         With ``stop_on_failure``, the first failure that counts stops the
         batch: the calls that have not started are cancelled, the running

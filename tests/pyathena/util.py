@@ -37,6 +37,7 @@ from sqlalchemy import cast, create_engine, engine_from_config, literal, types
 
 from pyathena.connection import Connection
 from pyathena.error import ProgrammingError
+from pyathena.filesystem import s3_retry
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.filesystem.s3_core import S3Core
@@ -44,7 +45,7 @@ from pyathena.formatter import DefaultParameterFormatter
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaQueryExecution
 from pyathena.spark.common import SparkBaseCursor
-from pyathena.util import RetryConfig, override, retry_api_call
+from pyathena.util import RetryConfig, override
 
 _queries = Environment(
     loader=FileSystemLoader(Path(__file__).parents[1].resolve() / "resources" / "queries")
@@ -168,9 +169,11 @@ class ThrottledOperation:
 def retried(operation, config):
     """Return a stub of an ``S3Core`` request method that retries an operation.
 
-    The stub sends the operation with :func:`~pyathena.util.retry_api_call`
-    in the thread that calls it, as ``S3Core.call()`` does, so that the stop
-    scopes of that thread reach its retries.
+    The stub sends the operation with
+    :func:`~pyathena.filesystem.s3_retry.retry_api_call` in the thread that
+    calls it, as ``S3Core.call()`` does, so that the stop scopes of that
+    thread, those of the filesystem and of :func:`pyathena.util.stop_retries_on`,
+    reach its retries.
 
     Args:
         operation: The stubbed AWS API operation, such as a
@@ -182,7 +185,7 @@ def retried(operation, config):
     """
 
     def request(*args, **kwargs):
-        return retry_api_call(operation, config)
+        return s3_retry.retry_api_call(operation, config)
 
     return request
 
