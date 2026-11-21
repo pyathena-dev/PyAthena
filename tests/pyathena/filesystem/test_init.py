@@ -20,19 +20,15 @@ class _DummyFileSystem:
 
 
 def _warnings(caplog):
-    """Return the warning records that the ``pyathena.filesystem`` logger captured.
+    """Return the captured records of level ``WARNING`` or higher.
 
     Args:
         caplog: The pytest caplog fixture.
 
     Returns:
-        The captured records of level ``WARNING`` from that logger.
+        The records, of any logger.
     """
-    return [
-        record
-        for record in caplog.records
-        if record.name == "pyathena.filesystem" and record.levelno == logging.WARNING
-    ]
+    return [record for record in caplog.records if record.levelno >= logging.WARNING]
 
 
 @pytest.fixture
@@ -62,10 +58,12 @@ def test_register_s3_filesystem_overwrites_existing_registration(registry_state,
         register_s3_filesystem()
     # An explicitly registered filesystem class is overwritten with a warning.
     assert fsspec.registry["s3"] is S3FileSystem
-    assert len(_warnings(caplog)) == 1
+    assert [(r.name, r.levelno) for r in _warnings(caplog)] == [
+        ("pyathena.filesystem", logging.WARNING)
+    ]
 
     # Re-registering PyAthena's own filesystem does not warn.
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="pyathena.filesystem"):
         register_s3_filesystem()
-    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert not _warnings(caplog)

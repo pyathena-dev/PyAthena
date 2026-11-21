@@ -30,7 +30,7 @@ class _RecordingRangeFile:
         self.closes = 0
         # The offsets of the reads in the order they ended, and "close" when closed.
         self.events = []
-        # Set when the file is closed, and by _signal_close_wait() when close()
+        # Set when the file is closed, and by signal_close_wait() when close()
         # starts to wait for the reads.
         self.close_progressed = threading.Event()
 
@@ -57,24 +57,42 @@ class _RecordingRangeFile:
         """Check that closing the stream while the gated reads block closes the file last.
 
         The stream is closed in a thread, and the reads are released once the
-        close waits for them (see ``_signal_close_wait()``) or, if it does not
+        close waits for them (see :meth:`signal_close_wait`) or, if it does not
         wait, has closed the file, which then precedes their end.
 
         Args:
             stream: The stream over the file.
         """
         closer = threading.Thread(target=stream.close, daemon=True)
-        try:
-            closer.start()
-            assert self.close_progressed.wait(EVENT_TIMEOUT), (
-                "close() neither waited for the reads nor closed the file"
-            )
-        finally:
-            self._gate.set()
+        closer.start()
+        assert self.close_progressed.wait(EVENT_TIMEOUT), (
+            "close() neither waited for the reads nor closed the file"
+        )
+        self._gate.set()
         closer.join(EVENT_TIMEOUT)
         assert not closer.is_alive()
+        # Every read that started ended before the file was closed.
         assert self.events[-1] == "close"
-        assert sorted(self.events[:-1]) == sorted(offset for offset, _ in self.reads)
+        assert len(self.events) == len(self.reads) + 1
+
+    def signal_close_wait(self, monkeypatch, interrupts=0):
+        """Set ``close_progressed`` when ``ReadAheadStream.close()`` starts to wait for the reads.
+
+        Args:
+            monkeypatch: The pytest monkeypatch fixture.
+            interrupts: The number of first waits that raise ``KeyboardInterrupt``.
+        """
+        remaining = interrupts
+
+        def signalling_wait(futures, *args, **kwargs):
+            nonlocal remaining
+            if remaining:
+                remaining -= 1
+                raise KeyboardInterrupt
+            self.close_progressed.set()
+            return wait(futures, *args, **kwargs)
+
+        monkeypatch.setattr("pyathena.filesystem.reader.wait", signalling_wait)
 
     def open_stream(self, **kwargs):
         """Open a stream over the file that closes it."""
@@ -108,25 +126,6 @@ class _InterruptedWaitExecutor(ImmediateExecutor):
             return super()._new_future()
         self.submitted = True
         return _InterruptedFuture()
-
-
-def _signal_close_wait(monkeypatch, file, interrupts=0):
-    """Make the wait of ``ReadAheadStream.close()`` for the running reads observable.
-
-    Args:
-        monkeypatch: The pytest monkeypatch fixture.
-        file: The ``_RecordingRangeFile`` whose ``close_progressed`` a wait sets.
-        interrupts: The number of first waits that raise ``KeyboardInterrupt``.
-    """
-    remaining = [KeyboardInterrupt() for _ in range(interrupts)]
-
-    def signalling_wait(futures, *args, **kwargs):
-        if remaining:
-            raise remaining.pop()
-        file.close_progressed.set()
-        return wait(futures, *args, **kwargs)
-
-    monkeypatch.setattr("pyathena.filesystem.reader.wait", signalling_wait)
 
 
 @pytest.fixture
@@ -245,7 +244,7 @@ class TestReadAheadStream:
         running reads before closing the file."""
         file = _RecordingRangeFile(bytes(100), gate=gate)
         stream = file.open_stream(part_size=10, max_parts=2)
-        _signal_close_wait(monkeypatch, file, interrupts=1)
+        file.signal_close_wait(monkeypatch, interrupts=1)
         assert stream.read(10) == bytes(10)
         assert file.gated_read_started.wait(EVENT_TIMEOUT)
         with pytest.raises(KeyboardInterrupt):
@@ -266,7 +265,7 @@ class TestReadAheadStream:
         )
         file = _RecordingRangeFile(bytes(100), gate=gate)
         stream = file.open_stream(part_size=10, max_parts=2)
-        _signal_close_wait(monkeypatch, file)
+        file.signal_close_wait(monkeypatch)
         # The one worker blocks in the read of the second part, and the third waits.
         assert stream.read(10) == bytes(10)
         assert file.gated_read_started.wait(EVENT_TIMEOUT)
@@ -277,7 +276,7 @@ class TestReadAheadStream:
         """Closing waits for the reads in flight before closing the file."""
         file = _RecordingRangeFile(bytes(100), gate=gate)
         stream = file.open_stream(part_size=10, max_parts=2)
-        _signal_close_wait(monkeypatch, file)
+        file.signal_close_wait(monkeypatch)
         assert stream.read(10) == bytes(10)
         assert file.gated_read_started.wait(EVENT_TIMEOUT)
         file.assert_closed_after_reads(stream)
