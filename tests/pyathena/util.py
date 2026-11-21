@@ -1815,14 +1815,16 @@ class OpaquePath:
 
 
 class BranchRecordingCallback(Callback):
-    """A progress callback that records the source paths of its branches."""
+    """A progress callback that records the source and destination paths of its branches."""
 
     def __init__(self):
         super().__init__()
         self.sources = []
+        self.destinations = []
 
     def branched(self, path_1, path_2, **kwargs):
         self.sources.append(path_1)
+        self.destinations.append(path_2)
         return super().branched(path_1, path_2, **kwargs)
 
 
