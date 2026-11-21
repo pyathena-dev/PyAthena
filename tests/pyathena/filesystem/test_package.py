@@ -37,16 +37,21 @@ def _imports_outside_package(path):
     """
     module = _module_name(path)
     # The package that a relative import of level 1 starts from.
-    package = module if path.name == "__init__.py" else module.rpartition(".")[0]
+    package = module if path.stem == "__init__" else module.rpartition(".")[0]
+
+    def resolve(name, level):
+        """Resolve a module name relative to the package by ``level`` dots."""
+        if not level:
+            return name
+        parent = package.rsplit(".", level - 1)[0] if level > 1 else package
+        return f"{parent}.{name}" if name else parent
+
     found = []
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
             names = [alias.name for alias in node.names]
         elif isinstance(node, ast.ImportFrom):
-            base = node.module or ""
-            if node.level:
-                parent = package.rsplit(".", node.level - 1)[0] if node.level > 1 else package
-                base = f"{parent}.{base}" if base else parent
+            base = resolve(node.module or "", node.level)
             # ``from pyathena import filesystem`` names a submodule of the package.
             names = [base] if base != "pyathena" else [f"pyathena.{a.name}" for a in node.names]
         elif (
@@ -62,7 +67,10 @@ def _imports_outside_package(path):
             and isinstance(node.args[0], ast.Constant)
             and isinstance(node.args[0].value, str)
         ):
-            names = [node.args[0].value]
+            # A relative name, such as ``import_module("..util", __package__)``.
+            name = node.args[0].value
+            level = len(name) - len(name.lstrip("."))
+            names = [resolve(name[level:], level)]
         else:
             continue
         found.extend((node.lineno, name) for name in names if _outside_package(name))
