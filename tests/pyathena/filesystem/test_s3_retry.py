@@ -167,13 +167,14 @@ def test_retry_api_call_stopped_by_event(stop_in):
 
 
 def test_retry_api_call_stopped_before_call():
-    # A call in a stopped scope makes its first attempt, but no retry.
+    # A call in a scope whose event is already set makes its first attempt,
+    # but no retry.
     event = threading.Event()
     event.set()
-    call = StoppingOperation(event.set, "request")
+    operation = ThrottledOperation(failures=2)
     with stop_retries_on(event), pytest.raises(ClientError):
-        retry_api_call(call, S3RetryConfig(multiplier=0))
-    assert call.calls == 1
+        retry_api_call(operation, S3RetryConfig(multiplier=0))
+    assert operation.calls == 1
 
 
 def test_retry_api_call_stopped_by_enclosing_scope():

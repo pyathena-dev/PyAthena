@@ -294,6 +294,22 @@ def is_retryable_error(ex: BaseException, config: RetryConfig) -> bool:
 _RETRY_STOP_EVENTS: ContextVar[tuple[threading.Event, ...]] = ContextVar(
     "pyathena_retry_stop_events", default=()
 )
+
+
+def _stop_events() -> tuple[threading.Event, ...]:
+    """Return the events of the enclosing stop scopes, those of the S3 filesystem included.
+
+    A scope of :func:`stop_retries_on` is also one of the filesystem, so its
+    event appears once.
+
+    Returns:
+        The events of the enclosing scopes of :func:`stop_retries_on` and of
+        :func:`pyathena.filesystem.s3_retry.stop_retries_on`, apart from those
+        that the unstoppable blocks clear.
+    """
+    return tuple(dict.fromkeys((*_RETRY_STOP_EVENTS.get(), *s3_retry.retry_stop_events())))
+
+
 # The longest that a backoff wait sleeps before it checks again whether the
 # retries are stopped, unless it can wait for the single event of a scope.
 _STOP_POLL_INTERVAL = 0.1
@@ -313,7 +329,9 @@ def stop_retries_on(event: threading.Event) -> Iterator[None]:
 
     The block is also a scope of
     :func:`pyathena.filesystem.s3_retry.stop_retries_on`, which stops the
-    retries of the requests of the S3 filesystem in the same way.
+    retries of the requests of the S3 filesystem in the same way. Conversely,
+    the scopes that the filesystem opens, such as those of its thread pools,
+    also stop the calls of :func:`retry_api_call` in them.
 
     Args:
         event: The event that stops the retries.
@@ -359,10 +377,11 @@ def retries_stopped() -> bool:
     """Return whether an event of the enclosing stop scopes is set.
 
     Returns:
-        Whether an event of the enclosing :func:`stop_retries_on` scopes,
-        apart from those that :func:`unstoppable_retries` clears, is set.
+        Whether an event of the enclosing :func:`stop_retries_on` scopes, or
+        of those of :func:`pyathena.filesystem.s3_retry.stop_retries_on`,
+        apart from those that the unstoppable blocks clear, is set.
     """
-    return any(event.is_set() for event in _RETRY_STOP_EVENTS.get())
+    return any(event.is_set() for event in _stop_events())
 
 
 def raise_if_stopped(operation: str) -> None:
@@ -407,7 +426,7 @@ def wait_with_retry_stop(future: Future[_T], *, stop: threading.Event) -> _T:
         BaseException: The exception of the work, such as the error of the last
             attempt of a call whose retries were stopped.
     """
-    events = _RETRY_STOP_EVENTS.get()
+    events = _stop_events()
     while events and not future.done():
         if any(event.is_set() for event in events):
             stop.set()
@@ -461,7 +480,7 @@ def retry_api_call(
         This includes recognized Glue error codes wrapped in MetadataException.
         Other errors are propagated without retrying.
     """
-    events = _RETRY_STOP_EVENTS.get()
+    events = _stop_events()
 
     def stopped() -> bool:
         """Whether an event of the enclosing scopes is set."""
