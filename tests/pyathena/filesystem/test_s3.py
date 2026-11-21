@@ -2329,6 +2329,8 @@ class TestS3FileSystem:
         ],
     )
     def test_mv_conflicting_destinations(self, path1, path2):
+        # The sources whose destinations conflict are looked up, and objects
+        # at their keys raise before anything is copied.
         fs = self._make_fs()
         fs.info = mock.MagicMock()
         fs._call.return_value = {}
@@ -2336,13 +2338,14 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="Cannot move"):
             fs.mv(path1, path2, recursive=True)
         fs.info.assert_not_called()
+        expected = {fs._client.head_object}
         if any(S3Path.parse(p).version_id == "null" for p in path1):
-            fs._call.assert_called_once_with(fs._client.get_bucket_versioning, Bucket="bucket")
-        else:
-            fs._call.assert_not_called()
+            expected.add(fs._client.get_bucket_versioning)
+        assert {c.args[0] for c in fs._call.call_args_list} == expected
 
     def test_mv_conflicting_destinations_of_listed_sources(self):
-        # A list of sources is mapped without looking up the destination.
+        # A list of sources is mapped without looking up the destination;
+        # only the sources are looked up.
         fs = self._make_fs()
         fs._expand_paths = mock.MagicMock(
             return_value=[(p, S3Path.parse(p)) for p in ("bucket/x/a", "bucket/y/a")]
@@ -2352,7 +2355,21 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="same destination"):
             fs.mv(["s3://bucket/x/a", "s3://bucket/y/a"], "s3://bucket/out", recursive=True)
         fs.isdir.assert_not_called()
-        fs._call.assert_not_called()
+        assert sorted((c.args[0], c.kwargs["Key"]) for c in fs._call.call_args_list) == [
+            (fs._client.head_object, "x/a"),
+            (fs._client.head_object, "y/a"),
+        ]
+
+    def test_mv_skipped_directory_does_not_conflict(self):
+        # GH-1397: a listed source without an object at its key, a prefix
+        # that the move skips, writes no destination, so its destination
+        # being another source is no conflict, as with copy(). It used to
+        # be looked up only with another source below it.
+        fs = self._make_fs()
+        store = self._serve_keys(fs, {"dir/a", "x"})
+
+        fs.mv(["s3://bucket/dir", "s3://bucket/x"], ["s3://bucket/x", "s3://bucket/y"])
+        assert store == {"dir/a", "y"}
 
     def test_mv_keeps_given_paths(self):
         # The destination keeps its trailing slash, as with copy(), and the

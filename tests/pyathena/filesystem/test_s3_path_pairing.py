@@ -233,7 +233,7 @@ class TestS3PathPairing:
         pairing = _pairing(pairs)
 
         with pytest.raises(ValueError, match="another path"):
-            pairing.move_pairs(pairs)
+            pairing.move_pairs(pairs, missing=set())
         assert pairing.move_pairs(pairs, versioning_enabled_buckets={"bucket"}) == pairs
 
     @pytest.mark.parametrize("method", ["conflict_candidates", "move_pairs"])
@@ -257,24 +257,25 @@ class TestS3PathPairing:
     )
     def test_move_pairs_conflicts(self, pairs, match):
         with pytest.raises(ValueError, match=match):
-            _pairing(pairs).move_pairs(pairs)
+            _pairing(pairs).move_pairs(pairs, missing=set())
 
     def test_move_pairs_directory_without_object(self):
-        # A source with another source below it may be a directory; one
-        # without an object at its key is not copied, so its destination
-        # does not conflict.
+        # A source without a version may be a directory, with or without
+        # another source below it; one without an object at its key is not
+        # copied, so its destination does not conflict.
         pairs = [
             ("s3://bucket/d", "s3://bucket/e"),
             ("s3://bucket/d/x", "s3://bucket/e"),
             ("s3://bucket/e/y", "s3://bucket/out"),
         ]
 
-        assert _pairing(pairs).conflict_candidates(pairs) == ["bucket/d"]
+        assert _pairing(pairs).conflict_candidates(pairs) == ["bucket/d", "bucket/d/x"]
         with pytest.raises(ValueError, match="missing"):
             _pairing(pairs).move_pairs(pairs)
         with pytest.raises(ValueError, match="same destination"):
             _pairing(pairs).move_pairs(pairs, missing=set())
         assert _pairing(pairs).move_pairs(pairs, missing={"bucket/d"}) == pairs
+        assert _pairing(pairs).move_pairs(pairs, missing={"bucket/d/x"}) == pairs
         # The missing sources can be given in any form that names them.
         assert _pairing(pairs).move_pairs(pairs, missing={"s3://bucket/d"}) == pairs
 
@@ -290,14 +291,12 @@ class TestS3PathPairing:
 
     def test_move_pairs_path_conflict_candidates(self):
         # GH-1403: the candidates of S3Path sources are S3Path objects, and
-        # missing ones may be given as such; their directories are named as
-        # they are listed.
+        # missing ones may be given as such; a key that ends in what looks
+        # like a version ID query is no version.
         directory = S3Path("bucket", "d?versionId=v1")
-        pairs = [
-            (directory, S3Path("bucket", "e")),
-            (S3Path("bucket", "d?versionId=v1/x"), S3Path("bucket", "e")),
-        ]
-        assert _pairing(pairs).conflict_candidates(pairs) == [directory]
+        listed = S3Path("bucket", "d?versionId=v1/x")
+        pairs = [(directory, S3Path("bucket", "e")), (listed, S3Path("bucket", "e"))]
+        assert _pairing(pairs).conflict_candidates(pairs) == [directory, listed]
         assert _pairing(pairs).move_pairs(pairs, missing={directory}) == pairs
 
     def test_move_pairs_missing_is_a_collection(self):
@@ -315,16 +314,17 @@ class TestS3PathPairing:
         assert _pairing(pairs).conflict_candidates(pairs) == ["bucket/d", "bucket/d"]
 
     def test_move_pairs_version_names_an_object(self):
-        # A version is never taken for a directory.
+        # A version is never taken for a directory, even with another source
+        # below its key, so it is not looked up.
         pairs = [
             ("s3://bucket/d?versionId=null", "s3://bucket/out"),
             ("s3://bucket/d/x", "s3://bucket/x"),
             ("s3://bucket/a", "s3://bucket/out"),
         ]
 
-        assert _pairing(pairs).conflict_candidates(pairs) == []
+        assert _pairing(pairs).conflict_candidates(pairs) == ["bucket/a"]
         with pytest.raises(ValueError, match="same destination"):
-            _pairing(pairs).move_pairs(pairs)
+            _pairing(pairs).move_pairs(pairs, missing=set())
 
     def test_move_pairs_version_of_missing_directory_key(self):
         # The "null" version of a key without a current object still names an
@@ -336,7 +336,7 @@ class TestS3PathPairing:
             ("src/d/x", "dst/x"),
         ]
 
-        assert _pairing(pairs).conflict_candidates(pairs) == ["src/d"]
+        assert _pairing(pairs).conflict_candidates(pairs) == ["src/d", "src/a"]
         with pytest.raises(ValueError, match="same destination"):
             _pairing(pairs).move_pairs(pairs, missing={"src/d"})
 

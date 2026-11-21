@@ -150,8 +150,11 @@ Local paths that do not exist yet are
 compared as strings, after `os.path.normcase`, so on a case-insensitive filesystem other
 than Windows, such as the default one of macOS, give `get` destinations that differ by
 more than case. A `cp` of an object onto itself, such as with
-`MetadataDirective="REPLACE"`, is no conflict. `get` with `outfile` writes the objects
-into it one after another, in order.
+`MetadataDirective="REPLACE"`, is no conflict. `mv` raises for the same pairs as `cp`.
+A source of `cp` or `mv` without an object at its key, such as a key prefix given in a
+list, writes no destination and does not conflict; the sources without a version whose
+destinations conflict are looked up with HeadObject before anything is copied. `get`
+with `outfile` writes the objects into it one after another, in order.
 
 `rm` deletes up to 1,000 objects per DeleteObjects request, `batch_size` requests at a
 time. Its `max_workers` argument is a deprecated alias of `batch_size`.
