@@ -63,16 +63,23 @@ def _imports_outside_package(path):
                     and node.func.id in ("import_module", "__import__")
                 )
             )
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
+            and isinstance(
+                target := next(
+                    iter([*node.args[:1], *(k.value for k in node.keywords if k.arg == "name")]),
+                    None,
+                ),
+                ast.Constant,
+            )
+            and isinstance(target.value, str)
         ):
             # A relative name, such as ``import_module("..util", __package__)``,
             # resolves against a literal ``package`` if one is given.
-            name = node.args[0].value
+            name = target.value
             level = len(name) - len(name.lstrip("."))
             anchors = [*node.args[1:2], *(k.value for k in node.keywords if k.arg == "package")]
-            literal = [a.value for a in anchors if isinstance(a, ast.Constant)]
+            literal = [
+                a.value for a in anchors if isinstance(a, ast.Constant) and isinstance(a.value, str)
+            ]
             names = [resolve(name[level:], level, *literal[:1])]
         else:
             continue
