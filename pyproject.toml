@@ -109,7 +109,11 @@ dev = [
     "sphinx",
     "sphinx-multiversion",
     "sphinxext-opengraph",
-    "furo",
+    # Furo depends on soupsieve through beautifulsoup4. Soupsieve 4.0, the first
+    # release that fixes all of GHSA-mmhr-3c5m-f64f, GHSA-6655-6qjp-jx7x, and
+    # GHSA-7g44-g9rc-x53w, requires Python 3.11.5 or later, so earlier Python 3.11
+    # releases leave out Furo and cannot build the documentation.
+    "furo; python_full_version >= '3.11.5'",
     "myst-parser",
     "sphinx-design",
     "cfn-lint>=1",
