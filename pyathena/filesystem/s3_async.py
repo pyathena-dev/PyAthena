@@ -1024,21 +1024,22 @@ class AioS3FileSystem(AsyncFileSystem):
         batch_size = kwargs.pop("batch_size", self.batch_size)
         callback.set_size(len(pairs))
 
-        async def run(path1: Any, path2: Any) -> Any:
-            """Run the transfer of a pair through the callback's ``branch_coro()``.
+        def run(path1: Any, path2: Any) -> Awaitable[Any]:
+            """Return the transfer of a pair, run through the callback's ``branch_coro()``.
 
-            The task of the transfer joins the batch before the callback's
-            wrapper runs, so that a cancellation of the batch also stops a
-            transfer whose wrapper is still waiting to start it.
+            The callback wraps the transfer when the coroutine is created,
+            before any transfer is scheduled, as in fsspec. The task of the
+            transfer joins the batch before the wrapper runs, so that a
+            cancellation of the batch also stops a transfer whose wrapper is
+            still waiting to start it.
 
             Args:
                 path1: The source.
                 path2: The destination.
 
             Returns:
-                The result of the transfer.
+                The coroutine of the transfer.
             """
-            _S3BatchTasks.track()
 
             async def transfer_pair(label1: Any, label2: Any, **transfer_kwargs: Any) -> Any:
                 """Transfer the pair, whose branch the labels name.
@@ -1054,11 +1055,22 @@ class AioS3FileSystem(AsyncFileSystem):
                 """
                 return await transfer(path1, path2, **transfer_kwargs)
 
-            return await callback.branch_coro(transfer_pair)(
-                str(path1) if isinstance(path1, S3Path) else path1,
-                str(path2) if isinstance(path2, S3Path) else path2,
-                **kwargs,
-            )
+            branched = callback.branch_coro(transfer_pair)
+
+            async def tracked() -> Any:
+                """Run the wrapped transfer as a task of the batch.
+
+                Returns:
+                    The result of the transfer.
+                """
+                _S3BatchTasks.track()
+                return await branched(
+                    str(path1) if isinstance(path1, S3Path) else path1,
+                    str(path2) if isinstance(path2, S3Path) else path2,
+                    **kwargs,
+                )
+
+            return tracked()
 
         return cast(
             list[Any],

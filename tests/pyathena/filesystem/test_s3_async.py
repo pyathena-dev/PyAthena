@@ -885,6 +885,43 @@ class TestAioS3FileSystem:
         ]
 
     @pytest.mark.asyncio
+    async def test_transfers_are_wrapped_before_they_run(self, tmp_path):
+        # GH-1404: as in fsspec, the callback wraps every transfer before any
+        # runs, also when batch_size lets one run at a time.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = serve_s3_keys(fs._sync_fs, set())
+        for name in ("x", "y"):
+            (tmp_path / name).write_bytes(b"aa")
+        wrapped = asyncio.Event()
+
+        class AllWrapped(Callback):
+            count = 0
+
+            def branch_coro(self, fn):
+                run = super().branch_coro(fn)
+                self.count += 1
+                if self.count == 2:
+                    wrapped.set()
+
+                async def wait_then_run(path1, path2, **kwargs):
+                    await wrapped.wait()
+                    return await run(path1, path2, **kwargs)
+
+                return wait_then_run
+
+        await await_bounded(
+            fs._put(
+                [str(tmp_path / "x"), str(tmp_path / "y")],
+                ["s3://bucket/up/x", "s3://bucket/up/y"],
+                callback=AllWrapped(),
+                batch_size=1,
+            )
+        )
+        assert store == {"up/x", "up/y"}
+
+    @pytest.mark.asyncio
     async def test_cancelled_put_starts_no_waiting_transfer(self, tmp_path):
         # GH-1404: a transfer whose branch_coro() wrapper waits before it
         # starts belongs to the batch, so a cancellation of _put() stops it
@@ -895,6 +932,7 @@ class TestAioS3FileSystem:
         store, _ = serve_s3_keys(fs._sync_fs, set())
         (tmp_path / "x").write_bytes(b"aa")
         waiting, release = asyncio.Event(), asyncio.Event()
+        stopped = []
 
         class Waiting(Callback):
             def branch_coro(self, fn):
@@ -902,7 +940,11 @@ class TestAioS3FileSystem:
 
                 async def wait_then_run(path1, path2, **kwargs):
                     waiting.set()
-                    await release.wait()
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        stopped.append(path2)
+                        raise
                     return await run(path1, path2, **kwargs)
 
                 return wait_then_run
@@ -914,8 +956,8 @@ class TestAioS3FileSystem:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await await_bounded(task)
-        release.set()
-        await asyncio.sleep(0.1)
+        # The waiting wrapper was cancelled, and waited for, before _put() raised.
+        assert stopped == ["bucket/up/x"]
         assert store == set()
 
     @pytest.mark.asyncio
