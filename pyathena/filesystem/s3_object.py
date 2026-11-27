@@ -256,33 +256,24 @@ class S3Object(dict[str, Any]):
         return fields
 
     @classmethod
-    def _from_listing(
-        cls,
-        bucket: str,
-        key: str,
-        size: int | None,
-        etag: str | None,
-        last_modified: datetime | None,
-        storage_class: str | None,
-    ) -> S3Object:
-        """Build the file entry of a listed object, with the fields that the constructor sets.
+    def _from_listing(cls, listed: S3ObjectSummary | S3ObjectVersion, **fields: Any) -> S3Object:
+        """Build the file entry of a listed object or version.
 
-        The entry has the fields, in the order, that the constructor gives a
-        listing entry of ``ETag``, ``Size``, ``StorageClass`` and
-        ``LastModified`` that are not None, with the type, bucket and key.
+        The entry has the fields of the entry that the constructor builds
+        from the listed ``ETag``, ``Size``, ``StorageClass`` and
+        ``LastModified`` that are not None, with the type, bucket, key and
+        ``fields`` as keyword arguments, in the same order.
 
         Args:
-            bucket: The bucket of the object.
-            key: The key of the object.
-            size: The listed size, or None.
-            etag: The listed ETag, or None.
-            last_modified: The listed last modified time, or None.
-            storage_class: The listed storage class, or None.
+            listed: The listed object or version.
+            **fields: Further fields, set after the key, such as
+                ``version_id``; ``name`` replaces ``bucket/key``.
 
         Returns:
-            The file entry, named ``bucket/key``.
+            The file entry.
         """
         entry = cls.__new__(cls)
+        etag, last_modified, storage_class = listed.etag, listed.last_modified, listed.storage_class
         if etag is not None:
             entry["etag"] = etag
         if storage_class is not None:
@@ -290,12 +281,17 @@ class S3Object(dict[str, Any]):
         if last_modified is not None:
             entry["last_modified"] = last_modified
         if storage_class is None:
+            # Placed as the constructor places the default.
             entry["storage_class"] = S3StorageClass.S3_STORAGE_CLASS_STANDARD
+        size = listed.size
         entry["content_length"] = entry["size"] = 0 if size is None else size
         entry["type"] = S3ObjectType.S3_OBJECT_TYPE_FILE
-        entry["bucket"] = bucket
-        entry["key"] = key
-        entry["name"] = f"{bucket}/{key}"
+        entry["bucket"] = bucket = listed.bucket
+        entry["key"] = key = listed.key
+        if fields:
+            entry.update(fields)
+        if "name" not in entry:
+            entry["name"] = f"{bucket}/{key}"
         return entry
 
     @classmethod
@@ -308,14 +304,7 @@ class S3Object(dict[str, Any]):
         Returns:
             The file entry, named ``bucket/key``.
         """
-        return cls._from_listing(
-            summary.bucket,
-            summary.key,
-            summary.size,
-            summary.etag,
-            summary.last_modified,
-            summary.storage_class,
-        )
+        return cls._from_listing(summary)
 
     @classmethod
     def from_version(cls, version: S3ObjectVersion) -> S3Object:
@@ -331,23 +320,10 @@ class S3Object(dict[str, Any]):
         Returns:
             The file entry.
         """
-        entry = cls._from_listing(
-            version.bucket,
-            version.key,
-            version.size,
-            version.etag,
-            version.last_modified,
-            version.storage_class,
-        )
-        name = entry.pop("name")
-        entry["version_id"] = version.version_id
-        entry["is_latest"] = version.is_latest
-        entry["name"] = (
-            name
-            if version.version_id == "null"
-            else str(S3Path(version.bucket, version.key, version.version_id))
-        )
-        return entry
+        fields: dict[str, Any] = {"version_id": version.version_id, "is_latest": version.is_latest}
+        if version.version_id != "null":
+            fields["name"] = str(S3Path(version.bucket, version.key, version.version_id))
+        return cls._from_listing(version, **fields)
 
     @classmethod
     def from_metadata(cls, metadata: S3Metadata, version_id: str | None = None) -> S3Object:

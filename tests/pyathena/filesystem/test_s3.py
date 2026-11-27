@@ -932,17 +932,13 @@ class TestS3FileSystem:
         assert fs.find("s3://bucket/dir") == ["bucket/dir/sub/file"]
         fs._call.assert_not_called()
 
-    @pytest.mark.parametrize("method", ["info", "ls", "find", "glob", "walk"])
+    @pytest.mark.parametrize("method", ["info", "ls", "find", "glob", "walk", "details"])
     def test_returned_entries_are_copies(self, method):
         # GH-1382: changing a returned entry, or its metadata, does not change
         # the cached entry, which the next call returns again.
         fs = self._make_fs()
-        file = S3Object(
-            init={"Metadata": {"k": "v"}},
-            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
-            bucket="bucket",
-            key="dir/a",
-        )
+        file = self._file_object("dir/a")
+        file["metadata"] = {"k": "v"}
         fs.dircache[("bucket/dir", "/")] = [file, fs._directory_object("bucket", "dir/sub")]
         fs.dircache[("bucket/dir", "")] = [file]
         fs.dircache[("bucket/dir/sub", "/")] = [self._file_object("dir/sub/b")]
@@ -957,6 +953,9 @@ class TestS3FileSystem:
                 return list(fs.find("bucket/dir", detail=True).values())
             if method == "glob":
                 return list(fs.glob("bucket/dir/*", detail=True).values())
+            if method == "details":
+                with fs.open("bucket/dir/a", "rb", cache_type="none") as f:
+                    return [f.details]
             return [
                 entry
                 for _, dirs, files in fs.walk("bucket/dir", detail=True)
@@ -969,6 +968,23 @@ class TestS3FileSystem:
                 entry["metadata"]["k"] = "changed"
         assert file == expected
         assert [e for e in entries() if e["name"] == "bucket/dir/a"] == [expected]
+        fs._call.assert_not_called()
+
+    def test_walk_detail_lists_the_listed_directories(self):
+        # GH-1382: changing a yielded directory entry does not change what
+        # the walk lists below it.
+        fs = self._make_fs()
+        # A listing of another prefix fails, which the walk skips.
+        fs._call.side_effect = FileNotFoundError
+        fs.dircache[("bucket/dir", "/")] = [fs._directory_object("bucket", "dir/sub")]
+        fs.dircache[("bucket/dir/sub", "/")] = [self._file_object("dir/sub/b")]
+
+        walked = []
+        for root, dirs, files in fs.walk("bucket/dir", detail=True):
+            walked.append((root, list(files)))
+            for entry in dirs.values():
+                entry["name"] = entry["key"] = "changed"
+        assert walked == [("bucket/dir", []), ("bucket/dir/sub", ["b"])]
         fs._call.assert_not_called()
 
     def test_find_refresh_bypasses_cached_listings(self):
@@ -2083,7 +2099,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
         fs.s3_additional_kwargs = {"ServerSideEncryption": "AES256", "StorageClass": "STANDARD"}
-        fs.info = mock.MagicMock(
+        fs._info_entry = mock.MagicMock(
             return_value=S3Object(
                 init={"ContentLength": 3, "ETag": '"e"'},
                 type=S3ObjectType.S3_OBJECT_TYPE_FILE,
@@ -2430,7 +2446,9 @@ class TestS3FileSystem:
         # GH-1008: recursive copy() passes the directories, which used to be
         # sent to CopyObject and fail with NoSuchKey.
         fs = self._make_fs()
-        fs._info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "src"))
+        fs._info_entry = mock.MagicMock(
+            return_value=S3FileSystem._directory_object("bucket", "src")
+        )
         fs.core.copy_object = mock.MagicMock()
 
         fs.cp_file("s3://bucket/src", "s3://bucket/dst")
@@ -2457,12 +2475,12 @@ class TestS3FileSystem:
         # The sources whose destinations conflict are looked up, and objects
         # at their keys raise before anything is copied.
         fs = self._make_fs()
-        fs.info = mock.MagicMock()
+        fs._info_entry = mock.MagicMock()
         fs._call.return_value = {}
 
         with pytest.raises(ValueError, match="Cannot move"):
             fs.mv(path1, path2, recursive=True)
-        fs.info.assert_not_called()
+        fs._info_entry.assert_not_called()
         expected = {fs._client.head_object}
         if any(S3Path.parse(p).version_id == "null" for p in path1):
             expected.add(fs._client.get_bucket_versioning)
@@ -3733,8 +3751,8 @@ class TestS3FileSystem:
         # GH-973: a multipart copy that fails to copy an annotation has
         # written the destination, so its cached entries are removed.
         fs = self._make_fs()
-        fs._info = mock.MagicMock(return_value=self._file_object("src"))
-        fs._info.return_value.size = S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE + 1
+        fs._info_entry = mock.MagicMock(return_value=self._file_object("src"))
+        fs._info_entry.return_value.size = S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE + 1
         fs._copy_object_with_multipart_upload = mock.MagicMock(side_effect=PermissionError)
         fs.dircache["bucket/dst"] = [self._file_object("dst")]
 
@@ -4409,8 +4427,8 @@ class TestS3FileSystem:
         fs = S3FileSystem(client=S3_CLIENT, default_cache_type="none", skip_instance_cache=True)
         with pytest.raises(TypeError, match=r"cannot be pickled.*profile="):
             pickle.dumps(fs)
-        fs.info = mock.MagicMock(return_value=self._file_object("key"))
-        fs.info.return_value.size = 4
+        fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+        fs._info_entry.return_value.size = 4
         with fs.open("s3://bucket/key", "rb") as f, pytest.raises(TypeError, match="profile="):
             pickle.dumps(f)
 
@@ -4446,8 +4464,8 @@ class TestS3FileSystem:
         # max_workers threads of its own.
         fs = self._make_fs()
         fs._request_pool = S3ThreadPool(2)
-        fs.info = mock.MagicMock(return_value=self._file_object("key"))
-        fs.info.return_value.size = 64
+        fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+        fs._info_entry.return_value.size = 64
         call, state = overlapping_calls(2)
 
         def get_object(path, range_, **kwargs):
@@ -4476,8 +4494,8 @@ class TestS3FileSystem:
         # cpu_count() * 5 threads of its own.
         fs = self._make_fs()
         fs._request_pool = S3ThreadPool(2)
-        fs.info = mock.MagicMock(return_value=self._file_object("key"))
-        fs.info.return_value.size = 64
+        fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+        fs._info_entry.return_value.size = 64
         call, state = overlapping_calls(2)
 
         def get_object(path, range_, **kwargs):
@@ -4542,14 +4560,14 @@ class TestS3FileSystem:
     def test_open_version_id(self):
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs.info = mock.MagicMock(return_value=self._file_object("key"))
-        fs.info.return_value.size = 4
+        fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+        fs._info_entry.return_value.size = 4
 
         with fs.open("s3://bucket/key", "rb", version_id="v1") as f:
             assert f.version_id == "v1"
             # The size is that of the requested version, not the latest one.
             assert f.size == 4
-        fs.info.assert_called_once_with("bucket/key?versionId=v1", version_id="v1")
+        fs._info_entry.assert_called_once_with("bucket/key?versionId=v1", version_id="v1")
         # The version is carried in the path, which fsspec reopens an
         # unpickled file with.
         assert f.path == "bucket/key?versionId=v1"
@@ -4880,7 +4898,7 @@ class TestS3FileSystem:
             # traceback, and the file, alive.
             raise PermissionError("denied")
 
-        fs.info = info
+        fs._info_entry = info
         unraisable = []
         monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
 
@@ -5124,8 +5142,8 @@ class TestS3FileSystem:
     )
     def test_cat_file_version_id(self, path, expected):
         fs = self._make_fs()
-        fs._info = mock.MagicMock(return_value=self._file_object("key"))
-        fs._info.return_value.size = 10
+        fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+        fs._info_entry.return_value.size = 10
 
         fs._call.return_value = {"Body": io.BytesIO(b"data")}
         assert fs.cat_file(path, version_id="v1") == b"data"
@@ -5137,7 +5155,7 @@ class TestS3FileSystem:
         fs._call.reset_mock()
         fs._call.return_value = {"Body": io.BytesIO(b"ta")}
         assert fs.cat_file(path, start=-8, end=-6, version_id="v1") == b"ta"
-        fs._info.assert_called_once_with(path, version_id=expected)
+        fs._info_entry.assert_called_once_with(path, version_id=expected)
         fs._call.assert_called_once_with(
             fs._client.get_object,
             Bucket="bucket",
@@ -5159,8 +5177,8 @@ class TestS3FileSystem:
         # The real request function, on the client mock.
         fs._core.call = functools.partial(S3Core.call, fs._core)
         fs._call = functools.partial(S3FileSystem._call, fs)
-        fs.info = fs._info = mock.MagicMock(return_value=self._file_object("key"))
-        fs.info.return_value.size = len(data)
+        fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+        fs._info_entry.return_value.size = len(data)
         ranges = []
 
         def get_object(**request):
@@ -5221,7 +5239,7 @@ class TestS3FileSystem:
         empty = end is not None and 0 <= end <= (start or 0)
         # Only a negative offset with an end, a negative end, or an empty
         # range looks up the object.
-        assert fs.info.called == ((negative and not suffix) or empty)
+        assert fs._info_entry.called == ((negative and not suffix) or empty)
         if suffix:
             assert ranges == [f"bytes={start}"]
         if empty:
@@ -5230,7 +5248,7 @@ class TestS3FileSystem:
     def test_cat_file_range_stale_size(self):
         fs, ranges = self._make_object_fs(b"0123456789abcdefghij")
         # A cached entry from before the object grew.
-        fs.info.return_value.size = 10
+        fs._info_entry.return_value.size = 10
 
         assert fs.cat_file("s3://bucket/key", start=10, end=20) == b"abcdefghij"
         assert fs.cat_file("s3://bucket/key", start=15) == b"fghij"
@@ -5240,11 +5258,11 @@ class TestS3FileSystem:
     def test_cat_file_suffix_range_key_ending_in_slash(self):
         fs, _ = self._make_object_fs(b"abc")
         # info() reports a key ending in "/" as a directory.
-        fs.info.return_value = S3FileSystem._directory_object("bucket", "dir")
+        fs._info_entry.return_value = S3FileSystem._directory_object("bucket", "dir")
 
         assert fs.cat_file("s3://bucket/dir/", start=-2) == b"bc"
         fs._client.get_object.assert_called_once_with(Bucket="bucket", Key="dir/", Range="bytes=-2")
-        fs.info.assert_not_called()
+        fs._info_entry.assert_not_called()
 
     def test_cat_file_range_errors(self):
         fs = self._make_fs()
@@ -5272,7 +5290,7 @@ class TestS3FileSystem:
     @pytest.mark.parametrize(("start", "end"), [(0, 0), (5, 3), (None, 0)])
     def test_cat_file_empty_range_missing(self, start, end):
         fs = self._make_fs()
-        fs._info = mock.MagicMock(side_effect=FileNotFoundError("bucket/missing"))
+        fs._info_entry = mock.MagicMock(side_effect=FileNotFoundError("bucket/missing"))
 
         # An empty range of a missing object is not read as empty.
         with pytest.raises(FileNotFoundError):
@@ -5282,7 +5300,9 @@ class TestS3FileSystem:
     @pytest.mark.parametrize(("start", "end"), [(-5, 3), (0, -1), (5, 5)])
     def test_cat_file_range_directory(self, start, end):
         fs = self._make_fs()
-        fs._info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "dir"))
+        fs._info_entry = mock.MagicMock(
+            return_value=S3FileSystem._directory_object("bucket", "dir")
+        )
 
         # A prefix is not read as an empty object.
         with pytest.raises(FileNotFoundError):
@@ -5301,7 +5321,7 @@ class TestS3FileSystem:
     def test_cat_file_range_key_ending_in_slash(self, start, end):
         fs, ranges = self._make_object_fs(b"0123456789")
         # info() of "dir/" describes the object "dir" when both exist.
-        fs.info.return_value = self._file_object("dir")
+        fs._info_entry.return_value = self._file_object("dir")
 
         # The size of "dir" is not used for the range of "dir/".
         with pytest.raises(FileNotFoundError):
@@ -5314,7 +5334,7 @@ class TestS3FileSystem:
         # which become local directories as with fsspec's get_file().
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", key))
+        fs._info_entry = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", key))
         rpath = f"s3://bucket/{key}" if key else "s3://bucket"
         lpath = tmp_path / "out" / "dir"
 
@@ -5329,7 +5349,7 @@ class TestS3FileSystem:
         # A missing object leaves no local file or parent directory.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs.info = mock.MagicMock(side_effect=FileNotFoundError("bucket/key"))
+        fs._info_entry = mock.MagicMock(side_effect=FileNotFoundError("bucket/key"))
 
         with pytest.raises(FileNotFoundError):
             fs.get_file("s3://bucket/key", str(tmp_path / "new" / "key"))
@@ -5373,7 +5393,7 @@ class TestS3FileSystem:
 
         fs.get_file(rpath, str(lpath), **kwargs)
         assert lpath.read_bytes() == b"data"
-        assert fs.info.call_count == 1
+        assert fs._info_entry.call_count == 1
 
     def test_get_file_file_like(self, tmp_path):
         # GH-974: a file-like lpath used to raise TypeError, and outfile was
@@ -5644,13 +5664,13 @@ class TestS3FileSystem:
         # condition on the ETag looked up when it starts, and the
         # parameters of the call, as the reads of open() do.
         fs, _ = self._make_object_fs(b"0123456789")
-        fs.info.return_value = S3Object(
+        fs._info_entry.return_value = S3Object(
             init={"Key": "key", "ETag": '"e"'},
             type=S3ObjectType.S3_OBJECT_TYPE_FILE,
             bucket="bucket",
             key="key",
         )
-        fs.info.return_value.size = 10
+        fs._info_entry.return_value.size = 10
 
         fs.get_file(
             "s3://bucket/key?versionId=v1",
@@ -5764,8 +5784,8 @@ class TestS3FileSystem:
         # ranges, also while its error is held. Their futures stayed in the
         # frame of the read, which the traceback of the error keeps.
         fs = self._make_fs()
-        fs.info = mock.MagicMock(return_value=self._file_object("key"))
-        fs.info.return_value.size = 64
+        fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+        fs._info_entry.return_value.size = 64
         read = []
         others_read = threading.Semaphore(0)
 
@@ -5794,8 +5814,8 @@ class TestS3FileSystem:
         # GH-1203: a failed parallel read stops the retries of the running
         # reads, whose backoff wait would take at least EVENT_TIMEOUT seconds.
         fs = self._make_fs()
-        fs.info = mock.MagicMock(return_value=self._file_object("key"))
-        fs.info.return_value.size = 32
+        fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+        fs._info_entry.return_value.size = 32
         operation = ThrottledOperation()
         throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
 
@@ -5819,8 +5839,8 @@ class TestS3FileSystem:
         # GH-1332 (B6): a failed parallel read raises once its running reads
         # have ended, which used to run on after it raised.
         fs = self._make_fs()
-        fs.info = mock.MagicMock(return_value=self._file_object("key"))
-        fs.info.return_value.size = 32
+        fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+        fs._info_entry.return_value.size = 32
         ended = []
         both_started = threading.Barrier(2, timeout=EVENT_TIMEOUT)
 
@@ -5845,8 +5865,8 @@ class TestS3FileSystem:
         # seconds.
         # The read that is queued when the interrupt comes is not sent.
         fs = self._make_fs()
-        fs.info = mock.MagicMock(return_value=self._file_object("key"))
-        fs.info.return_value.size = 48
+        fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+        fs._info_entry.return_value.size = 48
         operation = ThrottledOperation()
         throttled = retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
         read = []
@@ -5894,8 +5914,8 @@ class TestS3FileSystem:
         # the wait.
         def case(interrupt):
             fs = self._make_fs()
-            fs.info = mock.MagicMock(return_value=self._file_object("key"))
-            fs.info.return_value.size = 64
+            fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+            fs._info_entry.return_value.size = 64
             read = []
 
             def get_object(path, range_, **kwargs):
@@ -5941,8 +5961,8 @@ class TestS3FileSystem:
 
         def case(interrupt):
             fs = self._make_fs()
-            fs.info = mock.MagicMock(return_value=self._file_object("key"))
-            fs.info.return_value.size = 64
+            fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+            fs._info_entry.return_value.size = 64
             read = []
 
             def get_object(path, range_, **kwargs):
@@ -5987,8 +6007,8 @@ class TestS3FileSystem:
         # is interrupted, which forms a reference cycle with them, so the
         # data is freed by the cyclic garbage collector, not when they end.
         fs = self._make_fs()
-        fs.info = mock.MagicMock(return_value=self._file_object("key"))
-        fs.info.return_value.size = 64
+        fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+        fs._info_entry.return_value.size = 64
         read = []
         running = threading.Semaphore(0)
         release = threading.Event()
@@ -6029,8 +6049,8 @@ class TestS3FileSystem:
         # not started and frees the data of the others, also while the
         # interrupt is held, as a failed read does.
         fs = self._make_fs()
-        fs.info = mock.MagicMock(return_value=self._file_object("key"))
-        fs.info.return_value.size = 64
+        fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+        fs._info_entry.return_value.size = 64
         read = []
 
         entered = threading.Event()
@@ -6067,7 +6087,9 @@ class TestS3FileSystem:
     @pytest.mark.parametrize("cache_type", ["bytes", "all", "first"])
     def test_open_directory(self, cache_type):
         fs = self._make_fs()
-        fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "dir"))
+        fs._info_entry = mock.MagicMock(
+            return_value=S3FileSystem._directory_object("bucket", "dir")
+        )
 
         # A prefix is not read as an empty object.
         with pytest.raises(FileNotFoundError):
@@ -9054,7 +9076,7 @@ class TestS3File:
         fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE = 4
         fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE = 64
         fs.core.MULTIPART_UPLOAD_MAX_PARTS = S3Core.MULTIPART_UPLOAD_MAX_PARTS
-        fs.info.return_value = S3Object(
+        fs._info_entry.return_value = S3Object(
             init={"ContentLength": len(existing)},
             type=S3ObjectType.S3_OBJECT_TYPE_FILE,
             bucket="bucket",
@@ -9149,7 +9171,7 @@ class TestS3File:
         # source, and their ranges come from its size looked up then, not
         # from another lookup that could see a replaced object.
         fs = self._make_append_fs(existing)
-        fs.info.return_value = S3Object(
+        fs._info_entry.return_value = S3Object(
             init={"ContentLength": len(existing), "ETag": '"e"'},
             type=S3ObjectType.S3_OBJECT_TYPE_FILE,
             bucket="bucket",
@@ -9165,7 +9187,7 @@ class TestS3File:
             f.write(b"b")
 
         assert self._uploaded_object(fs, existing) == existing + b"b"
-        fs.info.assert_called_once()
+        fs._info_entry.assert_called_once()
         copies = fs.core.upload_part_copy.call_args_list
         assert copies
         # The ranges cover the object looked up, and nothing beyond it.

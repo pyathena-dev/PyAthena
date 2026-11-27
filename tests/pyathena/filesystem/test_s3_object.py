@@ -194,70 +194,50 @@ class TestS3Object:
         assert expected["metadata"] == {"k": "v"}
 
     @pytest.mark.parametrize(
-        ("summary", "expected"),
+        "listed",
         [
-            (
-                S3ObjectSummary(
-                    bucket="b",
-                    key="k",
-                    size=3,
-                    etag='"e"',
-                    last_modified=datetime(2026, 1, 1),
-                    storage_class="GLACIER",
-                ),
-                {
-                    "etag": '"e"',
-                    "storage_class": "GLACIER",
-                    "last_modified": datetime(2026, 1, 1),
-                    "content_length": 3,
-                    "size": 3,
-                    "type": "file",
-                    "bucket": "b",
-                    "key": "k",
-                    "name": "b/k",
-                },
-            ),
-            (
-                S3ObjectSummary(bucket="b", key="k"),
-                {
-                    "storage_class": "STANDARD",
-                    "content_length": 0,
-                    "size": 0,
-                    "type": "file",
-                    "bucket": "b",
-                    "key": "k",
-                    "name": "b/k",
-                },
-            ),
+            # In the order in which the entries were built from these fields.
+            {
+                "Key": "k",
+                "ETag": '"e"',
+                "Size": 3,
+                "StorageClass": "GLACIER",
+                "LastModified": datetime(2026, 1, 1),
+            },
+            {"Key": "k", "Size": 0},
+            {"Key": "k"},
         ],
-        ids=["full", "sparse"],
+        ids=["full", "empty", "sparse"],
     )
-    def test_from_summary(self, summary, expected):
-        actual = S3Object.from_summary(summary)
-        assert type(actual) is S3Object
-        assert actual == expected
+    def test_from_summary(self, listed):
+        # GH-1382: built without the constructor, with the fields, and their
+        # order, that the constructor gives the listed entry.
+        summary = S3ObjectSummary.from_response("b", listed)
+        expected = S3Object(
+            init={k: v for k, v in listed.items() if k != "Key"},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="b",
+            key="k",
+        )
+        assert list(S3Object.from_summary(summary).items()) == list(expected.items())
 
     @pytest.mark.parametrize(
         ("version_id", "name"),
         [("v1", "b/k?versionId=v1"), ("null", "b/k")],
     )
     def test_from_version(self, version_id, name):
-        version = S3ObjectVersion(
+        listed = {"Key": "k", "VersionId": version_id, "IsLatest": True, "Size": 3}
+        version = S3ObjectVersion(bucket="b", is_delete_marker=False, response=listed)
+        expected = S3Object(
+            init={"Size": 3},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
             bucket="b",
-            is_delete_marker=False,
-            response={"Key": "k", "VersionId": version_id, "IsLatest": True, "Size": 3},
+            key="k",
+            version_id=version_id,
+            is_latest=True,
         )
-        assert S3Object.from_version(version) == {
-            "storage_class": "STANDARD",
-            "content_length": 3,
-            "size": 3,
-            "type": "file",
-            "bucket": "b",
-            "key": "k",
-            "version_id": version_id,
-            "is_latest": True,
-            "name": name,
-        }
+        expected["name"] = name
+        assert list(S3Object.from_version(version).items()) == list(expected.items())
 
 
 class TestS3Metadata:
