@@ -3105,7 +3105,9 @@ class S3FileSystem(AbstractFileSystem):
         Args:
             rpath: Source S3 path, glob pattern, or list of them.
             lpath: Local destination path, or sequence of paths or file-like
-                objects when ``rpath`` is a list.
+                objects, one for each source, in the order of ``rpath`` when
+                it is a list, and of the expanded sources, which are sorted,
+                otherwise.
             recursive: Whether to copy the directories with their contents.
             callback: Progress callback. It and its branches for the files
                 are used from the threads that download them, one at a time.
@@ -3162,7 +3164,8 @@ class S3FileSystem(AbstractFileSystem):
         A local path is made absolute, with ``~`` expanded, as fsspec's
         ``get()`` makes one destination. A sequence of destinations becomes a
         list, which is paired with a list of sources in order, with its paths
-        made absolute in the same way and its file-like objects kept.
+        made absolute in the same way. File-like objects are kept, also when
+        they are ``os.PathLike``, as ``get_file()`` writes into them.
 
         Args:
             lpath: Local destination path, or sequence of paths or file-like
@@ -3171,9 +3174,14 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The absolute path, or the list of destinations.
         """
+        if isfilelike(lpath):
+            return lpath
         if isinstance(lpath, (str, os.PathLike)):
             return make_path_posix(lpath)
-        return [make_path_posix(p) if isinstance(p, (str, os.PathLike)) else p for p in lpath]
+        return [
+            make_path_posix(p) if isinstance(p, (str, os.PathLike)) and not isfilelike(p) else p
+            for p in lpath
+        ]
 
     def _checked_get_pairs(
         self, pairing: S3PathPairing, file_kwargs: Mapping[str, Any], **kwargs: Any

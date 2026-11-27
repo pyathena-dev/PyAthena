@@ -21,7 +21,7 @@ import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from concurrent.futures import CancelledError, Future, wait
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, BinaryIO, ClassVar, cast
+from typing import IO, TYPE_CHECKING, Any, ClassVar, cast
 
 from fsspec.asyn import (
     AbstractAsyncStreamedFile,
@@ -631,7 +631,7 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _get_file(
         self,
         rpath: str | os.PathLike[str] | S3Path,
-        lpath: str | os.PathLike[str] | BinaryIO,
+        lpath: str | os.PathLike[str] | IO[bytes] | None,
         callback=_DEFAULT_CALLBACK,
         **kwargs,
     ) -> None:
@@ -642,7 +642,8 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Args:
             rpath: S3 source path, or an ``S3Path``.
-            lpath: Local destination path, or a file-like object to write to.
+            lpath: Local destination path, or a file-like object to write to;
+                ignored, and may be None, with ``outfile``.
             callback: Progress callback.
             **kwargs: Passed to :meth:`S3FileSystem.get_file`, such as
                 ``outfile``.
@@ -902,15 +903,15 @@ class AioS3FileSystem(AsyncFileSystem):
         fsspec's ``_get()``; a cancellation cancels them and waits for them,
         as in :meth:`_copy`. As in :meth:`S3FileSystem.get`, each download
         gets ``max(1, max_workers // n)`` parallel range reads, or the
-        caller's smaller ``max_workers``, where ``n`` is the number of files,
-        or ``batch_size`` when it is positive and smaller. With ``outfile``,
-        the files are written to it one after another, in order, and ``n`` is
-        1.
+        caller's smaller ``max_workers``, where ``n`` is the number of paired
+        sources, directories included, or ``batch_size`` when it is positive
+        and smaller. With ``outfile``, the files are written to it one after
+        another, in order, and ``n`` is 1.
 
         Args:
             rpath: Source S3 path, glob pattern, or list of them.
-            lpath: Local destination path, or list of paths or file-like
-                objects when ``rpath`` is a list.
+            lpath: Local destination path, or sequence of paths or file-like
+                objects, as in :meth:`S3FileSystem.get`.
             recursive: Whether to copy the directories with their contents.
             callback: Progress callback.
             maxdepth: Maximum depth of a recursive copy.

@@ -2767,12 +2767,18 @@ class TestAioS3FileSystem:
         assert outfile.getvalue() == b"".join(p.encode() + b";" for p in sources)
 
     @pytest.mark.asyncio
-    async def test_get_file_like_destinations(self, tmp_path):
+    @pytest.mark.parametrize("path_like", [False, True])
+    async def test_get_file_like_destinations(self, tmp_path, path_like):
         # GH-1425: as in S3FileSystem.get(), a list of destinations may hold
-        # file-like objects, which the files are written into, and the
-        # parent directories of a local path are created. _get() created the
-        # parent directory of every destination first, which raised
-        # TypeError for a file-like object.
+        # file-like objects, which the files are written into, also when
+        # they are os.PathLike, and the parent directories of a local path
+        # are created. _get() created the parent directory of every
+        # destination first, which raised TypeError for a file-like object,
+        # and wrote to the path of an os.PathLike one.
+        class PathLikeStream(io.BytesIO):
+            def __fspath__(self):
+                return str(tmp_path / "stream")
+
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
@@ -2788,13 +2794,34 @@ class TestAioS3FileSystem:
             return response
 
         fs._sync_fs._call = fs._sync_fs._core.call = call
-        stream = io.BytesIO()
+        stream = PathLikeStream() if path_like else io.BytesIO()
 
         await await_bounded(
             fs._get(["s3://bucket/a", "s3://bucket/b"], [stream, str(tmp_path / "new" / "b")])
         )
         assert stream.getvalue() == b"aa"
         assert (tmp_path / "new" / "b").read_bytes() == b"bb"
+
+    @pytest.mark.asyncio
+    async def test_get_uncreatable_directory_fails_first(self, tmp_path):
+        # GH-1425: as in fsspec's _get(), the parent directories of the local
+        # paths are created before any download, so a directory that cannot
+        # be created fails before the other files are downloaded.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, {"a", "b"})
+        (tmp_path / "file").write_bytes(b"")
+
+        with pytest.raises(FileExistsError):
+            await await_bounded(
+                fs._get(
+                    ["s3://bucket/a", "s3://bucket/b"],
+                    [str(tmp_path / "a"), str(tmp_path / "file" / "b")],
+                    batch_size=1,
+                )
+            )
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["file"]
 
     @pytest.mark.asyncio
     async def test_get_outfile_creates_no_directories(self, tmp_path):
