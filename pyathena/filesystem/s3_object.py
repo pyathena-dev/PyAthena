@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from collections.abc import Iterator, Mapping, MutableMapping
+from collections.abc import Iterator, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -102,20 +102,21 @@ class S3StorageClass:
     S3_STORAGE_CLASS_DIRECTORY: str = "DIRECTORY"
 
 
-class S3Object(MutableMapping[str, Any]):
+class S3Object(dict[str, Any]):
     """Represents an S3 object with metadata and filesystem-like properties.
 
-    This class provides a dictionary-like interface to S3 object metadata,
-    making it easier to work with S3 objects in filesystem operations.
-    It handles the mapping between S3 API field names and more pythonic
-    property names.
+    A dictionary of the fields of an object, a directory or a bucket, keyed
+    by their property names (e.g., ``content_type``), as the filesystem
+    returns them from ``info()`` and the listings. Only the constructor maps
+    S3 API field names (e.g., ``ContentType``) to the property names;
+    ``update()``, ``setdefault()`` and ``|=`` store keys as given, as on a
+    dictionary.
 
-    The object supports both dictionary-style access and property-style
-    access to metadata fields like content type, storage class, encryption
-    settings, and object lock configurations. Dictionary-style access
-    behaves like a dictionary, so a missing key raises KeyError. Property-style
-    access returns None for a known field that the object does not have,
-    and raises AttributeError for any other missing name.
+    The fields can also be read and set as attributes. Reading an absent
+    field returns None if it is a known field, such as ``content_type``, and
+    raises AttributeError otherwise, while dictionary-style access raises
+    KeyError for any absent key. Setting or deleting an attribute sets or
+    deletes the field of that name.
 
     Example:
         >>> s3_obj = S3Object({"ContentType": "text/csv", "ContentLength": 1024})
@@ -128,9 +129,11 @@ class S3Object(MutableMapping[str, Any]):
         representing S3 objects in filesystem operations.
     """
 
+    __slots__ = ()
+
     def __init__(
         self,
-        init: dict[str, Any],
+        init: Mapping[str, Any],
         **kwargs,
     ) -> None:
         """Initialize the object from an S3 API response.
@@ -149,99 +152,90 @@ class S3Object(MutableMapping[str, Any]):
                 ``bucket``, ``key`` and ``version_id``. S3 API field names
                 are stored under their property names.
         """
-        filtered = {}
+        super().__init__()
         for k, v in init.items():
-            if k not in _API_FIELD_TO_S3_OBJECT_PROPERTY:
-                continue
-            filtered[_API_FIELD_TO_S3_OBJECT_PROPERTY[k]] = v
+            field = _API_FIELD_TO_S3_OBJECT_PROPERTY.get(k)
+            if field is not None:
+                self[field] = v
         if "StorageClass" not in init:
             # https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html#API_HeadObject_ResponseSyntax
             # Amazon S3 returns this header for all objects except for
             # S3 Standard storage class objects.
-            filtered[_API_FIELD_TO_S3_OBJECT_PROPERTY["StorageClass"]] = (
-                S3StorageClass.S3_STORAGE_CLASS_STANDARD
-            )
-        super().update(filtered)
+            self["storage_class"] = S3StorageClass.S3_STORAGE_CLASS_STANDARD
         if "Size" in init:
-            self.content_length = init["Size"]
-            self.size = init["Size"]
+            self["content_length"] = init["Size"]
+            self["size"] = init["Size"]
         elif "ContentLength" in init:
-            self.size = init["ContentLength"]
+            self["size"] = init["ContentLength"]
         else:
-            self.content_length = 0
-            self.size = 0
-        super().update({_API_FIELD_TO_S3_OBJECT_PROPERTY.get(k, k): v for k, v in kwargs.items()})
-        if self.get("key") is None:
-            self.name = self.get("bucket")
-        else:
-            self.name = f"{self.get('bucket')}/{self.get('key')}"
-
-    @override
-    def get(self, key: str, default: Any = None) -> Any:
-        return super().get(key, default)
-
-    @override
-    def __getitem__(self, item: str) -> Any:
-        return self.__dict__[item]
+            self["content_length"] = 0
+            self["size"] = 0
+        for k, v in kwargs.items():
+            self[_API_FIELD_TO_S3_OBJECT_PROPERTY.get(k, k)] = v
+        key = self.get("key")
+        self["name"] = self.get("bucket") if key is None else f"{self.get('bucket')}/{key}"
 
     def __getattr__(self, item: str) -> Any:
-        """Return None for a known field that the object does not have.
+        """Return the field of a name, or None for an absent known field.
 
-        Called only when normal attribute lookup fails, so fields that the
-        object has are returned without reaching this method.
+        Called only when normal attribute lookup fails, so the methods of the
+        dictionary are found before the fields of the same names.
 
         Args:
             item: The attribute name.
 
         Returns:
-            None, if ``item`` is a known S3 object field.
+            The field, or None if ``item`` is an absent known S3 object field.
 
         Raises:
-            AttributeError: If ``item`` is not a known S3 object field.
+            AttributeError: If ``item`` is neither a field of the object nor
+                a known S3 object field.
         """
-        if item in _S3_OBJECT_FIELDS:
-            return None
-        raise AttributeError(f"{type(self).__name__!r} object has no attribute {item!r}")
-
-    @override
-    def __setitem__(self, key: str, value: Any) -> None:
-        self.__dict__[key] = value
+        try:
+            return self[item]
+        except KeyError:
+            if item in _S3_OBJECT_FIELDS:
+                return None
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute {item!r}"
+            ) from None
 
     @override
     def __setattr__(self, attr: str, value: Any) -> None:
         self[attr] = value
 
     @override
-    def __delitem__(self, key: str) -> None:
-        del self.__dict__[key]
+    def __delattr__(self, attr: str) -> None:
+        try:
+            del self[attr]
+        except KeyError:
+            raise AttributeError(
+                f"{type(self).__name__!r} object has no attribute {attr!r}"
+            ) from None
 
     @override
-    def __iter__(self) -> Iterator[str]:
-        return iter(self.__dict__.keys())
+    def copy(self) -> S3Object:  # type: ignore[override]
+        """Return a copy of the object, with a copy of its ``metadata`` mapping.
 
-    @override
-    def __len__(self) -> int:
-        return len(self.__dict__)
-
-    @override
-    def __str__(self):
-        return str(self.__dict__)
-
-    def copy(self) -> S3Object:
-        """Return a shallow copy of the object.
+        The other fields are shared with the object.
 
         Returns:
             A new S3Object with the same fields.
         """
-        return copy.copy(self)
+        entry = type(self).__new__(type(self))
+        entry.update(self)
+        metadata = entry.get("metadata")
+        if metadata is not None:
+            entry["metadata"] = copy.copy(metadata)
+        return entry
 
     def to_dict(self) -> dict[str, Any]:
         """Convert S3Object to dictionary representation.
 
         Returns:
-            Deep copy of the object's attributes as a dictionary.
+            Deep copy of the object's fields as a dictionary.
         """
-        return copy.deepcopy(self.__dict__)
+        return copy.deepcopy(dict(self))
 
     def to_api_repr(self) -> dict[str, Any]:
         """Convert the object metadata to S3 API request parameters.
@@ -262,6 +256,49 @@ class S3Object(MutableMapping[str, Any]):
         return fields
 
     @classmethod
+    def _from_listing(
+        cls,
+        bucket: str,
+        key: str,
+        size: int | None,
+        etag: str | None,
+        last_modified: datetime | None,
+        storage_class: str | None,
+    ) -> S3Object:
+        """Build the file entry of a listed object, with the fields that the constructor sets.
+
+        The entry has the fields, in the order, that the constructor gives a
+        listing entry of ``ETag``, ``Size``, ``StorageClass`` and
+        ``LastModified`` that are not None, with the type, bucket and key.
+
+        Args:
+            bucket: The bucket of the object.
+            key: The key of the object.
+            size: The listed size, or None.
+            etag: The listed ETag, or None.
+            last_modified: The listed last modified time, or None.
+            storage_class: The listed storage class, or None.
+
+        Returns:
+            The file entry, named ``bucket/key``.
+        """
+        entry = cls.__new__(cls)
+        if etag is not None:
+            entry["etag"] = etag
+        if storage_class is not None:
+            entry["storage_class"] = storage_class
+        if last_modified is not None:
+            entry["last_modified"] = last_modified
+        if storage_class is None:
+            entry["storage_class"] = S3StorageClass.S3_STORAGE_CLASS_STANDARD
+        entry["content_length"] = entry["size"] = 0 if size is None else size
+        entry["type"] = S3ObjectType.S3_OBJECT_TYPE_FILE
+        entry["bucket"] = bucket
+        entry["key"] = key
+        entry["name"] = f"{bucket}/{key}"
+        return entry
+
+    @classmethod
     def from_summary(cls, summary: S3ObjectSummary) -> S3Object:
         """Build the file entry of an object listed by ListObjectsV2.
 
@@ -271,20 +308,13 @@ class S3Object(MutableMapping[str, Any]):
         Returns:
             The file entry, named ``bucket/key``.
         """
-        return cls(
-            init={
-                k: v
-                for k, v in {
-                    "ETag": summary.etag,
-                    "Size": summary.size,
-                    "StorageClass": summary.storage_class,
-                    "LastModified": summary.last_modified,
-                }.items()
-                if v is not None
-            },
-            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
-            bucket=summary.bucket,
-            key=summary.key,
+        return cls._from_listing(
+            summary.bucket,
+            summary.key,
+            summary.size,
+            summary.etag,
+            summary.last_modified,
+            summary.storage_class,
         )
 
     @classmethod
@@ -301,26 +331,23 @@ class S3Object(MutableMapping[str, Any]):
         Returns:
             The file entry.
         """
-        file = cls(
-            init={
-                k: v
-                for k, v in {
-                    "ETag": version.etag,
-                    "Size": version.size,
-                    "StorageClass": version.storage_class,
-                    "LastModified": version.last_modified,
-                }.items()
-                if v is not None
-            },
-            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
-            bucket=version.bucket,
-            key=version.key,
-            version_id=version.version_id,
-            is_latest=version.is_latest,
+        entry = cls._from_listing(
+            version.bucket,
+            version.key,
+            version.size,
+            version.etag,
+            version.last_modified,
+            version.storage_class,
         )
-        if version.version_id != "null":
-            file.name = str(S3Path(version.bucket, version.key, version.version_id))
-        return file
+        name = entry.pop("name")
+        entry["version_id"] = version.version_id
+        entry["is_latest"] = version.is_latest
+        entry["name"] = (
+            name
+            if version.version_id == "null"
+            else str(S3Path(version.bucket, version.key, version.version_id))
+        )
+        return entry
 
     @classmethod
     def from_metadata(cls, metadata: S3Metadata, version_id: str | None = None) -> S3Object:

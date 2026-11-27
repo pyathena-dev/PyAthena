@@ -4,6 +4,7 @@ import asyncio
 import bz2
 import contextlib
 import contextvars
+import copy
 import errno
 import functools
 import gc
@@ -210,7 +211,7 @@ class TestS3FileSystem:
         fs.dircache["bucket/key"] = obj
         fs._call.side_effect = FileNotFoundError
 
-        assert fs.info("s3://bucket/key") is obj
+        assert fs.info("s3://bucket/key") == obj
         fs._call.assert_not_called()
         # A child path of a cached object entry is looked up with requests
         # (fsspec's implementation assumes every cache value is a listing and
@@ -929,6 +930,45 @@ class TestS3FileSystem:
         assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
         assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
         assert fs.find("s3://bucket/dir") == ["bucket/dir/sub/file"]
+        fs._call.assert_not_called()
+
+    @pytest.mark.parametrize("method", ["info", "ls", "find", "glob", "walk"])
+    def test_returned_entries_are_copies(self, method):
+        # GH-1382: changing a returned entry, or its metadata, does not change
+        # the cached entry, which the next call returns again.
+        fs = self._make_fs()
+        file = S3Object(
+            init={"Metadata": {"k": "v"}},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="dir/a",
+        )
+        fs.dircache[("bucket/dir", "/")] = [file, fs._directory_object("bucket", "dir/sub")]
+        fs.dircache[("bucket/dir", "")] = [file]
+        fs.dircache[("bucket/dir/sub", "/")] = [self._file_object("dir/sub/b")]
+        expected = copy.deepcopy(file)
+
+        def entries():
+            if method == "info":
+                return [fs.info("bucket/dir/a")]
+            if method == "ls":
+                return fs.ls("bucket/dir", detail=True)
+            if method == "find":
+                return list(fs.find("bucket/dir", detail=True).values())
+            if method == "glob":
+                return list(fs.glob("bucket/dir/*", detail=True).values())
+            return [
+                entry
+                for _, dirs, files in fs.walk("bucket/dir", detail=True)
+                for entry in (*dirs.values(), *files.values())
+            ]
+
+        for entry in entries():
+            entry["size"] = 999
+            if "metadata" in entry:
+                entry["metadata"]["k"] = "changed"
+        assert file == expected
+        assert [e for e in entries() if e["name"] == "bucket/dir/a"] == [expected]
         fs._call.assert_not_called()
 
     def test_find_refresh_bypasses_cached_listings(self):
@@ -2390,7 +2430,7 @@ class TestS3FileSystem:
         # GH-1008: recursive copy() passes the directories, which used to be
         # sent to CopyObject and fail with NoSuchKey.
         fs = self._make_fs()
-        fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "src"))
+        fs._info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "src"))
         fs.core.copy_object = mock.MagicMock()
 
         fs.cp_file("s3://bucket/src", "s3://bucket/dst")
@@ -3693,8 +3733,8 @@ class TestS3FileSystem:
         # GH-973: a multipart copy that fails to copy an annotation has
         # written the destination, so its cached entries are removed.
         fs = self._make_fs()
-        fs.info = mock.MagicMock(return_value=self._file_object("src"))
-        fs.info.return_value.size = S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE + 1
+        fs._info = mock.MagicMock(return_value=self._file_object("src"))
+        fs._info.return_value.size = S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE + 1
         fs._copy_object_with_multipart_upload = mock.MagicMock(side_effect=PermissionError)
         fs.dircache["bucket/dst"] = [self._file_object("dst")]
 
@@ -5084,8 +5124,8 @@ class TestS3FileSystem:
     )
     def test_cat_file_version_id(self, path, expected):
         fs = self._make_fs()
-        fs.info = mock.MagicMock(return_value=self._file_object("key"))
-        fs.info.return_value.size = 10
+        fs._info = mock.MagicMock(return_value=self._file_object("key"))
+        fs._info.return_value.size = 10
 
         fs._call.return_value = {"Body": io.BytesIO(b"data")}
         assert fs.cat_file(path, version_id="v1") == b"data"
@@ -5097,7 +5137,7 @@ class TestS3FileSystem:
         fs._call.reset_mock()
         fs._call.return_value = {"Body": io.BytesIO(b"ta")}
         assert fs.cat_file(path, start=-8, end=-6, version_id="v1") == b"ta"
-        fs.info.assert_called_once_with(path, version_id=expected)
+        fs._info.assert_called_once_with(path, version_id=expected)
         fs._call.assert_called_once_with(
             fs._client.get_object,
             Bucket="bucket",
@@ -5119,7 +5159,7 @@ class TestS3FileSystem:
         # The real request function, on the client mock.
         fs._core.call = functools.partial(S3Core.call, fs._core)
         fs._call = functools.partial(S3FileSystem._call, fs)
-        fs.info = mock.MagicMock(return_value=self._file_object("key"))
+        fs.info = fs._info = mock.MagicMock(return_value=self._file_object("key"))
         fs.info.return_value.size = len(data)
         ranges = []
 
@@ -5232,7 +5272,7 @@ class TestS3FileSystem:
     @pytest.mark.parametrize(("start", "end"), [(0, 0), (5, 3), (None, 0)])
     def test_cat_file_empty_range_missing(self, start, end):
         fs = self._make_fs()
-        fs.info = mock.MagicMock(side_effect=FileNotFoundError("bucket/missing"))
+        fs._info = mock.MagicMock(side_effect=FileNotFoundError("bucket/missing"))
 
         # An empty range of a missing object is not read as empty.
         with pytest.raises(FileNotFoundError):
@@ -5242,7 +5282,7 @@ class TestS3FileSystem:
     @pytest.mark.parametrize(("start", "end"), [(-5, 3), (0, -1), (5, 5)])
     def test_cat_file_range_directory(self, start, end):
         fs = self._make_fs()
-        fs.info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "dir"))
+        fs._info = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", "dir"))
 
         # A prefix is not read as an empty object.
         with pytest.raises(FileNotFoundError):

@@ -1477,7 +1477,7 @@ class AioS3FileSystem(AsyncFileSystem):
             self._sync_fs._find, path, maxdepth=maxdepth, withdirs=withdirs, **kwargs
         )
         if detail:
-            return {f.name: f for f in files}
+            return {f.name: f.copy() for f in files}
         return [f.name for f in files]
 
     async def _glob(self, path, maxdepth=None, **kwargs):
@@ -1597,7 +1597,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 on_error(e)
             yield path, {} if detail else [], {} if detail else []
             return
-        dirs, files = self._sync_fs._walk_entries(path, listing)
+        dirs, files = self._sync_fs._walk_entries(path, listing, detail)
         names: Any = dirs if detail else list(dirs)
         listed: Any = files if detail else list(files)
 

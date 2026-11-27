@@ -2,6 +2,7 @@ import array
 import asyncio
 import collections
 import contextlib
+import copy
 import gc
 import gzip
 import io
@@ -2892,6 +2893,48 @@ class TestAioS3FileSystem:
             }
         ]
         assert store == {"b", "d/b"}
+
+    @pytest.mark.parametrize("method", ["_info", "_ls", "_find", "_glob", "_walk"])
+    @pytest.mark.asyncio
+    async def test_returned_entries_are_copies(self, method):
+        # GH-1382: changing a returned entry, or its metadata, does not change
+        # the cached entry, which the next call returns again.
+        fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs._call = sync_fs._core.call = mock.MagicMock()
+        file = S3Object(
+            init={"Metadata": {"k": "v"}},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="dir/a",
+        )
+        fs.dircache[("bucket/dir", "/")] = [file, sync_fs._directory_object("bucket", "dir/sub")]
+        fs.dircache[("bucket/dir", "")] = [file]
+        fs.dircache[("bucket/dir/sub", "/")] = []
+        expected = copy.deepcopy(file)
+
+        async def entries():
+            if method == "_info":
+                return [await fs._info("bucket/dir/a")]
+            if method == "_ls":
+                return await fs._ls("bucket/dir", detail=True)
+            if method == "_find":
+                return list((await fs._find("bucket/dir", detail=True)).values())
+            if method == "_glob":
+                return list((await fs._glob("bucket/dir/*", detail=True)).values())
+            return [
+                entry
+                async for _, dirs, files in fs._walk("bucket/dir", detail=True)
+                for entry in (*dirs.values(), *files.values())
+            ]
+
+        for entry in await entries():
+            entry["size"] = 999
+            if "metadata" in entry:
+                entry["metadata"]["k"] = "changed"
+        assert file == expected
+        assert [e for e in await entries() if e["name"] == "bucket/dir/a"] == [expected]
+        sync_fs._call.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_expand_path_glob_lists_stem_prefix(self):

@@ -11,6 +11,7 @@ from datetime import datetime
 
 import pytest
 
+from pyathena.filesystem.s3_core import S3ObjectSummary
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
     S3Metadata,
@@ -129,6 +130,16 @@ class TestS3Object:
         assert actual.pop("version_id", "default") == "default"
         assert actual.setdefault("version_id", "v1") == "v1"
         assert actual["version_id"] == "v1"
+        # GH-1382: a dictionary, whose fields may be named as its methods.
+        assert isinstance(actual, dict)
+        actual["keys"] = 1
+        actual["get"] = 2
+        assert dict(actual)["keys"] == 1
+        assert actual.get("get") == 2
+        # Only the constructor maps the S3 API names.
+        actual.update({"ContentType": "text/csv"})
+        assert actual["ContentType"] == "text/csv"
+        assert actual.content_type is None
 
     def test_attribute(self):
         actual = self._file_object()
@@ -141,6 +152,14 @@ class TestS3Object:
         with pytest.raises(AttributeError):
             _ = actual.unknown
         assert not hasattr(actual, "__setstate__")
+        # Attributes set and delete the fields, also of unknown names.
+        actual.unknown = 1
+        assert actual["unknown"] == 1
+        assert actual.unknown == 1
+        del actual.unknown
+        assert "unknown" not in actual
+        with pytest.raises(AttributeError):
+            del actual.unknown
 
     @pytest.mark.parametrize(
         "func",
@@ -161,6 +180,84 @@ class TestS3Object:
         assert actual.name == "test-bucket/path/to/object"
         actual["name"] = "renamed"
         assert expected.name == "test-bucket/path/to/object"
+
+    def test_copy_method_copies_metadata(self):
+        # GH-1382: the user metadata of a copy is its own.
+        expected = S3Object(
+            init={"Metadata": {"k": "v"}},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="test-bucket",
+            key="path/to/object",
+        )
+        actual = expected.copy()
+        actual["metadata"]["k"] = "changed"
+        assert expected["metadata"] == {"k": "v"}
+
+    @pytest.mark.parametrize(
+        ("summary", "expected"),
+        [
+            (
+                S3ObjectSummary(
+                    bucket="b",
+                    key="k",
+                    size=3,
+                    etag='"e"',
+                    last_modified=datetime(2026, 1, 1),
+                    storage_class="GLACIER",
+                ),
+                {
+                    "etag": '"e"',
+                    "storage_class": "GLACIER",
+                    "last_modified": datetime(2026, 1, 1),
+                    "content_length": 3,
+                    "size": 3,
+                    "type": "file",
+                    "bucket": "b",
+                    "key": "k",
+                    "name": "b/k",
+                },
+            ),
+            (
+                S3ObjectSummary(bucket="b", key="k"),
+                {
+                    "storage_class": "STANDARD",
+                    "content_length": 0,
+                    "size": 0,
+                    "type": "file",
+                    "bucket": "b",
+                    "key": "k",
+                    "name": "b/k",
+                },
+            ),
+        ],
+        ids=["full", "sparse"],
+    )
+    def test_from_summary(self, summary, expected):
+        actual = S3Object.from_summary(summary)
+        assert type(actual) is S3Object
+        assert actual == expected
+
+    @pytest.mark.parametrize(
+        ("version_id", "name"),
+        [("v1", "b/k?versionId=v1"), ("null", "b/k")],
+    )
+    def test_from_version(self, version_id, name):
+        version = S3ObjectVersion(
+            bucket="b",
+            is_delete_marker=False,
+            response={"Key": "k", "VersionId": version_id, "IsLatest": True, "Size": 3},
+        )
+        assert S3Object.from_version(version) == {
+            "storage_class": "STANDARD",
+            "content_length": 3,
+            "size": 3,
+            "type": "file",
+            "bucket": "b",
+            "key": "k",
+            "version_id": version_id,
+            "is_latest": True,
+            "name": name,
+        }
 
 
 class TestS3Metadata:
