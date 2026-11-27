@@ -269,7 +269,7 @@ class TestAioS3FileSystem:
     async def test_cp_file_failed_multipart_copy_invalidates_cache(self):
         # GH-973: see TestS3FileSystem.test_cp_file_failed_multipart_copy_invalidates_cache.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
-        fs._info_entry = mock.AsyncMock(
+        fs._sync_fs._info_entry = mock.MagicMock(
             return_value=S3Object(
                 init={"ContentLength": S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE + 1},
                 type=S3ObjectType.S3_OBJECT_TYPE_FILE,
@@ -2868,7 +2868,7 @@ class TestAioS3FileSystem:
         # GH-1008: recursive copy() passes the directories, which used to be
         # sent to CopyObject and fail with NoSuchKey.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
-        fs._info_entry = mock.AsyncMock(
+        fs._sync_fs._info_entry = mock.MagicMock(
             return_value=S3FileSystem._directory_object("bucket", "src")
         )
         fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
@@ -3081,7 +3081,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        fs._info_entry = mock.AsyncMock(
+        fs._sync_fs._info_entry = mock.MagicMock(
             return_value=S3Object(
                 init={"ContentLength": size},
                 type=S3ObjectType.S3_OBJECT_TYPE_FILE,
