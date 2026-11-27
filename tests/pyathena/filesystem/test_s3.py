@@ -3330,6 +3330,27 @@ class TestS3FileSystem:
             fs.get(["s3://bucket/a", "s3://bucket/b"], [stream, str(tmp_path / "a")])
         fs.get_file.assert_not_called()
 
+    @pytest.mark.parametrize("stream", ["devnull", "spooled"])
+    def test_get_streams_of_no_regular_file(self, stream):
+        # GH-1425: only the streams that open() returns for a regular file
+        # are compared by their file. Two streams of a device do not
+        # conflict, and the check does not roll a spooled temporary file
+        # over to a file on disk, as asking it for a file descriptor does.
+        fs = self._make_fs()
+        fs.get_file = mock.MagicMock()
+        with contextlib.ExitStack() as stack:
+            streams = [
+                stack.enter_context(
+                    open(os.devnull, "wb")  # noqa: SIM115
+                    if stream == "devnull"
+                    else tempfile.SpooledTemporaryFile()  # noqa: SIM115
+                )
+                for _ in range(2)
+            ]
+            fs.get(["s3://bucket/a", "s3://bucket/b"], streams)
+            assert fs.get_file.call_count == 2
+            assert not any(getattr(s, "_rolled", False) for s in streams)
+
     def test_get_destination_sequence(self, tmp_path, monkeypatch):
         # GH-1425: as with AioS3FileSystem.get(), a tuple of destinations is
         # paired with a list of sources in order, as a list is, and its paths

@@ -52,7 +52,6 @@ from pyathena.filesystem.s3_object import (
     S3ObjectVersion,
 )
 from pyathena.filesystem.s3_path import S3Path
-from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.filesystem.s3_retry import retries_stopped
 from pyathena.filesystem.s3_writer import _S3WriteSession, _S3WriteState
 from pyathena.filesystem.util import create_in_thread, override
@@ -927,10 +926,11 @@ class AioS3FileSystem(AsyncFileSystem):
         rpath = self._sync_fs._stringify_paths(rpath)
         pairs = await self._thread_pool.run(
             self._sync_fs._checked_get_pairs,
-            S3PathPairing(
-                rpath, self._sync_fs._local_root(lpath), recursive=recursive, maxdepth=maxdepth
-            ),
+            rpath,
+            lpath,
             kwargs,
+            recursive=recursive,
+            maxdepth=maxdepth,
             **kwargs,
         )
         if not pairs:
