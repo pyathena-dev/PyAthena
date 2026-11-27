@@ -2658,8 +2658,9 @@ class TestAioS3FileSystem:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("rpath", ["s3://bucket/key", ["s3://bucket/key"]])
     async def test_get_relative_destination_list(self, tmp_path, monkeypatch, rpath):
-        # GH-1323: relative local paths in a list are downloaded under the
-        # working directory, as with S3FileSystem.get().
+        # GH-1323: relative local paths in a list are made absolute, as
+        # fsspec's _get() does for one source, so that it can create their
+        # parent directories.
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )

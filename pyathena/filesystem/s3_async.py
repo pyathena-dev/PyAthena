@@ -33,7 +33,7 @@ from fsspec.asyn import (
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
 from fsspec.implementations.local import make_path_posix
-from fsspec.utils import stringify_path
+from fsspec.utils import isfilelike, stringify_path
 
 from pyathena.filesystem.s3 import (
     _UNPICKLABLE_CLIENT_MESSAGE,
@@ -924,7 +924,15 @@ class AioS3FileSystem(AsyncFileSystem):
                 ``lpath``, or two downloads write the same local file.
         """
         rpath = self._sync_fs._stringify_paths(rpath)
-        root = make_path_posix(lpath) if isinstance(lpath, (str, os.PathLike)) else lpath
+        # Local paths are made absolute, as fsspec's _get() does, so that
+        # it can create their parent directories, and a sequence of them a
+        # list, which pairs them with the sources in order. File-like
+        # objects are kept for _get_file().
+        root = (
+            make_path_posix(lpath)
+            if isinstance(lpath, (str, os.PathLike))
+            else [make_path_posix(p) if isinstance(p, (str, os.PathLike)) else p for p in lpath]
+        )
         pairs = await self._thread_pool.run(
             self._sync_fs._checked_get_pairs,
             S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
@@ -943,6 +951,13 @@ class AioS3FileSystem(AsyncFileSystem):
         batch_size = kwargs.get("batch_size", self.batch_size)
         if batch_size is not None and batch_size > 0:
             concurrency = min(concurrency, batch_size)
+        if kwargs.get("outfile") is None:
+            # As fsspec's _get() for lists of paths, before any download.
+            # _get_file() writes into a file-like destination instead, as
+            # into an outfile, so no directory is created for them.
+            for _, lp in pairs:
+                if not isfilelike(lp):
+                    os.makedirs(os.path.dirname(cast(str, lp)), exist_ok=True)
         await _S3BatchTasks().run(
             self._transfer_pairs(
                 self._get_file, pairs, callback, **self._sync_fs._batch_kwargs(concurrency, kwargs)
