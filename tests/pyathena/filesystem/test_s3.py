@@ -9095,16 +9095,18 @@ class TestS3File:
         return fs
 
     def test_append_keeps_a_copy_of_the_object(self):
-        # GH-1382: the entry of the appended object, which the file keeps as
-        # its details and whose metadata it sends, is a copy of the looked up
-        # one.
+        # GH-1382: the details of an appending file and the metadata that it
+        # sends are copies of the looked up entry, apart from each other.
         fs = self._make_append_fs(b"abc")
         looked_up = fs._info_entry.return_value
         looked_up["metadata"] = {"k": "v"}
 
         with S3File(fs, "s3://bucket/key.txt", mode="ab", block_size=16) as f:
             f.details["size"] = 999
-            f.s3_additional_kwargs["Metadata"]["k"] = "changed"
+            f.details["metadata"]["k"] = "details"
+            assert f.s3_additional_kwargs["Metadata"] == {"k": "v"}
+            f.s3_additional_kwargs["Metadata"]["k"] = "sent"
+            assert f.details["metadata"] == {"k": "details"}
             f.write(b"d")
         assert looked_up["size"] == 3
         assert looked_up["metadata"] == {"k": "v"}

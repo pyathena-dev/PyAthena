@@ -8,6 +8,7 @@
 import copy
 import pickle
 from datetime import datetime
+from types import MappingProxyType
 
 import pytest
 
@@ -192,6 +193,9 @@ class TestS3Object:
         actual = expected.copy()
         actual["metadata"]["k"] = "changed"
         assert expected["metadata"] == {"k": "v"}
+        # Also a mapping that copy.copy() cannot copy.
+        expected["metadata"] = MappingProxyType({"k": "v"})
+        assert expected.copy()["metadata"] == {"k": "v"}
 
     @pytest.mark.parametrize(
         "listed",
