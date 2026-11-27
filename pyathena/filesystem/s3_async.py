@@ -1199,7 +1199,7 @@ class AioS3FileSystem(AsyncFileSystem):
         )
         sizes: dict[str, int] = {}
         for _, target in found:
-            info = await self._info(target)
+            info = await self._thread_pool.run(self._sync_fs._info_entry, target)
             sizes[info["name"]] = info["size"]
         return sum(sizes.values()) if total else sizes
 
@@ -1305,7 +1305,9 @@ class AioS3FileSystem(AsyncFileSystem):
 
         # Looked up with the parameters that authorize the access to the
         # source; see S3FileSystem._copy_file.
-        info1 = await self._info(path1, **self.core.copy_source_params(kwargs))
+        info1 = await self._thread_pool.run(
+            self._sync_fs._info_entry, path1, **self.core.copy_source_params(kwargs)
+        )
         if info1.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
             # Recursive copy() passes the directories too; see
             # S3FileSystem.cp_file.
@@ -1472,13 +1474,9 @@ class AioS3FileSystem(AsyncFileSystem):
         withdirs: bool = False,
         **kwargs,
     ) -> dict[str, S3Object] | list[str]:
-        detail = kwargs.pop("detail", False)
-        files = await self._thread_pool.run(
-            self._sync_fs._find, path, maxdepth=maxdepth, withdirs=withdirs, **kwargs
+        return await self._thread_pool.run(
+            self._sync_fs.find, path, maxdepth=maxdepth, withdirs=withdirs, **kwargs
         )
-        if detail:
-            return {f.name: f for f in files}
-        return [f.name for f in files]
 
     async def _glob(self, path, maxdepth=None, **kwargs):
         """Find the paths that a glob pattern matches, as fsspec's ``_glob()`` does.
@@ -1598,8 +1596,9 @@ class AioS3FileSystem(AsyncFileSystem):
             yield path, {} if detail else [], {} if detail else []
             return
         dirs, files = self._sync_fs._walk_entries(path, listing)
-        names: Any = dirs if detail else list(dirs)
-        listed: Any = files if detail else list(files)
+        # The copies are yielded, and the listed entries are walked.
+        names: Any = {k: v.copy() for k, v in dirs.items()} if detail else list(dirs)
+        listed: Any = {k: v.copy() for k, v in files.items()} if detail else list(files)
 
         if topdown:
             yield path, names, listed

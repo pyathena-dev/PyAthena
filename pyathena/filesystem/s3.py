@@ -301,7 +301,7 @@ class _S3TreeListing:
         """
         directory = self._directories.get(path)
         if directory is None:
-            files = cast(list[S3Object], self._fs.ls(path, detail=True))
+            files = list(self._fs._ls_entries(path))
         else:
             files = self._fs._ls_directory(directory)
         for f in files:
@@ -1043,7 +1043,8 @@ class S3FileSystem(AbstractFileSystem):
                     ``version_aware=True``.
 
         Returns:
-            List of S3Object instances (if detail=True) or paths as strings (if detail=False).
+            Copies of the entries (if detail=True; see :meth:`S3Object.copy`),
+            or their paths as strings (if detail=False).
 
         Raises:
             FileNotFoundError: If the bucket does not exist, or if a key path
@@ -1056,7 +1057,31 @@ class S3FileSystem(AbstractFileSystem):
             >>> fs.ls("s3://my-bucket")  # List objects in bucket
             >>> fs.ls("s3://my-bucket/", detail=True)  # Get detailed object info
         """
-        versions = kwargs.pop("versions", False)
+        files = self._ls_entries(path, refresh=refresh, versions=kwargs.pop("versions", False))
+        return [f.copy() for f in files] if detail else [f["name"] for f in files]
+
+    def _ls_entries(
+        self, path: str | os.PathLike[str], refresh: bool = False, versions: bool = False
+    ) -> list[S3Object]:
+        """List the entries of an S3 path as :meth:`ls` does, without copying them.
+
+        For the internal callers that only read the entries, which may be the
+        cached ones.
+
+        Args:
+            path: The path, as in :meth:`ls`.
+            refresh: If True, bypass the cache and fetch fresh results from S3.
+            versions: Whether to list all versions of the objects, as in
+                :meth:`ls`.
+
+        Returns:
+            The entries, in a list that the caller must not change.
+
+        Raises:
+            ValueError: If ``versions`` is True and the filesystem is not
+                version aware.
+            FileNotFoundError: As in :meth:`ls`.
+        """
         if versions and not self.version_aware:
             raise ValueError(
                 "Cannot list the object versions unless the filesystem is version aware."
@@ -1081,7 +1106,7 @@ class S3FileSystem(AbstractFileSystem):
             # from the listing.
             if not files and key:
                 raise FileNotFoundError(path)
-        return list(files) if detail else [f.name for f in files]
+        return files
 
     def _ls_version(self, s3_path: S3Path, refresh: bool = False) -> list[S3Object]:
         """List the object version that a key path with a version ID names.
@@ -1222,8 +1247,27 @@ class S3FileSystem(AbstractFileSystem):
                 described above. Other request parameters are ignored.
 
         Returns:
-            S3Object describing the bucket, directory, or file. The root path
-            (``""``, ``"/"`` or ``"s3://"``) is a directory.
+            A copy of the S3Object describing the bucket, directory, or file
+            (see :meth:`S3Object.copy`). The root path (``""``, ``"/"`` or
+            ``"s3://"``) is a directory.
+
+        Raises:
+            FileNotFoundError: If the path does not exist.
+        """
+        return self._info_entry(path, **kwargs).copy()
+
+    def _info_entry(self, path: str | os.PathLike[str] | S3Path, **kwargs) -> S3Object:
+        """Return the entry of an S3 path as :meth:`info` does, without copying it.
+
+        For the internal callers that only read the entry, which may be the
+        cached one.
+
+        Args:
+            path: The path, as in :meth:`info`.
+            **kwargs: The arguments of :meth:`info`.
+
+        Returns:
+            The entry, which the caller must not change.
 
         Raises:
             FileNotFoundError: If the path does not exist.
@@ -1290,7 +1334,7 @@ class S3FileSystem(AbstractFileSystem):
             caches: list[S3Object] | S3Object | None = self._ls_from_cache(path)
             if caches is not None:
                 if isinstance(caches, list):
-                    matches = [c for c in caches if c.name == name]
+                    matches = [c for c in caches if c["name"] == name]
                     # A key can be both an object and a key prefix.
                     cache = next(
                         (c for c in matches if c.type == S3ObjectType.S3_OBJECT_TYPE_FILE),
@@ -1516,7 +1560,7 @@ class S3FileSystem(AbstractFileSystem):
             # or with withdirs if it is a directory.
             try:
                 if name is not None:
-                    found = [(self.info(name, refresh=refresh), own)]
+                    found = [(self._info_entry(name, refresh=refresh), own)]
                 else:
                     found = [(self._path_info(S3Path(bucket, key), refresh=refresh), own)]
             except FileNotFoundError:
@@ -1587,8 +1631,9 @@ class S3FileSystem(AbstractFileSystem):
                 refresh: If True, bypass the cache and list from S3.
 
         Returns:
-            Dictionary mapping paths to S3Objects (if detail=True) or
-            list of paths (if detail=False).
+            Dictionary mapping paths to copies of their entries (if
+            detail=True; see :meth:`S3Object.copy`) or list of paths (if
+            detail=False).
 
         Raises:
             ValueError: If ``maxdepth`` is less than 1 or the path is the root.
@@ -1600,8 +1645,8 @@ class S3FileSystem(AbstractFileSystem):
         """
         files = self._find(path=path, maxdepth=maxdepth, withdirs=withdirs, **kwargs)
         if detail:
-            return {f.name: f for f in files}
-        return [f.name for f in files]
+            return {f["name"]: f.copy() for f in files}
+        return [f["name"] for f in files]
 
     def walk(self, path, maxdepth=None, topdown=True, on_error="omit", **kwargs):
         """Walk the directories below a path, as fsspec's ``walk()`` does.
@@ -1626,8 +1671,8 @@ class S3FileSystem(AbstractFileSystem):
                 callable that receives the error. As in fsspec, a directory
                 below the path whose listing fails is skipped.
             **kwargs: Additional arguments passed to ``ls()``, such as
-                ``refresh`` and ``versions``; ``detail=True`` yields the
-                entries by name instead of the names.
+                ``refresh`` and ``versions``; ``detail=True`` yields copies
+                of the entries by name instead of the names.
 
         Yields:
             Tuples of a directory path, its directories, and its files.
@@ -1689,8 +1734,9 @@ class S3FileSystem(AbstractFileSystem):
                 yield path, {} if detail else [], {} if detail else []
             return
         dirs, files = self._walk_entries(path, listing)
-        names: Any = dirs if detail else list(dirs)
-        listed: Any = files if detail else list(files)
+        # The copies are yielded, and the listed entries are walked.
+        names: Any = {k: v.copy() for k, v in dirs.items()} if detail else list(dirs)
+        listed: Any = {k: v.copy() for k, v in files.items()} if detail else list(files)
 
         if topdown:
             yield path, names, listed
@@ -1733,11 +1779,10 @@ class S3FileSystem(AbstractFileSystem):
             FileNotFoundError: If nothing exists at the path, or nothing is
                 listed under the directory.
         """
+        refresh, versions = kwargs.get("refresh", False), kwargs.get("versions", False)
         if directory is None:
-            return cast(list[S3Object], self.ls(path, detail=True, **kwargs))
-        return self._ls_directory(
-            directory, refresh=kwargs.get("refresh", False), versions=kwargs.get("versions", False)
-        )
+            return self._ls_entries(path, refresh=refresh, versions=versions)
+        return self._ls_directory(directory, refresh=refresh, versions=versions)
 
     @staticmethod
     def _walk_entries(
@@ -1761,8 +1806,8 @@ class S3FileSystem(AbstractFileSystem):
         dirs: dict[str, S3Object] = {}
         files: dict[str, S3Object] = {}
         for info in listing:
-            name = info.name
-            is_directory = info.type == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
+            name = info["name"]
+            is_directory = info["type"] == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
             if name.startswith(path + "/"):
                 (dirs if is_directory else files)[name[len(path) + 1 :]] = info
                 continue
@@ -1796,10 +1841,10 @@ class S3FileSystem(AbstractFileSystem):
         """
         sizes: dict[str, int] = {}
         if withdirs and self.isdir(path):
-            info = self.info(path)
+            info = self._info_entry(path)
             sizes[info["name"]] = info["size"]
         for _, target in self._find_paths(path, maxdepth=maxdepth, withdirs=withdirs, **kwargs):
-            info = self.info(target)
+            info = self._info_entry(target)
             sizes[info["name"]] = info["size"]
         return sum(sizes.values()) if total else sizes
 
@@ -2162,7 +2207,7 @@ class S3FileSystem(AbstractFileSystem):
             try:
                 if use_listings and self._ls_from_cache(s3_path):
                     return True
-                info = self.info(path, refresh=refresh, **lookup_kwargs)
+                info = self._info_entry(path, refresh=refresh, **lookup_kwargs)
                 return bool(info)
             except FileNotFoundError:
                 return False
@@ -3279,7 +3324,7 @@ class S3FileSystem(AbstractFileSystem):
 
         # Looked up with the parameters that authorize the access to the
         # source, such as its customer-provided key.
-        info1 = self.info(path1, **self.core.copy_source_params(kwargs))
+        info1 = self._info_entry(path1, **self.core.copy_source_params(kwargs))
         if info1.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
             # Recursive copy() passes the directories too; S3 has no object
             # to copy for them.
@@ -3781,7 +3826,7 @@ class S3FileSystem(AbstractFileSystem):
                 # empty range sends no GetObject request that would report a
                 # missing object.
                 lookup_kwargs = self._get_lookup_kwargs(kwargs)
-                info = self.info(
+                info = self._info_entry(
                     name if name is not None else path, version_id=version_id, **lookup_kwargs
                 )
                 if (
@@ -4138,9 +4183,9 @@ class S3FileSystem(AbstractFileSystem):
             part before the dash is used for checksum calculation.
         """
         refresh = kwargs.pop("refresh", False)
-        info = self.info(path, refresh=refresh)
+        info = self._info_entry(path, refresh=refresh)
         if info.get("type") != S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
-            return int(info.get("etag").strip('"').split("-")[0], 16)
+            return int(cast(str, info.get("etag")).strip('"').split("-")[0], 16)
         return int(tokenize(info), 16)
 
     def sign(self, path: str | os.PathLike[str] | S3Path, expiration: int = 3600, **kwargs):
@@ -4534,7 +4579,7 @@ class S3FileSystem(AbstractFileSystem):
             The ``last_modified`` field from :meth:`info`, which is None for
             buckets and directories.
         """
-        info = self.info(path)
+        info = self._info_entry(path)
         return cast(datetime, info.get("last_modified"))
 
     def invalidate_cache(self, path: str | os.PathLike[str] | None = None) -> None:
@@ -4677,7 +4722,7 @@ class S3FileSystem(AbstractFileSystem):
             True if an object exists at the path.
         """
         try:
-            info = self.info(path, **lookup_kwargs)
+            info = self._info_entry(path, **lookup_kwargs)
         except FileNotFoundError:
             return False
         return bool(info.get("type") != S3ObjectType.S3_OBJECT_TYPE_DIRECTORY)
@@ -5055,7 +5100,7 @@ class S3FileTarget:
         if "r" in mode:
             # Looked up here; the base class initializer of a file would
             # otherwise take the size from the latest version of the object.
-            info = fs.info(target, version_id=version_id, **lookup_kwargs)
+            info = fs._info_entry(target, version_id=version_id, **lookup_kwargs)
             if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
                 # A prefix has no object to read.
                 raise FileNotFoundError(path)
@@ -5072,14 +5117,15 @@ class S3FileTarget:
                 # A caller's condition is sent as given, so that a read of
                 # another object fails as S3 answers it (412).
                 kwargs.setdefault("IfMatch", etag)
-            details = info
+            details = info.copy()
             if size is None:
                 size = info.get("size")
         elif "a" in mode:
             # The rewritten object keeps the metadata of the existing one,
             # which a cached listing entry lacks, so look up the object.
             with contextlib.suppress(FileNotFoundError):
-                appended = fs.info(target, refresh=True, **lookup_kwargs)
+                # A copy, whose metadata the file sends.
+                appended = fs._info_entry(target, refresh=True, **lookup_kwargs).copy()
             if (
                 appended is not None
                 and appended.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
@@ -5114,7 +5160,8 @@ class S3FileTarget:
                     copy_source["CopySourceIfMatch"] = etag
                 for k, v in copy_source.items():
                     kwargs.setdefault(k, v)
-                details = appended
+                # Another copy, apart from the metadata that is sent.
+                details = appended.copy()
         elif "x" in mode:
             # Checked up front so that no data is uploaded for an existing
             # object, and on commit with IfNoneMatch for one created since.

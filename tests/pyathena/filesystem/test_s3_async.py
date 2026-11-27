@@ -2,6 +2,7 @@ import array
 import asyncio
 import collections
 import contextlib
+import copy
 import gc
 import gzip
 import io
@@ -168,7 +169,7 @@ class TestAioS3FileSystem:
             key="key",
         )
         info.size = size
-        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        fs._sync_fs._info_entry = mock.MagicMock(return_value=info)
 
         def read():
             calls = fs.core.get_object.call_count
@@ -269,7 +270,7 @@ class TestAioS3FileSystem:
     async def test_cp_file_failed_multipart_copy_invalidates_cache(self):
         # GH-973: see TestS3FileSystem.test_cp_file_failed_multipart_copy_invalidates_cache.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
-        fs._info = mock.AsyncMock(
+        fs._sync_fs._info_entry = mock.MagicMock(
             return_value=S3Object(
                 init={"ContentLength": S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE + 1},
                 type=S3ObjectType.S3_OBJECT_TYPE_FILE,
@@ -389,7 +390,7 @@ class TestAioS3FileSystem:
         loop = asyncio.get_running_loop()
         loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
-        fs._sync_fs.info = mock.MagicMock(return_value={"name": "bucket/key"})
+        fs._sync_fs._info_entry = mock.MagicMock(return_value={"name": "bucket/key"})
         release = threading.Event()
         # Held until it is released, after the lookup has had to finish.
         blocker = loop.run_in_executor(None, release.wait, 60)
@@ -515,10 +516,10 @@ class TestAioS3FileSystem:
             # public properties.
             if isinstance(value, list):
                 return [comparable(v) for v in value]
-            if isinstance(value, dict):
-                return {k: comparable(v) for k, v in value.items()}
             if isinstance(value, S3Object):
                 return S3Object, dict(value)
+            if isinstance(value, dict):
+                return {k: comparable(v) for k, v in value.items()}
             if isinstance(value, (S3Metadata, S3ObjectVersion, S3MultipartUpload)):
                 cls = type(value)
                 properties = [n for n in dir(cls) if isinstance(getattr(cls, n), property)]
@@ -1018,7 +1019,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(client=mock_client(7), max_workers=None, skip_instance_cache=True)
         sync_fs = fs._sync_fs
         assert fs._thread_pool.max_workers == sync_fs._request_pool.max_workers == 7
-        sync_fs.info = mock.MagicMock(return_value={"name": "bucket/key"})
+        sync_fs._info_entry = mock.MagicMock(return_value={"name": "bucket/key"})
 
         assert await fs._info("s3://bucket/key") == {"name": "bucket/key"}
         # A multipart copy and a file without max_workers of their own.
@@ -2236,7 +2237,7 @@ class TestAioS3FileSystem:
         held = self._held_until_stopped(state, release)
         sync_fs.cat_file = self._held_until_stopped(state, release, b"")
         sync_fs.pipe_file = sync_fs.put_file = sync_fs.get_file = held
-        sync_fs.info = self._held_until_stopped(
+        sync_fs._info_entry = self._held_until_stopped(
             state, release, {"name": "bucket/a", "type": "file", "size": 0}
         )
         sync_fs._move_pairs = mock.MagicMock(
@@ -2451,7 +2452,7 @@ class TestAioS3FileSystem:
             blocker_ended.set()
             return {}
 
-        fs._sync_fs.info = blocker
+        fs._sync_fs._info_entry = blocker
         try:
             with fs.transaction:
                 task = asyncio.ensure_future(
@@ -2868,7 +2869,9 @@ class TestAioS3FileSystem:
         # GH-1008: recursive copy() passes the directories, which used to be
         # sent to CopyObject and fail with NoSuchKey.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
-        fs._info = mock.AsyncMock(return_value=S3FileSystem._directory_object("bucket", "src"))
+        fs._sync_fs._info_entry = mock.MagicMock(
+            return_value=S3FileSystem._directory_object("bucket", "src")
+        )
         fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
 
         await fs._cp_file("s3://bucket/src", "s3://bucket/dst")
@@ -2893,6 +2896,71 @@ class TestAioS3FileSystem:
             }
         ]
         assert store == {"b", "d/b"}
+
+    @pytest.mark.parametrize("method", ["_info", "_ls", "_find", "_glob", "_walk"])
+    @pytest.mark.asyncio
+    async def test_returned_entries_are_copies(self, method):
+        # GH-1382: changing a returned entry, or its metadata, does not change
+        # the cached entry, which the next call returns again.
+        fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs._call = sync_fs._core.call = mock.MagicMock()
+        file = S3Object(
+            init={"Metadata": {"k": "v"}},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="dir/a",
+        )
+        fs.dircache[("bucket/dir", "/")] = [file, sync_fs._directory_object("bucket", "dir/sub")]
+        fs.dircache[("bucket/dir", "")] = [file]
+        fs.dircache[("bucket/dir/sub", "/")] = []
+        expected = copy.deepcopy(file)
+
+        async def entries():
+            if method == "_info":
+                return [await fs._info("bucket/dir/a")]
+            if method == "_ls":
+                return await fs._ls("bucket/dir", detail=True)
+            if method == "_find":
+                return list((await fs._find("bucket/dir", detail=True)).values())
+            if method == "_glob":
+                return list((await fs._glob("bucket/dir/*", detail=True)).values())
+            return [
+                entry
+                async for _, dirs, files in fs._walk("bucket/dir", detail=True)
+                for entry in (*dirs.values(), *files.values())
+            ]
+
+        for entry in await entries():
+            entry["size"] = 999
+            if "metadata" in entry:
+                entry["metadata"]["k"] = "changed"
+        assert file == expected
+        assert [e for e in await entries() if e["name"] == "bucket/dir/a"] == [expected]
+        sync_fs._call.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_walk_detail_lists_the_listed_directories(self):
+        # GH-1382: changing a yielded directory entry does not change what
+        # the walk lists below it.
+        fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        # A listing of another prefix fails, which the walk yields empty.
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(side_effect=FileNotFoundError)
+        fs.dircache[("bucket/dir", "/")] = [sync_fs._directory_object("bucket", "dir/sub")]
+        fs.dircache[("bucket/dir/sub", "/")] = [
+            S3Object(
+                init={}, type=S3ObjectType.S3_OBJECT_TYPE_FILE, bucket="bucket", key="dir/sub/b"
+            )
+        ]
+
+        walked = []
+        async for root, dirs, files in fs._walk("bucket/dir", detail=True):
+            walked.append((root, list(files)))
+            for entry in dirs.values():
+                entry["name"] = entry["key"] = "changed"
+        assert walked == [("bucket/dir", []), ("bucket/dir/sub", ["b"])]
+        sync_fs._call.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_expand_path_glob_lists_stem_prefix(self):
@@ -3014,7 +3082,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        fs._info = mock.AsyncMock(
+        fs._sync_fs._info_entry = mock.MagicMock(
             return_value=S3Object(
                 init={"ContentLength": size},
                 type=S3ObjectType.S3_OBJECT_TYPE_FILE,
@@ -3348,7 +3416,7 @@ class TestAioS3File:
         )
         sync_fs.core.complete_multipart_upload = mock.MagicMock()
         sync_fs.core.get_object = track(lambda path, range_, **kw: b"a" * (range_[1] - range_[0]))
-        sync_fs.info = mock.MagicMock(
+        sync_fs._info_entry = mock.MagicMock(
             return_value=S3Object(
                 init={"Key": "key"},
                 type=S3ObjectType.S3_OBJECT_TYPE_FILE,
@@ -3356,7 +3424,7 @@ class TestAioS3File:
                 key="key",
             )
         )
-        sync_fs.info.return_value.size = size
+        sync_fs._info_entry.return_value.size = size
 
         def write():
             with fs.open("s3://bucket/key", "wb", block_size=block_size, max_workers=2) as f:
@@ -3386,7 +3454,7 @@ class TestAioS3File:
         # GH-1004: the lookup of the file sends its lookup parameters, and
         # looks up the version that is opened.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
-        fs._sync_fs.info = mock.MagicMock(
+        fs._sync_fs._info_entry = mock.MagicMock(
             return_value=S3Object(
                 init={"ContentLength": 4},
                 type=S3ObjectType.S3_OBJECT_TYPE_FILE,
@@ -3402,7 +3470,7 @@ class TestAioS3File:
             assert isinstance(f, AioS3File)
             assert f.version_id == "v1"
             assert f.size == 4
-        fs._sync_fs.info.assert_called_once_with(
+        fs._sync_fs._info_entry.assert_called_once_with(
             "bucket/key?versionId=v1", version_id="v1", **sse_c
         )
 
@@ -3443,13 +3511,13 @@ class TestAioS3StreamedFile:
                 key="key",
             )
 
-        fs._sync_fs.info = mock.MagicMock(return_value=lookup('"e"', 4))
+        fs._sync_fs._info_entry = mock.MagicMock(return_value=lookup('"e"', 4))
         f = await fs.open_async("s3://bucket/key", "rb", **sse_c)
         reopen, args = f.__reduce__()
         await f.close()
 
         # The object is replaced by a larger one before the file is reopened.
-        fs._sync_fs.info.return_value = lookup('"new"', 8)
+        fs._sync_fs._info_entry.return_value = lookup('"new"', 8)
         with await asyncio.to_thread(reopen, *args) as g:
             assert g.size == 4
             assert {k: g.s3_additional_kwargs.get(k) for k in [*sse_c, "IfMatch"]} == {
@@ -3647,7 +3715,7 @@ class TestAioS3StreamedFile:
             bucket="bucket",
             key="key",
         )
-        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        fs._sync_fs._info_entry = mock.MagicMock(return_value=info)
         started = threading.Event()
         release = threading.Event()
         files = []
@@ -3715,7 +3783,7 @@ class TestAioS3StreamedFile:
             key="key",
         )
         info.size = block_size
-        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        fs._sync_fs._info_entry = mock.MagicMock(return_value=info)
         # The part uploaded while the copy is in flight, which throttles until
         # the abort stops its retries; their backoff wait would take at least
         # EVENT_TIMEOUT seconds.
@@ -3959,7 +4027,7 @@ class TestAioS3StreamedFile:
                 key="key",
             )
             info.size = 1
-            fs._sync_fs.info = mock.MagicMock(return_value=info)
+            fs._sync_fs._info_entry = mock.MagicMock(return_value=info)
             pool = fs._sync_fs._request_pool
             release = threading.Event()
             loop = asyncio.new_event_loop()
@@ -4021,7 +4089,7 @@ class TestAioS3StreamedFile:
             key="key",
         )
         info.size = block_size
-        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        fs._sync_fs._info_entry = mock.MagicMock(return_value=info)
         f = await fs.open_async("s3://bucket/key", "rb", block_size=block_size)
         read = asyncio.ensure_future(f.read())
         close = None
@@ -4345,7 +4413,7 @@ class TestAioS3StreamedFile:
             key="key",
         )
         info.size = block_size * 4
-        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        fs._sync_fs._info_entry = mock.MagicMock(return_value=info)
         f = await fs.open_async("s3://bucket/key", "rb", block_size=block_size, max_workers=4)
         with pytest.raises(PermissionError, match="Access Denied") as info_:
             await f.read()
@@ -4380,7 +4448,7 @@ class TestAioS3StreamedFile:
             key="key",
         )
         info.size = block_size * 2
-        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        fs._sync_fs._info_entry = mock.MagicMock(return_value=info)
         f = await fs.open_async("s3://bucket/key", "rb", block_size=block_size, max_workers=2)
         started = time.monotonic()
         with pytest.raises(PermissionError, match="Access Denied"):
@@ -4482,7 +4550,7 @@ class TestAioS3StreamedFile:
             key="key",
         )
         info.size = block_size * 4
-        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        fs._sync_fs._info_entry = mock.MagicMock(return_value=info)
 
         f = await fs.open_async("s3://bucket/key", "rb", block_size=block_size, max_workers=4)
         task = asyncio.ensure_future(f.read())
@@ -4522,7 +4590,7 @@ class TestAioS3StreamedFile:
             key="key",
         )
         info.size = size
-        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        fs._sync_fs._info_entry = mock.MagicMock(return_value=info)
 
         async with await fs.open_async(
             "s3://bucket/key", "rb", block_size=block_size, max_workers=2
@@ -4584,7 +4652,7 @@ class TestAioS3StreamedFile:
             key="key",
         )
         info.size = size
-        fs._sync_fs.info = mock.MagicMock(return_value=info)
+        fs._sync_fs._info_entry = mock.MagicMock(return_value=info)
         fs._sync_fs.cat_file = mock.MagicMock(return_value=b"a" * size)
         fs.core.upload_part_copy = mock.MagicMock(
             side_effect=lambda **kw: S3MultipartUploadPart(kw["part_number"], {"ETag": '"c"'})
