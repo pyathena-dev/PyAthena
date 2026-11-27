@@ -515,10 +515,10 @@ class TestAioS3FileSystem:
             # public properties.
             if isinstance(value, list):
                 return [comparable(v) for v in value]
-            if isinstance(value, dict):
-                return {k: comparable(v) for k, v in value.items()}
             if isinstance(value, S3Object):
                 return S3Object, dict(value)
+            if isinstance(value, dict):
+                return {k: comparable(v) for k, v in value.items()}
             if isinstance(value, (S3Metadata, S3ObjectVersion, S3MultipartUpload)):
                 cls = type(value)
                 properties = [n for n in dir(cls) if isinstance(getattr(cls, n), property)]

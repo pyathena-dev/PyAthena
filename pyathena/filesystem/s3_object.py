@@ -226,7 +226,7 @@ class S3Object(dict[str, Any]):
         entry.update(self)
         metadata = entry.get("metadata")
         if metadata is not None:
-            entry["metadata"] = copy.copy(metadata)
+            entry["metadata"] = dict(metadata)
         return entry
 
     def to_dict(self) -> dict[str, Any]:

@@ -5105,7 +5105,8 @@ class S3FileTarget:
             # The rewritten object keeps the metadata of the existing one,
             # which a cached listing entry lacks, so look up the object.
             with contextlib.suppress(FileNotFoundError):
-                appended = fs._info_entry(target, refresh=True, **lookup_kwargs)
+                # A copy, which the file keeps and whose metadata it sends.
+                appended = fs._info_entry(target, refresh=True, **lookup_kwargs).copy()
             if (
                 appended is not None
                 and appended.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
@@ -5140,7 +5141,7 @@ class S3FileTarget:
                     copy_source["CopySourceIfMatch"] = etag
                 for k, v in copy_source.items():
                     kwargs.setdefault(k, v)
-                details = appended.copy()
+                details = appended
         elif "x" in mode:
             # Checked up front so that no data is uploaded for an existing
             # object, and on commit with IfNoneMatch for one created since.

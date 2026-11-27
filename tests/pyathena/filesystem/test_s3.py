@@ -9094,6 +9094,21 @@ class TestS3File:
         fs.core.upload_part_copy.side_effect = part
         return fs
 
+    def test_append_keeps_a_copy_of_the_object(self):
+        # GH-1382: the entry of the appended object, which the file keeps as
+        # its details and whose metadata it sends, is a copy of the looked up
+        # one.
+        fs = self._make_append_fs(b"abc")
+        looked_up = fs._info_entry.return_value
+        looked_up["metadata"] = {"k": "v"}
+
+        with S3File(fs, "s3://bucket/key.txt", mode="ab", block_size=16) as f:
+            f.details["size"] = 999
+            f.s3_additional_kwargs["Metadata"]["k"] = "changed"
+            f.write(b"d")
+        assert looked_up["size"] == 3
+        assert looked_up["metadata"] == {"k": "v"}
+
     @staticmethod
     def _uploaded_object(fs, existing: bytes) -> bytes:
         # Rebuild the object S3 would store from the mocked upload calls.

@@ -204,10 +204,12 @@ class TestS3Object:
                 "StorageClass": "GLACIER",
                 "LastModified": datetime(2026, 1, 1),
             },
+            # The default storage class follows the last modified time.
+            {"Key": "k", "ETag": '"e"', "Size": 3, "LastModified": datetime(2026, 1, 1)},
             {"Key": "k", "Size": 0},
             {"Key": "k"},
         ],
-        ids=["full", "empty", "sparse"],
+        ids=["full", "default_storage_class", "empty", "sparse"],
     )
     def test_from_summary(self, listed):
         # GH-1382: built without the constructor, with the fields, and their
