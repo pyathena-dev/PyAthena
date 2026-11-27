@@ -924,10 +924,10 @@ class AioS3FileSystem(AsyncFileSystem):
                 ``lpath``, or two downloads write the same local file.
         """
         rpath = self._sync_fs._stringify_paths(rpath)
-        # Local paths are made absolute, as fsspec's _get() does, so that
-        # it can create their parent directories, and a sequence of them a
-        # list, which pairs them with the sources in order. File-like
-        # objects are kept for _get_file().
+        # Local paths are made absolute, as fsspec's _get() does for one
+        # source, so that their parent directories can be created, and a
+        # sequence of them a list, which pairs them with the sources in
+        # order. File-like objects are kept for _get_file().
         root = (
             make_path_posix(lpath)
             if isinstance(lpath, (str, os.PathLike))
