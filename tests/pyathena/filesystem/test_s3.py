@@ -9108,6 +9108,7 @@ class TestS3File:
             f.s3_additional_kwargs["Metadata"]["k"] = "sent"
             assert f.details["metadata"] == {"k": "details"}
             f.write(b"d")
+        assert fs.core.put_object.call_args.kwargs["Metadata"] == {"k": "sent"}
         assert looked_up["size"] == 3
         assert looked_up["metadata"] == {"k": "v"}
 
