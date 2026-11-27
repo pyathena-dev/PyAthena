@@ -19,7 +19,7 @@ from pyathena.aio.polars.cursor import AioPolarsCursor
 from pyathena.aio.s3fs.cursor import AioS3FSCursor
 from pyathena.error import OperationalError, ProgrammingError
 from pyathena.pandas.result_set import PandasDataFrameIterator
-from pyathena.util import RetryConfig
+from pyathena.util import RetryConfig, retry_api_call
 from tests.pyathena.util import EVENT_TIMEOUT, ThrottledOperation, retried
 
 _ALL_CURSOR_CLASSES = [
@@ -179,7 +179,7 @@ class TestWithAsyncFetch:
         result_set = MagicMock(is_closed=False)
         result_set.close.side_effect = close
         getattr(result_set, method).side_effect = retried(
-            operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)
+            operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT), retry_api_call
         )
         cursor.result_set = result_set
         task = asyncio.create_task(getattr(cursor, method)(*args))
@@ -402,7 +402,9 @@ class TestWithAsyncFetch:
             connection=MagicMock(), converter=None, formatter=None, retry_config=None
         )
         operation = ThrottledOperation(block=True)
-        chunks = _Chunks(retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT)))
+        chunks = _Chunks(
+            retried(operation, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT), retry_api_call)
+        )
         closed = threading.Event()
         result_set = MagicMock(is_closed=False)
         result_set.close.side_effect = closed.set

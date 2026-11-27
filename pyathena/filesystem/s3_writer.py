@@ -25,7 +25,7 @@ from pyathena.filesystem.s3_object import (
     S3PutObject,
 )
 from pyathena.filesystem.s3_path import S3Path
-from pyathena.util import raise_if_stopped, stop_retries_on
+from pyathena.filesystem.s3_retry import raise_if_stopped, stop_retries_on
 
 T = TypeVar("T")
 
@@ -486,7 +486,7 @@ class _S3WriteSession:
         Raises:
             S3MultipartStateError: If a request has already been sent.
             concurrent.futures.CancelledError: If an enclosing stop scope has
-                been stopped (see :func:`~pyathena.util.raise_if_stopped`).
+                been stopped (see :func:`~pyathena.filesystem.s3_retry.raise_if_stopped`).
         """
         raise_if_stopped(f"create a multipart upload to {self._path.uri}")
         creation: Future[S3MultipartUpload] = Future()
@@ -630,7 +630,7 @@ class _S3WriteSession:
                 failed, or has been discarded.
             concurrent.futures.CancelledError: If an enclosing stop scope has
                 been stopped before the request (see
-                :func:`~pyathena.util.raise_if_stopped`); the write fails then.
+                :func:`~pyathena.filesystem.s3_retry.raise_if_stopped`); the write fails then.
         """
         return self._commit(_S3WriteState.IDLE, lambda: self._put_object(body))
 
@@ -653,7 +653,7 @@ class _S3WriteSession:
                 earlier or has been discarded.
             concurrent.futures.CancelledError: If an enclosing stop scope has
                 been stopped before the request (see
-                :func:`~pyathena.util.raise_if_stopped`); the write fails then.
+                :func:`~pyathena.filesystem.s3_retry.raise_if_stopped`); the write fails then.
         """
         return self._commit(_S3WriteState.ACTIVE, self._complete_parts)
 

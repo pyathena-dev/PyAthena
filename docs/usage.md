@@ -761,9 +761,10 @@ The Glue request does not carry the connection's workgroup; turn the fallback of
 
 ## S3 client
 
-A connection builds one S3 client on first use and shares it with the result sets of its cursors, the filesystems created with `pyathena.filesystem.s3_filesystem()`, and the Spark cursors.
+A connection builds one S3 client on first use and shares it with the result sets of its cursors, the filesystems created with `pyathena.fs.s3_filesystem()`, and the Spark cursors.
 The result sets of `Cursor`, `DictCursor`, and their asynchronous versions do not use it, so these cursors build no S3 client.
-`ArrowCursor`, and `PolarsCursor` for Parquet (`unload=True`) and chunked results, read the query results through their libraries' own S3 clients and use the shared client for their other S3 requests.
+`ArrowCursor`, and `PolarsCursor` for Parquet (`unload=True`) and chunked CSV results, read the query results through their libraries' own S3 clients and use the shared client for their other S3 requests.
+`PolarsCursor` reads chunked Parquet results through the shared client instead when PyArrow is installed and `execute()` is given no read options.
 
 The S3 client is built from the connection's session, region, and client arguments, with the botocore `config` merged with `s3_config`.
 It does not use the connection's `endpoint_url` and `api_version`, which are Athena's, and neither do the S3 requests of `pyathena.pandas.util.to_sql()`.

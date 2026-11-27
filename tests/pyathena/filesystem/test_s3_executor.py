@@ -28,7 +28,8 @@ from pyathena.filesystem.s3_executor import (
     _S3Batch,
     _S3PoolScope,
 )
-from pyathena.util import RetryConfig, override, retry_api_call, stop_retries_on
+from pyathena.filesystem.s3_retry import retry_api_call
+from pyathena.util import RetryConfig, override, stop_retries_on
 from tests.pyathena.util import (
     EVENT_TIMEOUT,
     OpcodeInterrupter,

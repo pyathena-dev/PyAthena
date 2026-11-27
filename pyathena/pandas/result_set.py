@@ -31,8 +31,8 @@ from pyathena.arrow.reader import ParquetChunkReader
 from pyathena.arrow.util import to_column_info
 from pyathena.converter import Converter, _parse_time_zone, _to_datetime_with_tz, _to_time
 from pyathena.error import DataError, ProgrammingError
-from pyathena.filesystem import s3_filesystem
 from pyathena.filesystem.s3 import S3FileSystem
+from pyathena.fs import s3_filesystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.pandas.reader import _BINARY_NULL, BinaryCSVReader
 from pyathena.result_set import (

@@ -1,18 +1,21 @@
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor
 
 import pytest
 import tenacity.nap
 from botocore.exceptions import ClientError
 
 from pyathena import DataError
+from pyathena.filesystem import s3_retry
 from pyathena.util import (
     RetryConfig,
     _is_throttling_error,
     _without_retries,
     is_retryable_error,
     parse_output_location,
+    raise_if_stopped,
+    retries_stopped,
     retry_api_call,
     stop_retries_on,
     strtobool,
@@ -411,6 +414,95 @@ def test_retry_api_call_scope_ends_with_block():
     operation = ThrottledOperation(failures=2)
     assert retry_api_call(operation, RetryConfig(multiplier=0)) == "success"
     assert operation.calls == 3
+
+
+@pytest.mark.parametrize("stop_in", ["request", "backoff"])
+def test_stop_retries_on_stops_filesystem_retries(stop_in):
+    """GH-1388: a scope of stop_retries_on() also stops the retries of the S3 filesystem."""
+    # Without the stop, the backoff wait would take at least EVENT_TIMEOUT seconds.
+    event = threading.Event()
+    call = StoppingOperation(event.set, stop_in)
+    started = time.monotonic()
+    with stop_retries_on(event), pytest.raises(ClientError):
+        s3_retry.retry_api_call(call, s3_retry.S3RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+    call.join()
+    assert time.monotonic() - started < EVENT_TIMEOUT
+    assert call.calls == 1
+
+
+@pytest.mark.parametrize("stop_in", ["request", "backoff"])
+def test_filesystem_scope_stops_retries(stop_in):
+    """GH-1388: a stop scope that the S3 filesystem opens also stops PyAthena's retries.
+
+    Such as that of a call that a cancelled task runs in the filesystem's thread pool.
+    """
+    event = threading.Event()
+    call = StoppingOperation(event.set, stop_in)
+    started = time.monotonic()
+    with s3_retry.stop_retries_on(event):
+        assert not retries_stopped()
+        with pytest.raises(ClientError):
+            retry_api_call(call, RetryConfig(attempt=2, multiplier=EVENT_TIMEOUT))
+        call.join()
+        assert time.monotonic() - started < EVENT_TIMEOUT
+        assert retries_stopped()
+        with pytest.raises(CancelledError):
+            raise_if_stopped("continue")
+    assert call.calls == 1
+
+
+@pytest.mark.parametrize("scope", ["pyathena", "filesystem"])
+def test_unstoppable_retries_covers_filesystem_retries(scope):
+    """GH-1388: in unstoppable_retries(), the retries of the S3 filesystem run to their end.
+
+    That holds for the stop scopes of PyAthena and those of the filesystem itself.
+    """
+    event = threading.Event()
+    event.set()
+    operation = ThrottledOperation(failures=2)
+    enclosing = stop_retries_on if scope == "pyathena" else s3_retry.stop_retries_on
+    with enclosing(event), unstoppable_retries():
+        assert s3_retry.retry_api_call(operation, s3_retry.S3RetryConfig(multiplier=0)) == "success"
+    assert operation.calls == 3
+
+
+def test_filesystem_unstoppable_block_covers_retries():
+    """GH-1388: in the S3 filesystem's unstoppable block, PyAthena's retries run to their end."""
+    event = threading.Event()
+    event.set()
+    operation = ThrottledOperation(failures=2)
+    with stop_retries_on(event), s3_retry.unstoppable_retries():
+        assert not retries_stopped()
+        assert retry_api_call(operation, RetryConfig(multiplier=0)) == "success"
+    assert operation.calls == 3
+
+
+def test_wait_with_retry_stop_relays_filesystem_stop():
+    """GH-1388: the stop of a scope that the S3 filesystem opens is relayed to the work."""
+    stop = threading.Event()
+    checks = threading.Semaphore(0)
+
+    class CountedEvent(threading.Event):
+        def is_set(self):
+            result = super().is_set()
+            checks.release()
+            return result
+
+    event = CountedEvent()
+
+    def work():
+        # The scope stops after the waiter's second check, so only a wait
+        # that keeps checking sees the stop.
+        for _ in range(2):
+            if not checks.acquire(timeout=EVENT_TIMEOUT):
+                return False
+        event.set()
+        return stop.wait(EVENT_TIMEOUT)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(work)
+        with s3_retry.stop_retries_on(event):
+            assert wait_with_retry_stop(future, stop=stop) is True
 
 
 @pytest.mark.parametrize("scope", ["innermost", "enclosing"])

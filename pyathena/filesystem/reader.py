@@ -15,7 +15,7 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Any
 
-from pyathena.util import override
+from pyathena.filesystem.util import override
 
 
 class ReadAheadStream(io.RawIOBase):

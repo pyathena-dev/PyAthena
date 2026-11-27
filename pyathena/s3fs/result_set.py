@@ -18,9 +18,9 @@ from fsspec import AbstractFileSystem
 
 from pyathena.converter import Converter
 from pyathena.error import OperationalError, ProgrammingError
-from pyathena.filesystem import s3_filesystem
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
+from pyathena.fs import s3_filesystem
 from pyathena.model import AthenaQueryExecution
 from pyathena.result_set import AthenaResultSet
 from pyathena.s3fs.reader import AthenaCSVReader, CSVReader

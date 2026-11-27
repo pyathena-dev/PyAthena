@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from re import Pattern
 from typing import ClassVar
 
-from pyathena.util import override
+from pyathena.filesystem.util import override
 
 
 @dataclass(frozen=True)

@@ -35,7 +35,6 @@ from fsspec.core import get_compression
 from fsspec.implementations.local import make_path_posix
 from fsspec.utils import stringify_path
 
-from pyathena.aio.util import create_in_thread
 from pyathena.filesystem.s3 import (
     _UNPICKLABLE_CLIENT_MESSAGE,
     CompressedBuffer,
@@ -55,16 +54,17 @@ from pyathena.filesystem.s3_object import (
 )
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
+from pyathena.filesystem.s3_retry import retries_stopped
 from pyathena.filesystem.s3_writer import _S3WriteSession, _S3WriteState
-from pyathena.util import override, retries_stopped
+from pyathena.filesystem.util import create_in_thread, override
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from botocore.client import BaseClient
 
-    from pyathena.connection import Connection
-    from pyathena.util import RetryConfig
+    from pyathena.filesystem.s3 import _Connection
+    from pyathena.filesystem.s3_retry import RetryPolicy
 
 _logger = logging.getLogger(__name__)
 
@@ -310,7 +310,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
     def __init__(
         self,
-        connection: Connection[Any] | None = None,
+        connection: _Connection | None = None,
         default_block_size: int | None = None,
         default_cache_type: str | None = None,
         max_workers: int | None = None,
@@ -323,14 +323,14 @@ class AioS3FileSystem(AsyncFileSystem):
         batch_size: int | None = None,
         *,
         client: BaseClient | None = None,
-        retry_config: RetryConfig | None = None,
+        retry_config: RetryPolicy | None = None,
         **kwargs,
     ) -> None:
         """Initialize the filesystem and its internal ``S3FileSystem``.
 
         Args:
             connection: Deprecated; use ``client`` and ``retry_config``, or
-                :func:`pyathena.filesystem.s3_filesystem` with
+                :func:`pyathena.fs.s3_filesystem` with
                 ``AioS3FileSystem``. A PyAthena connection whose S3 client and
                 retry policy the filesystem uses, with a ``DeprecationWarning``.
             default_block_size: Passed to the internal ``S3FileSystem``.
@@ -1772,7 +1772,7 @@ class AioS3FileSystem(AsyncFileSystem):
         The lookups of the mode, as in ``open()``, run in the threads of the
         filesystem. If the caller is cancelled, a file opened after the
         cancellation is closed without committing anything (see
-        :func:`~pyathena.aio.util.create_in_thread`). See
+        :func:`~pyathena.filesystem.util.create_in_thread`). See
         :class:`AioS3StreamedFile` for how the file reads, writes, and commits.
 
         Args:

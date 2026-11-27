@@ -57,13 +57,13 @@ arguments:
 import boto3
 
 from pyathena import connect
-from pyathena.filesystem import s3_filesystem
 from pyathena.filesystem.s3 import S3FileSystem
+from pyathena.fs import s3_filesystem
 
 fs = s3_filesystem(connect(s3_staging_dir="s3://YOUR_S3_BUCKET/path/to/",
                            region_name="us-west-2"))
 
-# Or with a boto3 S3 client, and optionally a pyathena.util.RetryConfig.
+# Or with a boto3 S3 client, and optionally a retry policy (see "Retries").
 fs = S3FileSystem(client=boto3.client("s3", region_name="us-west-2"))
 
 # Or with direct credentials (s3fs-compatible arguments).
@@ -86,7 +86,9 @@ arguments of the filesystem, and `AioS3FileSystem` as its second argument.
 
 The `connection` argument of `S3FileSystem` and `AioS3FileSystem` is deprecated and
 emits a `DeprecationWarning`; it will be removed in the next major version. It is
-subject to the same restrictions as `client`.
+subject to the same restrictions as `client`. `pyathena.filesystem.s3_filesystem()` is a
+deprecated name of `pyathena.fs.s3_filesystem()` and emits a `DeprecationWarning`; it
+will be removed in the next major version.
 
 The S3 client computes checksums of uploads and validates those of downloads by
 botocore's `request_checksum_calculation` and `response_checksum_validation` options,
@@ -511,9 +513,10 @@ S3 also answers `403` for a key that does not exist.
 
 ## Retries
 
-Each request is sent with a `pyathena.util.RetryConfig`: the `retry_config` of the
-filesystem, the retry policy of the connection for `s3_filesystem()`, or
-`RetryConfig()`. If the `exceptions` of the policy are the default codes
+Each request is sent with a retry policy: the `retry_config` of the filesystem, the
+retry policy of the connection for `s3_filesystem()`, or `S3RetryConfig()`
+(`pyathena.filesystem.s3_retry`). A `pyathena.util.RetryConfig` is accepted as a policy
+too, with the same arguments. If the `exceptions` of the policy are the default codes
 (`THROTTLING_ERROR_CODES`), the requests also retry the S3 error codes `SlowDown`,
 `ServiceUnavailable`, `InternalError`, and `RequestTimeout`
 (`S3Core.RETRY_ERROR_CODES`), with the attempts and waits of the policy. That includes a
@@ -521,10 +524,10 @@ policy that gives the default codes explicitly. A policy with other `exceptions`
 as given:
 
 ```python
-from pyathena.util import RetryConfig
+from pyathena.filesystem.s3_retry import S3RetryConfig
 
 # Retries only SlowDown, in up to 3 attempts.
-fs = S3FileSystem(retry_config=RetryConfig(exceptions=["SlowDown"], attempt=3))
+fs = S3FileSystem(retry_config=S3RetryConfig(exceptions=["SlowDown"], attempt=3))
 ```
 
 botocore also retries these errors within each attempt, as the retry mode of the S3

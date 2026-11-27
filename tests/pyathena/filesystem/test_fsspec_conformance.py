@@ -14,8 +14,8 @@ import uuid
 import fsspec.tests.abstract as abstract
 import pytest
 
-from pyathena.filesystem import s3_filesystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
+from pyathena.fs import s3_filesystem
 from tests import ENV
 from tests.pyathena.conftest import connect
 

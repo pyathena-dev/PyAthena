@@ -37,6 +37,7 @@ from sqlalchemy import cast, create_engine, engine_from_config, literal, types
 
 from pyathena.connection import Connection
 from pyathena.error import ProgrammingError
+from pyathena.filesystem import s3_retry
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import AioS3FileSystem
 from pyathena.filesystem.s3_core import S3Core
@@ -44,7 +45,7 @@ from pyathena.formatter import DefaultParameterFormatter
 from pyathena.glue import GlueMetadataClient
 from pyathena.model import AthenaCalculationExecutionStatus, AthenaQueryExecution
 from pyathena.spark.common import SparkBaseCursor
-from pyathena.util import RetryConfig, override, retry_api_call
+from pyathena.util import RetryConfig, override
 
 _queries = Environment(
     loader=FileSystemLoader(Path(__file__).parents[1].resolve() / "resources" / "queries")
@@ -165,24 +166,27 @@ class ThrottledOperation:
         return "success"
 
 
-def retried(operation, config):
-    """Return a stub of an ``S3Core`` request method that retries an operation.
+def retried(operation, config, retry=s3_retry.retry_api_call):
+    """Return a stub of a request method that retries an operation.
 
-    The stub sends the operation with :func:`~pyathena.util.retry_api_call`
-    in the thread that calls it, as ``S3Core.call()`` does, so that the stop
-    scopes of that thread reach its retries.
+    The stub sends the operation with ``retry`` in the thread that calls it,
+    so that the stop scopes of that thread reach its retries. The default,
+    :func:`~pyathena.filesystem.s3_retry.retry_api_call`, retries as
+    ``S3Core.call()`` does; pass :func:`pyathena.util.retry_api_call` for a
+    request of PyAthena's own, such as one of a result set.
 
     Args:
         operation: The stubbed AWS API operation, such as a
             :class:`ThrottledOperation`.
         config: The retry policy.
+        retry: The retry function.
 
     Returns:
         The stub, which accepts and ignores any arguments.
     """
 
     def request(*args, **kwargs):
-        return retry_api_call(operation, config)
+        return retry(operation, config)
 
     return request
 

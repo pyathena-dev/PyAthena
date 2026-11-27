@@ -9,7 +9,6 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import CancelledError, Future, wait
 from contextlib import contextmanager
-from contextvars import ContextVar
 from re import Pattern
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -24,6 +23,12 @@ from tenacity import (
 )
 
 from pyathena import DataError
+
+# TODO Importing the filesystem's retry module runs pyathena/filesystem/__init__.py,
+# so ``import pyathena`` also loads fsspec, boto3, and the filesystem, which
+# cursors that read no files through it do not need. Revisit when the filesystem
+# becomes its own distribution (GH-1315); see GH-1388.
+from pyathena.filesystem import s3_retry
 
 _T = TypeVar("_T")
 
@@ -289,10 +294,6 @@ def is_retryable_error(ex: BaseException, config: RetryConfig) -> bool:
     )
 
 
-# The events of the enclosing stop scopes of retry_api_call(); see stop_retries_on().
-_RETRY_STOP_EVENTS: ContextVar[tuple[threading.Event, ...]] = ContextVar(
-    "pyathena_retry_stop_events", default=()
-)
 # The longest that a backoff wait sleeps before it checks again whether the
 # retries are stopped, unless it can wait for the single event of a scope.
 _STOP_POLL_INTERVAL = 0.1
@@ -310,17 +311,20 @@ def stop_retries_on(event: threading.Event) -> Iterator[None]:
     cooperative: a request that has been sent, and the retries of botocore
     itself, still run to their end.
 
+    The scopes are those of
+    :func:`pyathena.filesystem.s3_retry.stop_retries_on`, which the S3
+    filesystem opens too, such as for the calls of its thread pools: a scope
+    of either stops the retries of PyAthena's AWS API calls and of the
+    filesystem's requests alike.
+
     Args:
         event: The event that stops the retries.
 
     Yields:
         None.
     """
-    token = _RETRY_STOP_EVENTS.set((*_RETRY_STOP_EVENTS.get(), event))
-    try:
+    with s3_retry.stop_retries_on(event):
         yield
-    finally:
-        _RETRY_STOP_EVENTS.reset(token)
 
 
 @contextmanager
@@ -334,14 +338,17 @@ def unstoppable_retries() -> Iterator[None]:
     was cancelled, or a request that stops a query. A scope that
     :func:`stop_retries_on` opens in the block stops the retries again.
 
+    The block is one of
+    :func:`pyathena.filesystem.s3_retry.unstoppable_retries`, which the S3
+    filesystem opens too, such as for its cleanup requests: in a block of
+    either, PyAthena's AWS API calls and the filesystem's requests retry to
+    their end alike.
+
     Yields:
         None.
     """
-    token = _RETRY_STOP_EVENTS.set(())
-    try:
+    with s3_retry.unstoppable_retries():
         yield
-    finally:
-        _RETRY_STOP_EVENTS.reset(token)
 
 
 def retries_stopped() -> bool:
@@ -351,7 +358,7 @@ def retries_stopped() -> bool:
         Whether an event of the enclosing :func:`stop_retries_on` scopes,
         apart from those that :func:`unstoppable_retries` clears, is set.
     """
-    return any(event.is_set() for event in _RETRY_STOP_EVENTS.get())
+    return s3_retry.retries_stopped()
 
 
 def raise_if_stopped(operation: str) -> None:
@@ -396,7 +403,7 @@ def wait_with_retry_stop(future: Future[_T], *, stop: threading.Event) -> _T:
         BaseException: The exception of the work, such as the error of the last
             attempt of a call whose retries were stopped.
     """
-    events = _RETRY_STOP_EVENTS.get()
+    events = s3_retry.retry_stop_events()
     while events and not future.done():
         if any(event.is_set() for event in events):
             stop.set()
@@ -450,7 +457,7 @@ def retry_api_call(
         This includes recognized Glue error codes wrapped in MetadataException.
         Other errors are propagated without retrying.
     """
-    events = _RETRY_STOP_EVENTS.get()
+    events = s3_retry.retry_stop_events()
 
     def stopped() -> bool:
         """Whether an event of the enclosing scopes is set."""
