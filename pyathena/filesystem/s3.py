@@ -21,7 +21,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from glob import has_magic
-from io import BytesIO, FileIO
+from io import BufferedRandom, BufferedWriter, BytesIO, FileIO
 from stat import S_ISREG
 from typing import Any, BinaryIO, ClassVar, Protocol, cast
 from urllib.parse import unquote_plus
@@ -2080,8 +2080,10 @@ class S3FileSystem(AbstractFileSystem):
                 matches nothing.
         """
         assume_literal = kwargs.pop("assume_literal", False)
-        # The expansion asks glob() for the entries.
+        # The expansion asks glob() for the entries, and find() for the
+        # directories too, as a caller's get() may pass these.
         kwargs.pop("detail", None)
+        kwargs.pop("withdirs", None)
         out: dict[tuple[str, str | S3Path], None] = {}
         names: set[str] = set()
 
@@ -3114,7 +3116,8 @@ class S3FileSystem(AbstractFileSystem):
             batch_size: Number of downloads to run at the same time, as in
                 ``copy()``.
             **kwargs: Additional parameters passed to ``get_file()`` and, as
-                in fsspec, to ``expand_path()``, such as ``prefix``.
+                in fsspec, to the expansion of the sources, such as
+                ``prefix``.
 
         Raises:
             ValueError: If a destination named after a source lies outside
@@ -3158,22 +3161,26 @@ class S3FileSystem(AbstractFileSystem):
     def _local_root(self, lpath: Any) -> Any:
         """Return the local destination of a ``get()`` as :meth:`get` pairs it.
 
-        File-like objects are kept, also when they are ``os.PathLike``, as
-        ``get_file()`` writes into them.
+        In a sequence, file-like objects are kept, also when they are
+        ``os.PathLike``, as ``get_file()`` writes into them. One
+        ``os.PathLike`` destination is a path, as in fsspec's ``get()``.
 
         Args:
             lpath: Local destination path, or sequence of paths or file-like
                 objects.
 
         Returns:
-            The absolute path, or a list of the destinations.
+            The absolute path, ``lpath`` if it is neither a path nor a
+            sequence, or a list of the destinations.
         """
-        single = isfilelike(lpath) or isinstance(lpath, (str, os.PathLike))
-        roots = [
-            p if isfilelike(p) or not isinstance(p, (str, os.PathLike)) else make_path_posix(p)
-            for p in ([lpath] if single else lpath)
+        if isinstance(lpath, (str, os.PathLike)):
+            return make_path_posix(lpath)
+        if isfilelike(lpath):
+            return lpath
+        return [
+            make_path_posix(p) if isinstance(p, (str, os.PathLike)) and not isfilelike(p) else p
+            for p in lpath
         ]
-        return roots[0] if single else roots
 
     def _checked_get_pairs(
         self,
@@ -3249,7 +3256,11 @@ class S3FileSystem(AbstractFileSystem):
             if isfilelike(destination):
                 # Other streams are not asked for a file descriptor, which
                 # some create, such as a spooled temporary file.
-                raw = getattr(destination, "raw", destination)
+                raw = (
+                    destination.raw
+                    if isinstance(destination, (BufferedRandom, BufferedWriter))
+                    else destination
+                )
                 key = ("object", id(destination))
                 if isinstance(raw, FileIO) and not raw.closed:
                     info = os.fstat(raw.fileno())

@@ -2777,7 +2777,7 @@ class TestAioS3FileSystem:
         # and wrote to the path of an os.PathLike one.
         class PathLikeStream(io.BytesIO):
             def __fspath__(self):
-                return str(tmp_path / "stream")
+                return str(tmp_path / "unused" / "stream")
 
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
@@ -2801,6 +2801,7 @@ class TestAioS3FileSystem:
         )
         assert stream.getvalue() == b"aa"
         assert (tmp_path / "new" / "b").read_bytes() == b"bb"
+        assert not (tmp_path / "unused").exists()
 
     @pytest.mark.asyncio
     async def test_get_uncreatable_directory_fails_first(self, tmp_path):
@@ -2810,7 +2811,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        serve_s3_keys(fs._sync_fs, {"a", "b"})
+        _, requests = serve_s3_keys(fs._sync_fs, {"a", "b"})
         (tmp_path / "file").write_bytes(b"")
 
         with pytest.raises(FileExistsError):
@@ -2822,6 +2823,7 @@ class TestAioS3FileSystem:
                 )
             )
         assert sorted(p.name for p in tmp_path.iterdir()) == ["file"]
+        assert not any(name == "get_object" for name, _ in requests)
 
     @pytest.mark.asyncio
     async def test_get_outfile_creates_no_directories(self, tmp_path):
@@ -2863,15 +2865,22 @@ class TestAioS3FileSystem:
     async def test_get_passes_kwargs_to_expansion(self, tmp_path):
         # GH-1425: as with S3FileSystem.get(), the keyword arguments of
         # _get() reach the expansion of the sources, such as prefix, and
-        # select the same objects. They were passed to _get_file() only, and
-        # every object below the source was downloaded.
+        # select the same objects; withdirs, which the expansion sets itself,
+        # is accepted. They were passed to _get_file() only, and every object
+        # below the source was downloaded.
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
         serve_s3_keys(fs._sync_fs, {"dir/a1", "dir/b1"})
 
         await await_bounded(
-            fs._get("s3://bucket/dir", str(tmp_path / "out"), recursive=True, prefix="a")
+            fs._get(
+                "s3://bucket/dir",
+                str(tmp_path / "out"),
+                recursive=True,
+                prefix="a",
+                withdirs=True,
+            )
         )
         assert [p.name for p in (tmp_path / "out").iterdir()] == ["a1"]
 

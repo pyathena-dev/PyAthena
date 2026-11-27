@@ -3351,6 +3351,21 @@ class TestS3FileSystem:
             assert fs.get_file.call_count == 2
             assert not any(getattr(s, "_rolled", False) for s in streams)
 
+    def test_get_path_like_stream_destination(self, tmp_path):
+        # GH-1425: one destination that is os.PathLike is a path, also when
+        # it is file-like, as in fsspec's get(); in a list, such an object
+        # is written into.
+        class PathLikeStream(io.BytesIO):
+            def __fspath__(self):
+                return str(tmp_path / "out")
+
+        fs = self._make_fs()
+        self._serve_keys(fs, {"a"})
+        fs.get_file = mock.MagicMock()
+
+        fs.get("s3://bucket/a", PathLikeStream())
+        assert fs.get_file.call_args.args[:2] == ("bucket/a", f"{tmp_path}/out")
+
     def test_get_destination_sequence(self, tmp_path, monkeypatch):
         # GH-1425: as with AioS3FileSystem.get(), a tuple of destinations is
         # paired with a list of sources in order, as a list is, and its paths
