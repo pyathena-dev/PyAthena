@@ -190,11 +190,12 @@ class _S3TransactionWrite:
         if stopped:
             raise CancelledError("Stopped before the transaction could commit the write.")
 
-    def open(self, path: str, mode: str, **kwargs) -> S3File:
+    def open(self, path: str | S3Path, mode: str, **kwargs) -> S3File:
         """Open the file of the write, which joins the transaction unless the write is stopped.
 
         Args:
-            path: S3 path (s3://bucket/key) of the file.
+            path: S3 path (s3://bucket/key) of the file, or an ``S3Path``,
+                which is opened by its bucket and key.
             mode: The binary write mode of the file.
             **kwargs: The other arguments of ``open()``, except
                 ``compression``. With ``autocommit=True``, as with
@@ -205,7 +206,12 @@ class _S3TransactionWrite:
             The file.
         """
         autocommit = kwargs.pop("autocommit", False)
-        file = self._fs._open(self._fs._strip_protocol(path), mode, autocommit=autocommit, **kwargs)
+        file = self._fs._open(
+            path if isinstance(path, S3Path) else self._fs._strip_protocol(path),
+            mode,
+            autocommit=autocommit,
+            **kwargs,
+        )
         with self._lock:
             self._files.append(file)
             # Under the lock, so that a cancellation either finds the file
@@ -541,29 +547,29 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _put_file(
         self,
         lpath: str | os.PathLike[str],
-        rpath: str | os.PathLike[str],
+        rpath: str | os.PathLike[str] | S3Path,
         callback=_DEFAULT_CALLBACK,
         mode: str = "overwrite",
         **kwargs,
     ) -> None:
         _S3BatchTasks.track()
-        rpath = stringify_path(rpath)
+        target: str | S3Path = rpath if isinstance(rpath, S3Path) else stringify_path(rpath)
         if self._intrans:
             # See _pipe_file.
             await self._write_in_transaction(
                 functools.partial(
-                    self._put_file_in_transaction, lpath, rpath, callback, mode, **kwargs
+                    self._put_file_in_transaction, lpath, target, callback, mode, **kwargs
                 )
             )
             return
         await self._thread_pool.run(
-            self._sync_fs.put_file, lpath, rpath, callback=callback, mode=mode, **kwargs
+            self._sync_fs.put_file, lpath, target, callback=callback, mode=mode, **kwargs
         )
 
     def _put_file_in_transaction(
         self,
         lpath: str | os.PathLike[str],
-        rpath: str,
+        rpath: str | S3Path,
         callback,
         mode: str,
         open_file: Callable[..., S3File],
@@ -576,7 +582,8 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Args:
             lpath: Local file path to upload.
-            rpath: S3 destination path (s3://bucket/key).
+            rpath: S3 destination path (s3://bucket/key), or an ``S3Path``,
+                whose bucket and key are written as they are.
             callback: Progress callback for tracking upload progress.
             mode: "overwrite" or "create". With "create", the file is
                 opened in ``xb`` mode: raise FileExistsError when the object
@@ -595,7 +602,8 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         if os.path.isdir(lpath):
             return
-        if not S3Path.parse(rpath).key:
+        s3_path = S3Path.of(rpath)
+        if not s3_path.key:
             return
 
         size = os.path.getsize(lpath)
@@ -619,7 +627,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 max_workers=max_workers,
                 s3_additional_kwargs=s3_additional_kwargs,
             )._write_file_and_close(local, callback)
-        self.invalidate_cache(rpath)
+        self._invalidate(s3_path)
 
     async def _get_file(
         self,
@@ -929,42 +937,14 @@ class AioS3FileSystem(AsyncFileSystem):
         batch_size = kwargs.get("batch_size", self.batch_size)
         if batch_size is not None and batch_size > 0:
             concurrency = min(concurrency, batch_size)
-        await _S3BatchTasks().run(
-            self._get_pairs(pairs, callback, **self._sync_fs._batch_kwargs(concurrency, kwargs))
-        )
-
-    async def _get_pairs(
-        self, pairs: list[tuple[str | S3Path, Any]], callback: Any, **kwargs
-    ) -> None:
-        """Download the pairs of a ``get()`` as fsspec's ``_get()`` downloads lists of paths.
-
-        Each download gets a branch of the callback named after the string of
-        its source, and the sources that a listing returns are downloaded by
-        their buckets and keys.
-
-        Args:
-            pairs: The S3 sources and their local destinations.
-            callback: Progress callback.
-            **kwargs: Passed to ``_get_file()``, and ``batch_size``, the
-                number of downloads to run at once.
-        """
+        # As fsspec's _get() for lists of paths.
         for _, lp in pairs:
-            os.makedirs(os.path.dirname(lp), exist_ok=True)
-        batch_size = kwargs.pop("batch_size", self.batch_size)
-        callback.set_size(len(pairs))
-
-        async def get_pair(rp: str | S3Path, lp: Any) -> None:
-            """Download a pair with a branch of the callback.
-
-            Args:
-                rp: The S3 source.
-                lp: The local destination.
-            """
-            with callback.branched(str(rp), lp, **kwargs) as child:
-                await self._get_file(rp, lp, callback=child, **kwargs)
-
-        await _run_coros_in_chunks(
-            [get_pair(rp, lp) for rp, lp in pairs], batch_size=batch_size, callback=callback
+            # A local path, as copy_pairs() names it.
+            os.makedirs(os.path.dirname(cast(str, lp)), exist_ok=True)
+        await _S3BatchTasks().run(
+            self._transfer_pairs(
+                self._get_file, pairs, callback, **self._sync_fs._batch_kwargs(concurrency, kwargs)
+            )
         )
 
     async def _put(
@@ -1001,7 +981,9 @@ class AioS3FileSystem(AsyncFileSystem):
             The return values of the ``_put_file()`` calls, as in fsspec.
 
         Raises:
-            ValueError: If two files have the same destination.
+            ValueError: If two files have the same destination, or the
+                destination of a local file names a version, also when
+                ``rpath`` names one and the file is named below it.
         """
         lpath, rpath = self._sync_fs._stringify_paths(lpath), self._sync_fs._stringify_paths(rpath)
         pairs = await self._thread_pool.run(
@@ -1009,13 +991,92 @@ class AioS3FileSystem(AsyncFileSystem):
         )
         files = [(lp, rp) for lp, rp in pairs if not os.path.isdir(lp)]
         return await _S3BatchTasks().run(
-            super()._put(
-                [lp for lp, _ in files],
-                [rp for _, rp in files],
-                callback=callback,
-                batch_size=batch_size,
-                **kwargs,
+            self._transfer_pairs(
+                self._put_file, files, callback, batch_size=batch_size or self.batch_size, **kwargs
             )
+        )
+
+    async def _transfer_pairs(
+        self,
+        transfer: Callable[..., Awaitable[Any]],
+        pairs: list[tuple[Any, Any]],
+        callback: Any,
+        **kwargs,
+    ) -> list[Any]:
+        """Run the transfers of lists of paths as fsspec's ``_get()`` and ``_put()`` do.
+
+        Each transfer receives its paths as they are, so that a listed key or
+        a destination named after a local file is transferred by its bucket
+        and key, and runs through the callback's ``branch_coro()``, as in
+        fsspec, with the paths as the names of its branch, an ``S3Path`` as
+        its string.
+
+        Args:
+            transfer: ``_get_file()`` or ``_put_file()``.
+            pairs: The sources and destinations.
+            callback: Progress callback.
+            **kwargs: Passed to the transfers, and ``batch_size``, the
+                number of transfers to run at once.
+
+        Returns:
+            The results of the transfers, as fsspec's ``_put()`` returns them.
+        """
+        batch_size = kwargs.pop("batch_size", self.batch_size)
+        callback.set_size(len(pairs))
+
+        def run(path1: Any, path2: Any) -> Awaitable[Any]:
+            """Return the transfer of a pair, run through the callback's ``branch_coro()``.
+
+            The callback wraps the transfer when the coroutine is created,
+            before any transfer is scheduled, as in fsspec. The task of the
+            transfer joins the batch before the wrapper runs, so that a
+            cancellation of the batch also stops a transfer whose wrapper is
+            still waiting to start it.
+
+            Args:
+                path1: The source.
+                path2: The destination.
+
+            Returns:
+                The coroutine of the transfer.
+            """
+
+            async def transfer_pair(label1: Any, label2: Any, **transfer_kwargs: Any) -> Any:
+                """Transfer the pair, whose branch the labels name.
+
+                Args:
+                    label1: The name of the source in the branch.
+                    label2: The name of the destination in the branch.
+                    **transfer_kwargs: The arguments of the transfer, with the
+                        branch of the callback.
+
+                Returns:
+                    The result of the transfer.
+                """
+                return await transfer(path1, path2, **transfer_kwargs)
+
+            branched = callback.branch_coro(transfer_pair)
+
+            async def tracked() -> Any:
+                """Run the wrapped transfer as a task of the batch.
+
+                Returns:
+                    The result of the transfer.
+                """
+                _S3BatchTasks.track()
+                return await branched(
+                    str(path1) if isinstance(path1, S3Path) else path1,
+                    str(path2) if isinstance(path2, S3Path) else path2,
+                    **kwargs,
+                )
+
+            return tracked()
+
+        return cast(
+            list[Any],
+            await _run_coros_in_chunks(
+                [run(p1, p2) for p1, p2 in pairs], batch_size=batch_size, callback=callback
+            ),
         )
 
     async def _pipe(self, path, value=None, batch_size=None, **kwargs) -> list[Any]:
@@ -1659,7 +1720,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
     def _open(
         self,
-        path: str,
+        path: str | S3Path,
         mode: str = "rb",
         block_size: int | None = None,
         cache_type: str | None = None,
@@ -1785,13 +1846,14 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         self._sync_fs.rmdir(path)
 
-    def sign(self, path: str | os.PathLike[str], expiration: int = 3600, **kwargs) -> str:
+    def sign(self, path: str | os.PathLike[str] | S3Path, expiration: int = 3600, **kwargs) -> str:
         """Generate a presigned URL for S3 object access.
 
         See :meth:`S3FileSystem.sign`.
 
         Args:
-            path: S3 path (s3://bucket/key) to generate the URL for.
+            path: S3 path (s3://bucket/key) to generate the URL for, or an
+                ``S3Path``, as for :meth:`S3FileSystem.sign`.
             expiration: URL expiration time in seconds.
             **kwargs: Additional parameters passed to :meth:`S3FileSystem.sign`.
 
@@ -1800,13 +1862,14 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return cast(str, self._sync_fs.sign(path, expiration=expiration, **kwargs))
 
-    def metadata(self, path: str | os.PathLike[str], **kwargs) -> S3Metadata:
+    def metadata(self, path: str | os.PathLike[str] | S3Path, **kwargs) -> S3Metadata:
         """Return the metadata of the path.
 
         See :meth:`S3FileSystem.metadata`.
 
         Args:
-            path: S3 path (s3://bucket/key) to get metadata for.
+            path: S3 path (s3://bucket/key) to get metadata for, or an
+                ``S3Path``, as for :meth:`S3FileSystem.metadata`.
             **kwargs: Additional parameters passed to the HeadObject API.
 
         Returns:
@@ -1814,13 +1877,16 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return self._sync_fs.metadata(path, **kwargs)
 
-    def getxattr(self, path: str | os.PathLike[str], attr_name: str, **kwargs) -> str | None:
+    def getxattr(
+        self, path: str | os.PathLike[str] | S3Path, attr_name: str, **kwargs
+    ) -> str | None:
         """Get an attribute from the user-defined metadata of the path.
 
         See :meth:`S3FileSystem.getxattr`.
 
         Args:
-            path: S3 path (s3://bucket/key) to get the attribute for.
+            path: S3 path (s3://bucket/key) to get the attribute for, or an
+                ``S3Path``.
             attr_name: The name of the attribute.
             **kwargs: Additional parameters passed to the HeadObject API.
 
@@ -1830,14 +1896,18 @@ class AioS3FileSystem(AsyncFileSystem):
         return self._sync_fs.getxattr(path, attr_name, **kwargs)
 
     def setxattr(
-        self, path: str | os.PathLike[str], copy_kwargs: dict[str, Any] | None = None, **kwargs
+        self,
+        path: str | os.PathLike[str] | S3Path,
+        copy_kwargs: dict[str, Any] | None = None,
+        **kwargs,
     ) -> None:
         """Set the user-defined metadata of the path.
 
         See :meth:`S3FileSystem.setxattr`.
 
         Args:
-            path: S3 path (s3://bucket/key) to set metadata for.
+            path: S3 path (s3://bucket/key) to set metadata for, or an
+                ``S3Path``.
             copy_kwargs: Additional parameters to use for the underlying
                 CopyObject API call.
             **kwargs: Key-value pairs of metadata to set; a None value deletes the

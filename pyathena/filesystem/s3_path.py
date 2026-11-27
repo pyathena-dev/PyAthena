@@ -177,6 +177,30 @@ class S3Path:
         """
         return self.with_version_id(None) if self.version_id == "null" else self
 
+    def with_key_suffix(self, suffix: str) -> S3Path:
+        """Return the path that a suffix names below this one, with the suffix as it is.
+
+        The suffix, such as ``/x?versionId=null`` taken from a listed key or
+        a local file name, is appended to the key without being parsed, so
+        that it names a key that ends in what looks like a version ID query.
+        A bucket path takes the suffix without its leading slash as its key,
+        and an empty suffix names this path.
+
+        Args:
+            suffix: The suffix of the key, such as ``/x``.
+
+        Returns:
+            The path.
+
+        Raises:
+            ValueError: If this path has a version, which names an object
+                and no paths below it.
+        """
+        if self.version_id:
+            raise ValueError(f"Cannot name a path below the versioned path {self}.")
+        key = f"{self.key}{suffix}" if self.key else suffix.removeprefix("/")
+        return S3Path(self.bucket, key)
+
     def with_version_id(self, version_id: str | None) -> S3Path:
         """Return the path with another version ID.
 

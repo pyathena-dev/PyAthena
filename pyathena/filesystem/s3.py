@@ -3818,7 +3818,9 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs: Additional parameters passed to ``put_file()``.
 
         Raises:
-            ValueError: If two files have the same destination, or
+            ValueError: If two files have the same destination, the
+                destination of a local file names a version, also when
+                ``rpath`` names one and the file is named below it, or
                 ``batch_size`` is neither positive, -1, nor None.
         """
         lpath, rpath = self._stringify_paths(lpath), self._stringify_paths(rpath)
@@ -3830,14 +3832,15 @@ class S3FileSystem(AbstractFileSystem):
         call_kwargs = self._batch_kwargs(concurrency, kwargs)
         locked = _S3LockedCallback(callback, threading.Lock())
 
-        def put_pair(pair: tuple[str, str]) -> None:
+        def put_pair(pair: tuple[str, str | S3Path]) -> None:
             """Upload a pair with a branch of the callback.
 
             Args:
                 pair: The local source and its S3 destination.
             """
             lp, rp = pair
-            with locked.branched(lp, rp) as child:
+            # Named after the destination as a string.
+            with locked.branched(lp, str(rp)) as child:
                 self.put_file(lp, rp, callback=child, **call_kwargs)
             locked.relative_update(1)
 
@@ -3846,11 +3849,19 @@ class S3FileSystem(AbstractFileSystem):
 
     def _put_pairs(
         self, lpath, rpath, recursive=False, maxdepth=None, **kwargs
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str, str | S3Path]]:
         """Pair the local sources of ``put()`` with their S3 destinations as fsspec does.
 
         The files are uploaded in parallel, so no two files may have the
         same destination; a local directory uploads nothing.
+
+        The destination of a local file named after it below ``rpath`` is an
+        ``S3Path``: ``rpath`` parsed, with the rest of the local name added to
+        its key as it is (see :meth:`S3Path.with_key_suffix`), so that a file
+        named, e.g., ``x?versionId=v1`` is written to that key instead of
+        naming a version. Any other destination, such as ``rpath`` itself,
+        one of a list of destinations, or that of a local directory, is a
+        string without the protocol.
 
         Args:
             lpath: Local source path, glob pattern, or list of them.
@@ -3866,10 +3877,13 @@ class S3FileSystem(AbstractFileSystem):
             with their destinations without the protocol.
 
         Raises:
-            ValueError: If two files have the same destination.
+            ValueError: If two files have the same destination, or ``rpath``
+                names a version and a local file is named below it.
         """
         if isinstance(lpath, list) and isinstance(rpath, list):
-            pairs = [(lp, self._strip_protocol(rp)) for lp, rp in zip(lpath, rpath, strict=False)]
+            pairs: list[tuple[str, str | S3Path]] = [
+                (lp, self._strip_protocol(rp)) for lp, rp in zip(lpath, rpath, strict=False)
+            ]
         else:
             source_is_str = isinstance(lpath, str)
             if source_is_str:
@@ -3888,7 +3902,24 @@ class S3FileSystem(AbstractFileSystem):
                 (has_magic(lpath) and len(lpaths) == 1)
                 or (not has_magic(lpath) and dest_is_dir and not trailing_sep(lpath))
             )
-            rpaths = other_paths(lpaths, rpath, exists=exists, flatten=not source_is_str)
+            rpaths: list[str | S3Path] = other_paths(
+                lpaths, rpath, exists=exists, flatten=not source_is_str
+            )
+            # The files named after their local names below rpath; a local
+            # directory, which put_file() skips, keeps its string.
+            named = [
+                rp != rpath and not os.path.isdir(lp) for lp, rp in zip(lpaths, rpaths, strict=True)
+            ]
+            if isinstance(rpath, str) and any(named):
+                root = S3Path.parse(rpath)
+                if root.version_id:
+                    raise ValueError("Cannot write to the file with the version specified.")
+                # Every destination starts with rpath, which has no trailing
+                # slash, followed by the rest of the local name.
+                rpaths = [
+                    root.with_key_suffix(cast(str, rp)[len(rpath) :]) if typed else rp
+                    for rp, typed in zip(rpaths, named, strict=True)
+                ]
             pairs = list(zip(lpaths, rpaths, strict=True))
         # put_file() uploads nothing for a local directory.
         files = [rp for lp, rp in pairs if not os.path.isdir(lp)]
@@ -3899,7 +3930,7 @@ class S3FileSystem(AbstractFileSystem):
     def put_file(
         self,
         lpath: str | os.PathLike[str],
-        rpath: str | os.PathLike[str],
+        rpath: str | os.PathLike[str] | S3Path,
         callback=_DEFAULT_CALLBACK,
         mode: str = "overwrite",
         **kwargs,
@@ -3914,7 +3945,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             lpath: Local file path to upload.
-            rpath: S3 destination path (s3://bucket/key).
+            rpath: S3 destination path (s3://bucket/key), or an ``S3Path``,
+                whose bucket and key are written as they are.
             callback: Progress callback for tracking upload progress.
             mode: "overwrite" (default) or "create". With "create", the file
                 is written as with ``open()`` in ``xb`` mode: raise
@@ -3936,12 +3968,13 @@ class S3FileSystem(AbstractFileSystem):
             the method returns without performing any operation. Bucket-only
             destinations (without key) are also not supported.
         """
-        rpath = stringify_path(rpath)
+        target: str | S3Path = rpath if isinstance(rpath, S3Path) else stringify_path(rpath)
         if os.path.isdir(lpath):
             # No support for directory uploads.
             return
 
-        if not S3Path.parse(rpath).key:
+        s3_path = S3Path.of(target)
+        if not s3_path.key:
             # No support for bucket copy.
             return
 
@@ -3960,15 +3993,15 @@ class S3FileSystem(AbstractFileSystem):
         # The local file is opened first, so that an unreadable one fails
         # before the remote file is opened.
         with open(lpath, "rb") as local:
-            self.open(
-                rpath,
+            self._open_path(
+                target,
                 "xb" if mode == "create" else "wb",
                 block_size=block_size,
                 max_workers=max_workers,
                 s3_additional_kwargs=s3_additional_kwargs,
             )._write_file_and_close(local, callback)
 
-        self.invalidate_cache(rpath)
+        self._invalidate(s3_path)
 
     def get_file(
         self,
@@ -4044,11 +4077,7 @@ class S3FileSystem(AbstractFileSystem):
         # The remote file is opened first so that no local file is created
         # when open() finds no object at the path.
         with contextlib.ExitStack() as stack:
-            remote = stack.enter_context(
-                self._open(rpath, "rb", **kwargs)
-                if isinstance(rpath, S3Path)
-                else self.open(rpath, "rb", **kwargs)
-            )
+            remote = stack.enter_context(self._open_path(rpath, "rb", **kwargs))
             reader: Any = None
             if codec is not None:
                 # As fsspec's open() wraps the file, but closed with it.
@@ -4095,7 +4124,7 @@ class S3FileSystem(AbstractFileSystem):
             return int(info.get("etag").strip('"').split("-")[0], 16)
         return int(tokenize(info), 16)
 
-    def sign(self, path: str | os.PathLike[str], expiration: int = 3600, **kwargs):
+    def sign(self, path: str | os.PathLike[str] | S3Path, expiration: int = 3600, **kwargs):
         """Generate a presigned URL for S3 object access.
 
         Creates a presigned URL that allows temporary access to an S3 object
@@ -4103,7 +4132,8 @@ class S3FileSystem(AbstractFileSystem):
         time-limited access to resources.
 
         Args:
-            path: S3 path (s3://bucket/key) to generate URL for.
+            path: S3 path (s3://bucket/key) to generate URL for, or an
+                ``S3Path``, whose bucket, key and version are used as they are.
             expiration: URL expiration time in seconds. Defaults to 3600 (1 hour).
             **kwargs: Additional parameters including:
                 client_method: S3 operation ('get_object', 'put_object', etc.).
@@ -4124,17 +4154,16 @@ class S3FileSystem(AbstractFileSystem):
             ...     client_method="put_object"
             ... )
         """
-        path = stringify_path(path)
+        s3_path = S3Path.of(path if isinstance(path, S3Path) else stringify_path(path))
         client_method = kwargs.pop("client_method", "get_object")
-        return self.core.generate_presigned_url(
-            S3Path.parse(path), client_method, expiration, **kwargs
-        )
+        return self.core.generate_presigned_url(s3_path, client_method, expiration, **kwargs)
 
-    def metadata(self, path: str | os.PathLike[str], **kwargs) -> S3Metadata:
+    def metadata(self, path: str | os.PathLike[str] | S3Path, **kwargs) -> S3Metadata:
         """Return the metadata of the path.
 
         Args:
-            path: S3 path (s3://bucket/key) to get metadata for.
+            path: S3 path (s3://bucket/key) to get metadata for, or an
+                ``S3Path``, whose bucket, key and version are used as they are.
             **kwargs: Additional parameters passed to the HeadObject API.
 
         Returns:
@@ -4143,18 +4172,20 @@ class S3FileSystem(AbstractFileSystem):
             system-defined metadata (content type, encryption settings,
             etc.) as typed properties.
         """
-        path = stringify_path(path)
-        s3_path = S3Path.parse(path)
+        s3_path = S3Path.of(path if isinstance(path, S3Path) else stringify_path(path))
         if not s3_path.key:
             raise ValueError("Cannot get metadata of a bucket.")
         _logger.debug(f"Head object metadata: {s3_path.uri}")
         return self.core.head_object(s3_path, **kwargs)
 
-    def getxattr(self, path: str | os.PathLike[str], attr_name: str, **kwargs) -> str | None:
+    def getxattr(
+        self, path: str | os.PathLike[str] | S3Path, attr_name: str, **kwargs
+    ) -> str | None:
         """Get an attribute from the user-defined metadata of the path.
 
         Args:
-            path: S3 path (s3://bucket/key) to get the attribute for.
+            path: S3 path (s3://bucket/key) to get the attribute for, or an
+                ``S3Path``, as for :meth:`metadata`.
             attr_name: The name of the attribute.
             **kwargs: Additional parameters passed to :meth:`metadata`.
 
@@ -4164,7 +4195,10 @@ class S3FileSystem(AbstractFileSystem):
         return self.metadata(path, **kwargs).get(attr_name)
 
     def setxattr(
-        self, path: str | os.PathLike[str], copy_kwargs: dict[str, Any] | None = None, **kw_args
+        self,
+        path: str | os.PathLike[str] | S3Path,
+        copy_kwargs: dict[str, Any] | None = None,
+        **kw_args,
     ) -> None:
         """Set the user-defined metadata of the path.
 
@@ -4178,9 +4212,10 @@ class S3FileSystem(AbstractFileSystem):
         ``Expires`` value that botocore cannot parse as a date is not kept.
 
         Args:
-            path: S3 path (s3://bucket/key) to set metadata for. A path with
-                a version ID is rejected, since copying a version onto the
-                key would replace the current object with it.
+            path: S3 path (s3://bucket/key) to set metadata for, or an
+                ``S3Path``, as for :meth:`metadata`. A path with a version ID
+                is rejected, since copying a version onto the key would
+                replace the current object with it.
             copy_kwargs: Additional parameters to use for the underlying
                 CopyObject API call. They take precedence over the kept
                 system-defined metadata and storage class. Any encryption
@@ -4204,8 +4239,7 @@ class S3FileSystem(AbstractFileSystem):
         Raises:
             ValueError: If the path is a bucket or has a version ID.
         """
-        path = stringify_path(path)
-        s3_path = S3Path.parse(path)
+        s3_path = S3Path.of(path if isinstance(path, S3Path) else stringify_path(path))
         if not s3_path.key:
             raise ValueError("Cannot set metadata of a bucket.")
         if s3_path.version_id:
@@ -4213,7 +4247,7 @@ class S3FileSystem(AbstractFileSystem):
         copy_kwargs = copy_kwargs or {}
         # Looked up with the parameters that authorize the access to the
         # object as the source of the copy, such as its customer-provided key.
-        head = self.metadata(path, **self.core.copy_source_params(copy_kwargs))
+        head = self.metadata(s3_path, **self.core.copy_source_params(copy_kwargs))
         metadata = dict(head)
         for k, v in kw_args.items():
             if v is None:
@@ -4221,7 +4255,7 @@ class S3FileSystem(AbstractFileSystem):
             else:
                 metadata[k] = v
         self.core.replace_object_metadata(s3_path, head, metadata, **copy_kwargs)
-        self.invalidate_cache(path)
+        self._invalidate(s3_path)
 
     def get_tags(self, path: str | os.PathLike[str]) -> dict[str, str]:
         """Retrieve the tag key/values for the given path.
@@ -4772,6 +4806,30 @@ class S3FileSystem(AbstractFileSystem):
             # so a bucket missing from it is looked up with HeadBucket.
         return None
 
+    def _open_path(self, path: str | os.PathLike[str] | S3Path, mode: str, **kwargs) -> S3File:
+        """Open a binary file as ``open()`` does, also for an ``S3Path``.
+
+        A path string is opened with ``open()``. An ``S3Path`` is opened by
+        its bucket, key and version, and a file written in a transaction of
+        the filesystem joins it, as with ``open()``.
+
+        Args:
+            path: S3 path (s3://bucket/key), or an ``S3Path``.
+            mode: A binary mode of ``open()``.
+            **kwargs: The other arguments of ``open()``, except
+                ``compression``.
+
+        Returns:
+            The file.
+        """
+        if not isinstance(path, S3Path):
+            return cast(S3File, self.open(path, mode, **kwargs))
+        autocommit = kwargs.pop("autocommit", not self._intrans)
+        file = self._open(path, mode, autocommit=autocommit, **kwargs)
+        if not autocommit and "r" not in mode:
+            self.transaction.files.append(file)
+        return file
+
     def _open(
         self,
         path: str | S3Path,
@@ -5201,6 +5259,11 @@ class S3File(AbstractBufferedFile):
                 # Copied with UploadPartCopy as the leading part(s).
                 self.append_block = True
             self._append_size = self.loc = target.appended.get("size", 0)
+
+    @property
+    def _s3_path(self) -> S3Path:
+        """The bucket, key and version of the object that the file reads or writes."""
+        return S3Path(self.bucket, self.key, self.version_id)
 
     def _get_request_kwargs(self, method: str) -> dict[str, Any]:
         """Select the parameters of the file that an S3 operation accepts.
@@ -5809,7 +5872,7 @@ class S3File(AbstractBufferedFile):
         params = self.fs.core.operation_params(
             kwargs.get("client_method", "get_object"), self._lookup_kwargs()
         )
-        return cast(str, self.fs.sign(self.path, expiration=expiration, **{**params, **kwargs}))
+        return cast(str, self.fs.sign(self._s3_path, expiration=expiration, **{**params, **kwargs}))
 
     def metadata(self, **kwargs) -> S3Metadata:
         """Return the metadata of the file.
@@ -5827,7 +5890,7 @@ class S3File(AbstractBufferedFile):
             user-defined metadata and exposes the system-defined metadata
             as typed properties.
         """
-        return self.fs.metadata(self.path, **{**self._lookup_kwargs(), **kwargs})
+        return self.fs.metadata(self._s3_path, **{**self._lookup_kwargs(), **kwargs})
 
     def getxattr(self, xattr_name: str, **kwargs) -> str | None:
         """Get an attribute from the user-defined metadata of the file.
@@ -5843,7 +5906,7 @@ class S3File(AbstractBufferedFile):
         Returns:
             The value of the attribute, or None if the attribute is not set.
         """
-        return self.fs.getxattr(self.path, xattr_name, **{**self._lookup_kwargs(), **kwargs})
+        return self.fs.getxattr(self._s3_path, xattr_name, **{**self._lookup_kwargs(), **kwargs})
 
     def setxattr(self, copy_kwargs: dict[str, Any] | None = None, **kwargs) -> None:
         """Set the user-defined metadata of the file.
@@ -5875,7 +5938,7 @@ class S3File(AbstractBufferedFile):
                 k: v for k, v in lookup_kwargs.items() if not k.startswith("SSECustomer")
             }
         self.fs.setxattr(
-            self.path,
+            self._s3_path,
             copy_kwargs={
                 **destination,
                 **self.fs.core.copy_from_source_params(lookup_kwargs),

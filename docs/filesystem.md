@@ -647,6 +647,54 @@ The opt-in S3 versioning integration tests create dedicated temporary buckets an
 check unversioned, enabled, and suspended states. See [Testing](testing.md) for the
 command and required test permissions.
 
+## Path addressing
+
+### Keys that look like version paths
+
+A path string that ends in a version ID query names that version:
+`s3://YOUR_S3_BUCKET/a/x?versionId=v1` is version `v1` of the key `a/x`. A key that
+itself ends in such a query, such as `a/x?versionId=v1`, cannot be named by a path
+string, and there is no escape syntax. An `S3Path` names it by its bucket, key and
+version as they are:
+
+```python
+from pyathena.filesystem.s3_path import S3Path
+
+path = S3Path("YOUR_S3_BUCKET", "a/x?versionId=v1")
+fs.info(path)
+fs.cat_file(path)
+fs.cp_file(path, S3Path("YOUR_S3_BUCKET", "b/x?versionId=v1"))
+fs.get_file(path, "local-file")
+fs.put_file("local-file", path)
+```
+
+`info()`, `cat_file()`, `cp_file()`, `get_file()`, `put_file()`, `sign()`, `metadata()`,
+`getxattr()` and `setxattr()`, their asynchronous counterparts, `S3File`, `S3Core` and
+`S3PathPairing` accept an `S3Path`. `S3Path.of()` parses a path string and returns an
+`S3Path` as it is. `S3Path("YOUR_S3_BUCKET", "")` is the bucket path, as
+`S3Path("YOUR_S3_BUCKET")` is.
+
+`find()`, `walk()`, `tree()`, `glob()` and `expand_path()` list such keys by their
+buckets and keys, and `rm()`, `chmod()`, `cat()`, `du()`, `copy()`, `mv()` and `get()`
+act on the keys that they list in the same way. `put()` writes a local file to the key
+named after the file, also when its name ends in such a query. The names that these
+methods return are strings, so the name of such a key, passed back to a method as a
+path string, names the version. The same holds for the compositions that pass path
+strings, such as `fsspec.open()`, `fsspec.open_files()` and `get_mapper()` (`FSMap`).
+
+A file opened with an `S3Path` of such a key, without a version, has the name of the
+key as its `path`. Its `url()`, `metadata()`, `getxattr()` and `setxattr()` address its
+bucket, key and version, and a pickled copy of the file reopens its `path`, which names
+the version.
+
+### Bucket paths with a trailing double slash
+
+`s3://YOUR_S3_BUCKET//` names the key `/` for `cat_file()`, `rm_file()` and a
+non-recursive `chmod()`, and the bucket for `info()` and the listings, such as `ls()`
+and `find()`, which remove trailing slashes. A recursive `chmod()` of it changes the ACLs
+of the objects that `find()` lists, including the key `/`, and not the ACL of the
+bucket. A write to it, such as `pipe_file()`, raises `ValueError`.
+
 ## Bucket lifecycle
 
 Bucket creation and deletion are infrastructure-level changes and are disabled by

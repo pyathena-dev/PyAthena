@@ -797,6 +797,169 @@ class TestAioS3FileSystem:
         ]
         assert sorted(callback.sources) == ["bucket/a", "bucket/a/x", "bucket/a/x?versionId=null"]
 
+    @pytest.mark.parametrize(
+        ("source", "kwargs", "sent"),
+        [
+            pytest.param(
+                "x?versionId=v1", {}, [("put_object", "up/x?versionId=v1", None)], id="file"
+            ),
+            pytest.param(
+                "", {"recursive": True}, [("put_object", "up/x?versionId=v1", None)], id="dir"
+            ),
+            pytest.param(
+                "x?versionId=v1",
+                {"mode": "create"},
+                [
+                    ("head_object", "up/x?versionId=v1", None),
+                    ("put_object", "up/x?versionId=v1", "*"),
+                ],
+                id="create",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_put_names_destinations_after_local_files(self, tmp_path, source, kwargs, sent):
+        # GH-1404: _put() writes the keys named after local files as put()
+        # does, with the branches of the callback named after them as strings.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, requests = serve_s3_keys(fs._sync_fs, set())
+        (tmp_path / "x?versionId=v1").write_bytes(b"aa")
+        callback = BranchRecordingCallback()
+        await await_bounded(
+            fs._put(f"{tmp_path}/{source}", "s3://bucket/up/", callback=callback, **kwargs)
+        )
+        assert store == {"up/x?versionId=v1"}
+        assert [
+            (name, request.get("Key"), request.get("IfNoneMatch"))
+            for name, request in requests
+            if name != "list_objects_v2"
+        ] == sent
+        assert callback.destinations == ["bucket/up/x?versionId=v1"]
+
+    def test_put_in_transaction_names_destinations_after_local_files(self, tmp_path):
+        # GH-1404: in a transaction, the file of a destination named after a
+        # local file joins the transaction of this filesystem.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = serve_s3_keys(fs._sync_fs, set())
+        (tmp_path / "x?versionId=v1").write_bytes(b"aa")
+        with fs.transaction:
+            fs.put(str(tmp_path / "x?versionId=v1"), "s3://bucket/up/")
+            assert store == set()
+        assert store == {"up/x?versionId=v1"}
+
+    @pytest.mark.asyncio
+    async def test_transfers_run_through_branch_coro(self, tmp_path):
+        # GH-1404: as in fsspec, each download and upload runs through the
+        # callback's branch_coro(), with the paths named as strings.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, {"a/x?versionId=null"})
+        (tmp_path / "x?versionId=v1").write_bytes(b"aa")
+        finished = []
+
+        class Recording(Callback):
+            def branch_coro(self, fn):
+                run = super().branch_coro(fn)
+
+                async def recorded(path1, path2, **kwargs):
+                    result = await run(path1, path2, **kwargs)
+                    finished.append((path1, path2))
+                    return result
+
+                return recorded
+
+        await await_bounded(
+            fs._get("s3://bucket/a/*", str(tmp_path / "out") + "/", callback=Recording())
+        )
+        await await_bounded(
+            fs._put(str(tmp_path / "x?versionId=v1"), "s3://bucket/up/", callback=Recording())
+        )
+        assert finished == [
+            ("bucket/a/x?versionId=null", str(tmp_path / "out" / "x?versionId=null")),
+            (str(tmp_path / "x?versionId=v1"), "bucket/up/x?versionId=v1"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_transfers_are_wrapped_before_they_run(self, tmp_path):
+        # GH-1404: as in fsspec, the callback wraps every transfer before any
+        # runs, also when batch_size lets one run at a time.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = serve_s3_keys(fs._sync_fs, set())
+        for name in ("x", "y"):
+            (tmp_path / name).write_bytes(b"aa")
+        wrapped = asyncio.Event()
+
+        class AllWrapped(Callback):
+            count = 0
+
+            def branch_coro(self, fn):
+                run = super().branch_coro(fn)
+                self.count += 1
+                if self.count == 2:
+                    wrapped.set()
+
+                async def wait_then_run(path1, path2, **kwargs):
+                    await wrapped.wait()
+                    return await run(path1, path2, **kwargs)
+
+                return wait_then_run
+
+        await await_bounded(
+            fs._put(
+                [str(tmp_path / "x"), str(tmp_path / "y")],
+                ["s3://bucket/up/x", "s3://bucket/up/y"],
+                callback=AllWrapped(),
+                batch_size=1,
+            )
+        )
+        assert store == {"up/x", "up/y"}
+
+    @pytest.mark.asyncio
+    async def test_cancelled_put_starts_no_waiting_transfer(self, tmp_path):
+        # GH-1404: a transfer whose branch_coro() wrapper waits before it
+        # starts belongs to the batch, so a cancellation of _put() stops it
+        # and it uploads nothing afterwards.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = serve_s3_keys(fs._sync_fs, set())
+        (tmp_path / "x").write_bytes(b"aa")
+        waiting, release = asyncio.Event(), asyncio.Event()
+        stopped = []
+
+        class Waiting(Callback):
+            def branch_coro(self, fn):
+                run = super().branch_coro(fn)
+
+                async def wait_then_run(path1, path2, **kwargs):
+                    waiting.set()
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:
+                        stopped.append(path2)
+                        raise
+                    return await run(path1, path2, **kwargs)
+
+                return wait_then_run
+
+        task = asyncio.ensure_future(
+            fs._put(str(tmp_path / "x"), "s3://bucket/up/", callback=Waiting())
+        )
+        await await_bounded(waiting.wait())
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await await_bounded(task)
+        # The waiting wrapper was cancelled, and waited for, before _put() raised.
+        assert stopped == ["bucket/up/x"]
+        assert store == set()
+
     @pytest.mark.asyncio
     async def test_du_cancellation_sends_no_further_lookup(self):
         # GH-1402: as fsspec's _du(), the lookups of the found entries are
