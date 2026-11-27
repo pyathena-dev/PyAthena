@@ -21,7 +21,7 @@ import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from concurrent.futures import CancelledError, Future, wait
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, ClassVar, cast
 
 from fsspec.asyn import (
     AbstractAsyncStreamedFile,
@@ -632,10 +632,22 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _get_file(
         self,
         rpath: str | os.PathLike[str] | S3Path,
-        lpath: str | os.PathLike[str],
+        lpath: str | os.PathLike[str] | BinaryIO,
         callback=_DEFAULT_CALLBACK,
         **kwargs,
     ) -> None:
+        """Download an S3 file to a local path or a file-like object.
+
+        See :meth:`S3FileSystem.get_file`, which runs in the threads of the
+        filesystem.
+
+        Args:
+            rpath: S3 source path, or an ``S3Path``.
+            lpath: Local destination path, or a file-like object to write to.
+            callback: Progress callback.
+            **kwargs: Passed to :meth:`S3FileSystem.get_file`, such as
+                ``outfile``.
+        """
         _S3BatchTasks.track()
         await self._thread_pool.run(
             self._sync_fs.get_file, rpath, lpath, callback=callback, **kwargs
@@ -898,8 +910,8 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Args:
             rpath: Source S3 path, glob pattern, or list of them.
-            lpath: Local destination path, or list of paths when ``rpath`` is
-                a list.
+            lpath: Local destination path, or list of paths or file-like
+                objects when ``rpath`` is a list.
             recursive: Whether to copy the directories with their contents.
             callback: Progress callback.
             maxdepth: Maximum depth of a recursive copy.
@@ -912,13 +924,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 ``lpath``, or two downloads write the same local file.
         """
         rpath = self._sync_fs._stringify_paths(rpath)
-        # Local paths are made absolute, as fsspec's _get() does, so that
-        # it can create their parent directories.
-        root = (
-            make_path_posix(lpath)
-            if isinstance(lpath, (str, os.PathLike))
-            else [make_path_posix(p) if isinstance(p, (str, os.PathLike)) else p for p in lpath]
-        )
+        root = make_path_posix(lpath) if isinstance(lpath, (str, os.PathLike)) else lpath
         pairs = await self._thread_pool.run(
             self._sync_fs._checked_get_pairs,
             S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
@@ -937,10 +943,6 @@ class AioS3FileSystem(AsyncFileSystem):
         batch_size = kwargs.get("batch_size", self.batch_size)
         if batch_size is not None and batch_size > 0:
             concurrency = min(concurrency, batch_size)
-        # As fsspec's _get() for lists of paths.
-        for _, lp in pairs:
-            # A local path, as copy_pairs() names it.
-            os.makedirs(os.path.dirname(cast(str, lp)), exist_ok=True)
         await _S3BatchTasks().run(
             self._transfer_pairs(
                 self._get_file, pairs, callback, **self._sync_fs._batch_kwargs(concurrency, kwargs)

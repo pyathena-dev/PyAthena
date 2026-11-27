@@ -2658,9 +2658,8 @@ class TestAioS3FileSystem:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("rpath", ["s3://bucket/key", ["s3://bucket/key"]])
     async def test_get_relative_destination_list(self, tmp_path, monkeypatch, rpath):
-        # GH-1323: relative local paths in a list are made absolute, as
-        # fsspec's _get() does for one source, so that it can create their
-        # parent directories.
+        # GH-1323: relative local paths in a list are downloaded under the
+        # working directory, as with S3FileSystem.get().
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
@@ -2765,6 +2764,57 @@ class TestAioS3FileSystem:
                 release.set()
             await await_bounded(task)
         assert outfile.getvalue() == b"".join(p.encode() + b";" for p in sources)
+
+    @pytest.mark.asyncio
+    async def test_get_file_like_destinations(self, tmp_path):
+        # GH-1425: as in S3FileSystem.get(), a list of destinations may hold
+        # file-like objects, which the files are written into, and the
+        # parent directories of a local path are created. _get() created the
+        # parent directory of every destination first, which raised
+        # TypeError for a file-like object.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, {"a", "b"})
+        serve = fs._sync_fs._call
+
+        def call(method, **request):
+            # Each object holds its key twice, so that the destinations tell
+            # the objects apart.
+            response = serve(method, **request)
+            if "Body" in response:
+                response = {**response, "Body": io.BytesIO(request["Key"].encode() * 2)}
+            return response
+
+        fs._sync_fs._call = fs._sync_fs._core.call = call
+        stream = io.BytesIO()
+
+        await await_bounded(
+            fs._get(["s3://bucket/a", "s3://bucket/b"], [stream, str(tmp_path / "new" / "b")])
+        )
+        assert stream.getvalue() == b"aa"
+        assert (tmp_path / "new" / "b").read_bytes() == b"bb"
+
+    @pytest.mark.asyncio
+    async def test_get_outfile_creates_no_directories(self, tmp_path):
+        # GH-1425: as in S3FileSystem.get(), the local paths that _get_file()
+        # ignores for an outfile are not created. _get() created their parent
+        # directories.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, {"a", "b"})
+        outfile = io.BytesIO()
+
+        await await_bounded(
+            fs._get(
+                ["s3://bucket/a", "s3://bucket/b"],
+                [str(tmp_path / "new" / "unused")] * 2,
+                outfile=outfile,
+            )
+        )
+        assert outfile.getvalue() == b"aaaa"
+        assert list(tmp_path.iterdir()) == []
 
     @pytest.mark.asyncio
     async def test_expand_path_kwargs(self):
