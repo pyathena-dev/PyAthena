@@ -3094,14 +3094,17 @@ class S3FileSystem(AbstractFileSystem):
         pairs them, and that the files are downloaded in parallel, as with
         ``copy()``. The destinations named after the sources are checked to
         lie under ``lpath``. With ``outfile``, the files are written to it
-        one after another, in order.
+        one after another, in order. A sequence of local destinations, such
+        as a tuple, is paired with a list of sources in order, as a list is,
+        and its paths are made absolute, with ``~`` expanded, as one
+        destination path is.
 
         A failed download starts no further one, the running ones read and
         write no further block, and the error is raised once they have ended.
 
         Args:
             rpath: Source S3 path, glob pattern, or list of them.
-            lpath: Local destination path, or list of paths or file-like
+            lpath: Local destination path, or sequence of paths or file-like
                 objects when ``rpath`` is a list.
             recursive: Whether to copy the directories with their contents.
             callback: Progress callback. It and its branches for the files
@@ -3109,7 +3112,8 @@ class S3FileSystem(AbstractFileSystem):
             maxdepth: Maximum depth of a recursive copy.
             batch_size: Number of downloads to run at the same time, as in
                 ``copy()``.
-            **kwargs: Additional parameters passed to ``get_file()``.
+            **kwargs: Additional parameters passed to ``get_file()`` and, as
+                in fsspec, to ``expand_path()``, such as ``prefix``.
 
         Raises:
             ValueError: If a destination named after a source lies outside
@@ -3118,9 +3122,10 @@ class S3FileSystem(AbstractFileSystem):
         """
         rpath = self._stringify_paths(rpath)
         limit = self._batch_limit(batch_size)
-        root = make_path_posix(lpath) if isinstance(lpath, (str, os.PathLike)) else lpath
         pairs = self._checked_get_pairs(
-            S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth), kwargs, **kwargs
+            S3PathPairing(rpath, self._local_root(lpath), recursive=recursive, maxdepth=maxdepth),
+            kwargs,
+            **kwargs,
         )
         if not pairs:
             return
@@ -3150,6 +3155,25 @@ class S3FileSystem(AbstractFileSystem):
                 get_pair(pair)
             return
         self._run_batch(get_pair, pairs, concurrency)
+
+    def _local_root(self, lpath: Any) -> Any:
+        """Return the local destination of a ``get()`` as it is paired with the sources.
+
+        A local path is made absolute, with ``~`` expanded, as fsspec's
+        ``get()`` makes one destination. A sequence of destinations becomes a
+        list, which is paired with a list of sources in order, with its paths
+        made absolute in the same way and its file-like objects kept.
+
+        Args:
+            lpath: Local destination path, or sequence of paths or file-like
+                objects.
+
+        Returns:
+            The absolute path, or the list of destinations.
+        """
+        if isinstance(lpath, (str, os.PathLike)):
+            return make_path_posix(lpath)
+        return [make_path_posix(p) if isinstance(p, (str, os.PathLike)) else p for p in lpath]
 
     def _checked_get_pairs(
         self, pairing: S3PathPairing, file_kwargs: Mapping[str, Any], **kwargs: Any
@@ -3187,9 +3211,11 @@ class S3FileSystem(AbstractFileSystem):
     ) -> None:
         """Check that no two downloads of a batch write the same local file.
 
-        Destinations are compared by the object for file-like ones, by the
-        file for existing paths, such as hard links to one file, and by the
-        resolved path otherwise. A source that ``get_file()`` creates as a
+        Destinations are compared by the file for existing paths, such as
+        hard links to one file, and for file-like objects with a file
+        descriptor, such as a file opened to one of those paths; by the
+        object for other file-like objects; and by the resolved path
+        otherwise. A source that ``get_file()`` creates as a
         local directory writes no file, so several of them may share a local
         path; the sources are looked up only when their local path is shared.
 
@@ -3202,10 +3228,20 @@ class S3FileSystem(AbstractFileSystem):
                 a directory where another writes a file.
         """
         sources: dict[tuple[Any, ...], list[str | S3Path]] = {}
+        # The keys of file-like objects, which get_file() writes into
+        # whatever the source.
+        streams: set[tuple[Any, ...]] = set()
         for rpath, destination in pairs:
             key: tuple[Any, ...]
             if isfilelike(destination):
-                key = ("object", id(destination))
+                try:
+                    stat = os.fstat(destination.fileno())
+                except (AttributeError, OSError, ValueError):
+                    # No file descriptor, such as io.BytesIO, or a closed file.
+                    key = ("object", id(destination))
+                else:
+                    key = ("file", stat.st_dev, stat.st_ino)
+                streams.add(key)
             else:
                 path = os.fspath(destination)
                 try:
@@ -3219,9 +3255,8 @@ class S3FileSystem(AbstractFileSystem):
                     key = ("file", stat.st_dev, stat.st_ino)
             sources.setdefault(key, []).append(rpath)
         for key, rpaths in sources.items():
-            # get_file() writes into a file-like object whatever the source.
             if len(rpaths) > 1 and (
-                key[0] == "object"
+                key in streams
                 or not all(self._is_directory_source(rp, version_id) for rp in rpaths)
             ):
                 raise ValueError("Cannot get several paths to the same destination.")

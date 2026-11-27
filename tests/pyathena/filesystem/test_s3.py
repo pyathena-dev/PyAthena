@@ -3317,6 +3317,37 @@ class TestS3FileSystem:
             fs.get(["s3://bucket/a", "s3://bucket/b"], [str(tmp_path / "a"), str(tmp_path / "b")])
         fs.get_file.assert_not_called()
 
+    def test_get_stream_and_path_of_one_file_conflict(self, tmp_path):
+        # GH-1425: a stream and a local path of one file conflict, as two
+        # local paths of it do. The stream was compared as an object only.
+        fs = self._make_fs()
+        fs.get_file = mock.MagicMock()
+        (tmp_path / "a").write_bytes(b"")
+        with (
+            open(tmp_path / "a", "r+b") as stream,
+            pytest.raises(ValueError, match="same destination"),
+        ):
+            fs.get(["s3://bucket/a", "s3://bucket/b"], [stream, str(tmp_path / "a")])
+        fs.get_file.assert_not_called()
+
+    def test_get_destination_sequence(self, tmp_path, monkeypatch):
+        # GH-1425: as with AioS3FileSystem.get(), a tuple of destinations is
+        # paired with a list of sources in order, as a list is, and its paths
+        # are made absolute with "~" expanded, as one destination path is.
+        # The tuple was paired with the sorted sources, and "~" was kept as a
+        # relative directory.
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.chdir(tmp_path)
+        fs = self._make_fs()
+        self._serve_keys(fs, {"a", "b"})
+        fs.get_file = mock.MagicMock()
+
+        fs.get(["s3://bucket/b", "s3://bucket/a"], ("~/b", "a"))
+        assert sorted(c.args[:2] for c in fs.get_file.call_args_list) == [
+            ("s3://bucket/a", f"{tmp_path}/a"),
+            ("s3://bucket/b", f"{tmp_path}/home/b"),
+        ]
+
     @pytest.mark.parametrize(
         ("keys", "conflict"),
         [

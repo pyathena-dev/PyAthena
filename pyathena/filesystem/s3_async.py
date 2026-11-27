@@ -32,7 +32,6 @@ from fsspec.asyn import (
 )
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
-from fsspec.implementations.local import make_path_posix
 from fsspec.utils import isfilelike, stringify_path
 
 from pyathena.filesystem.s3 import (
@@ -915,28 +914,23 @@ class AioS3FileSystem(AsyncFileSystem):
             recursive: Whether to copy the directories with their contents.
             callback: Progress callback.
             maxdepth: Maximum depth of a recursive copy.
-            **kwargs: Additional parameters passed to ``_get_file()``, and
-                ``batch_size``, the number of downloads that fsspec runs at
-                once.
+            **kwargs: Additional parameters passed to ``_get_file()`` and to
+                the expansion of the sources, such as ``prefix``, as in
+                :meth:`S3FileSystem.get`, and ``batch_size``, the number of
+                downloads that fsspec runs at once.
 
         Raises:
             ValueError: If a destination named after a source lies outside
                 ``lpath``, or two downloads write the same local file.
         """
         rpath = self._sync_fs._stringify_paths(rpath)
-        # Local paths are made absolute, as fsspec's _get() does for one
-        # source, so that their parent directories can be created, and a
-        # sequence of them a list, which pairs them with the sources in
-        # order. File-like objects are kept for _get_file().
-        root = (
-            make_path_posix(lpath)
-            if isinstance(lpath, (str, os.PathLike))
-            else [make_path_posix(p) if isinstance(p, (str, os.PathLike)) else p for p in lpath]
-        )
         pairs = await self._thread_pool.run(
             self._sync_fs._checked_get_pairs,
-            S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
+            S3PathPairing(
+                rpath, self._sync_fs._local_root(lpath), recursive=recursive, maxdepth=maxdepth
+            ),
             kwargs,
+            **kwargs,
         )
         if not pairs:
             return
@@ -952,9 +946,10 @@ class AioS3FileSystem(AsyncFileSystem):
         if batch_size is not None and batch_size > 0:
             concurrency = min(concurrency, batch_size)
         if kwargs.get("outfile") is None:
-            # As fsspec's _get() for lists of paths, before any download.
-            # _get_file() writes into a file-like destination instead, as
-            # into an outfile, so no directory is created for them.
+            # As fsspec's _get() for lists of paths, before any download;
+            # the local paths are absolute. _get_file() writes into a
+            # file-like destination instead, as into an outfile, so no
+            # directory is created for them.
             for _, lp in pairs:
                 if not isfilelike(lp):
                     os.makedirs(os.path.dirname(cast(str, lp)), exist_ok=True)

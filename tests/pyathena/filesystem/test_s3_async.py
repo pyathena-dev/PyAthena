@@ -2833,6 +2833,22 @@ class TestAioS3FileSystem:
         ]
 
     @pytest.mark.asyncio
+    async def test_get_passes_kwargs_to_expansion(self, tmp_path):
+        # GH-1425: as with S3FileSystem.get(), the keyword arguments of
+        # _get() reach the expansion of the sources, such as prefix, and
+        # select the same objects. They were passed to _get_file() only, and
+        # every object below the source was downloaded.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, {"dir/a1", "dir/b1"})
+
+        await await_bounded(
+            fs._get("s3://bucket/dir", str(tmp_path / "out"), recursive=True, prefix="a")
+        )
+        assert [p.name for p in (tmp_path / "out").iterdir()] == ["a1"]
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("argument", ["batch_size", "max_workers"])
     async def test_rm_batch_size(self, argument):
         # GH-1337: batch_size of _rm() is the number of DeleteObjects requests
