@@ -2633,6 +2633,14 @@ class TestAioS3FileSystem:
                 id="get-directory",
             ),
             pytest.param(
+                lambda fs, tmp, cb: fs._get(
+                    "s3://bucket/deep", str(tmp / "out"), recursive=True, maxdepth=1, callback=cb
+                ),
+                None,
+                [],
+                id="get-maxdepth-directories",
+            ),
+            pytest.param(
                 lambda fs, tmp, cb: fs._put(str(tmp / "src" / "a"), "s3://bucket/up", callback=cb),
                 [("done", None)],
                 [1],
@@ -2652,6 +2660,20 @@ class TestAioS3FileSystem:
                 [],
                 id="put-directory",
             ),
+            pytest.param(
+                lambda fs, tmp, cb: fs._put(
+                    str(tmp / "deep"), "s3://bucket/up/", recursive=True, maxdepth=1, callback=cb
+                ),
+                None,
+                [],
+                id="put-maxdepth-directories",
+            ),
+            pytest.param(
+                lambda fs, tmp, cb: fs._put(tmp / "empty", "s3://bucket/up/", callback=cb),
+                [],
+                [0],
+                id="put-path-like-directory",
+            ),
         ],
     )
     @pytest.mark.asyncio
@@ -2659,16 +2681,19 @@ class TestAioS3FileSystem:
         # GH-1429: _get() and _put() return what fsspec's return: the results
         # of the transfers as the callback's branch_coro() wraps them, or
         # None, without a use of the callback, when a string source copied
-        # without recursive names only directories. _get() returned None,
-        # and _put() of only such directories set the size of the callback
-        # to 0 and returned [].
+        # without recursive, or with maxdepth, names only directories; for a
+        # path-like source, fsspec's _put() uploads nothing and returns [].
+        # _get() returned None, and _put() of only such directories set the
+        # size of the callback to 0 and returned [].
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        serve_s3_keys(fs._sync_fs, {"dir/a"})
+        serve_s3_keys(fs._sync_fs, {"dir/a", "deep/sub/a"})
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "a").write_bytes(b"a")
         (tmp_path / "empty").mkdir()
+        (tmp_path / "deep" / "sub").mkdir(parents=True)
+        (tmp_path / "deep" / "sub" / "a").write_bytes(b"a")
 
         class Recording(Callback):
             def __init__(self):

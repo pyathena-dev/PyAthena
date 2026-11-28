@@ -860,15 +860,19 @@ class AioS3FileSystem(AsyncFileSystem):
                 downloads that fsspec runs at once.
 
         Returns:
-            The return values of the ``_get_file()`` calls, as in fsspec, or
-            None, without a use of the callback, when ``rpath`` is a string
-            copied without ``recursive``, or with ``maxdepth``, and names only
+            The results of the downloads in the order of the pairs, as in
+            fsspec: those of the ``_get_file()`` calls as the callback's
+            ``branch_coro()`` returns them. None, without a use of the
+            callback, when ``rpath`` is a string, not ``os.PathLike``, copied
+            without ``recursive``, or with ``maxdepth``, and names only
             directories.
 
         Raises:
             ValueError: If a destination named after a source lies outside
                 ``lpath``, or two downloads write the same local file.
         """
+        # fsspec's _get() returns None only for a string source.
+        source_is_str = isinstance(rpath, str)
         rpath = self._sync_fs._stringify_paths(rpath)
         pairs = await self._thread_pool.run(
             self._sync_fs._checked_get_pairs,
@@ -879,7 +883,7 @@ class AioS3FileSystem(AsyncFileSystem):
             maxdepth=maxdepth,
             **kwargs,
         )
-        if not pairs and isinstance(rpath, str) and (not recursive or maxdepth is not None):
+        if not pairs and source_is_str and (not recursive or maxdepth is not None):
             # As fsspec's _get() returns when it leaves out every source, all
             # of them directories.
             return None
@@ -934,9 +938,11 @@ class AioS3FileSystem(AsyncFileSystem):
             **kwargs: Additional parameters passed to ``_put_file()``.
 
         Returns:
-            The return values of the ``_put_file()`` calls, as in fsspec, or
-            None, without a use of the callback, when ``lpath`` is a string
-            copied without ``recursive``, or with ``maxdepth``, and names only
+            The results of the uploads in the order of the local files, as in
+            fsspec: those of the ``_put_file()`` calls as the callback's
+            ``branch_coro()`` returns them. None, without a use of the
+            callback, when ``lpath`` is a string, not ``os.PathLike``, copied
+            without ``recursive``, or with ``maxdepth``, and names only
             directories.
 
         Raises:
@@ -944,13 +950,15 @@ class AioS3FileSystem(AsyncFileSystem):
                 destination of a local file names a version, also when
                 ``rpath`` names one and the file is named below it.
         """
+        # fsspec's _put() returns None only for a string source.
+        source_is_str = isinstance(lpath, str)
         lpath, rpath = self._sync_fs._stringify_paths(lpath), self._sync_fs._stringify_paths(rpath)
         # The local directories, which upload nothing, are left out in the
         # thread, as fsspec's _put() leaves them out.
         pairs, files = await self._thread_pool.run(
             self._sync_fs._put_pairs, lpath, rpath, recursive=recursive, maxdepth=maxdepth, **kwargs
         )
-        if not pairs and isinstance(lpath, str) and (not recursive or maxdepth is not None):
+        if not pairs and source_is_str and (not recursive or maxdepth is not None):
             # As fsspec's _put() returns when it leaves out every source, all
             # of them directories.
             return None
