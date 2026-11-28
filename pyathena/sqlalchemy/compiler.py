@@ -1614,8 +1614,9 @@ class AthenaDDLCompiler(DDLCompiler):
             schema = table.schema
             if self.schema_translate_map and schema in self.schema_translate_map:
                 schema = self.schema_translate_map[schema]
-            # A table left without a schema, or mapped to None, is in the default
-            # schema; SQLAlchemy qualifies a None target with the same name.
+            # The location of a table left without a schema, or mapped to None,
+            # names the default schema; SQLAlchemy qualifies a None target with
+            # the same name.
             schema = (
                 schema
                 or self.dialect.default_schema_name

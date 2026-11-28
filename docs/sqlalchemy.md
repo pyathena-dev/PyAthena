@@ -215,7 +215,7 @@ location
   Description: Specifies the location of the underlying data in the Amazon S3 from which the table is created.
 
   Without this option, the location is `<base>/<schema>/<table>/`.
-  `<base>` is the `location` connection option, or the S3 staging directory of the statement's cursor (`s3_staging_dir`) when that option is not set.
+  `<base>` is the `location` connection option or, when that option is not set, the S3 staging directory from the engine's connection options: `s3_staging_dir` in `cursor_kwargs` if given, otherwise the `s3_staging_dir` connection option, otherwise the `AWS_ATHENA_S3_STAGING_DIR` environment variable when the statement is compiled.
   `<schema>` is the table's schema after the connection's `schema_translate_map` execution option is applied; for a table left without one, or mapped to `None`, it is the default schema described in [Reflection and identifiers](#reflection-and-identifiers).
   Before the engine first connects, a table left without a schema uses the `schema_name` connection option (which `cursor_kwargs` can override), or `default` when that is not set.
   Except for [Amazon S3 Tables](#amazon-s3-tables), which take no location, compiling `CREATE TABLE` raises `CompileError` when neither `location` nor an S3 staging directory is available.

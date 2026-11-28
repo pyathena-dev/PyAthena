@@ -862,9 +862,9 @@ class TestAthenaDDLCompiler:
     def test_ddl_default_schema_names_cursor_database(
         self, schema, schema_translate_map, cursor_kwargs, expected_table, expected_location
     ):
-        # A table mapped to None or left without a schema is created in the
-        # database of the engine's first connection, and its default location
-        # names that database even when it differs from the URL database.
+        # The default location of a table mapped to None or left without a schema
+        # names the database of the engine's first connection, even when it
+        # differs from the URL database.
         engine, calls = recording_engine(
             query="s3_staging_dir=s3%3A%2F%2Fbucket%2Fpath%2F", cursor_kwargs=cursor_kwargs
         )
