@@ -3656,12 +3656,8 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs: As in :meth:`pipe_file`.
 
         Raises:
-            FileExistsError: If the mode is "create" and the path already
-                exists, or an object is created at it before the write is
-                committed.
-            ValueError: If the path does not contain a key or specifies a
-                version, if the compression is not supported, or if the data
-                takes more than ``S3Core.MULTIPART_UPLOAD_MAX_PARTS`` blocks.
+            FileExistsError: As in :meth:`pipe_file`.
+            ValueError: As in :meth:`pipe_file`.
         """
         # Normalized as open() normalizes it, so that the key written, and
         # the codec that "infer" takes from its extension, do not depend on
@@ -3676,11 +3672,15 @@ class S3FileSystem(AbstractFileSystem):
         # The size in bytes; the length of a memoryview counts its items.
         size = memoryview(value).nbytes
         self.core.check_multipart_upload_size(size, block_size)
-        if open_file is None and size > min(block_size, self.core.MULTIPART_UPLOAD_MAX_PART_SIZE):
-            # Large data is uploaded as a parallel multipart upload.
-            open_file = self._open_path
-        if open_file is not None:
-            open_file(path, "xb" if mode == "create" else "wb", **kwargs)._write_and_close(value)
+        if open_file is not None or size > min(
+            block_size, self.core.MULTIPART_UPLOAD_MAX_PART_SIZE
+        ):
+            # Through the opener, or through open() for large data, which it
+            # uploads as a parallel multipart upload.
+            file = (open_file or self._open_path)(
+                path, "xb" if mode == "create" else "wb", **kwargs
+            )
+            file._write_and_close(value)
             return
         s3_path = S3Path.parse(path)
         if s3_path.version_id:
@@ -4191,11 +4191,8 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs: As in :meth:`put_file`.
 
         Raises:
-            FileExistsError: If the mode is "create" and the path already
-                exists, or an object is created at it before the upload is
-                committed.
-            ValueError: If the file takes more than
-                ``S3Core.MULTIPART_UPLOAD_MAX_PARTS`` blocks.
+            FileExistsError: As in :meth:`put_file`.
+            ValueError: As in :meth:`put_file`.
         """
         target: str | S3Path = rpath if isinstance(rpath, S3Path) else stringify_path(rpath)
         if os.path.isdir(lpath):
