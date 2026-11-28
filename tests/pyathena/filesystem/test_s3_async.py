@@ -1051,6 +1051,141 @@ class TestAioS3FileSystem:
         ] == sent
         assert callback.destinations == ["bucket/up/x?versionId=v1"]
 
+    @pytest.mark.parametrize("run", ["sync", "async"])
+    @pytest.mark.parametrize("glob", [False, True])
+    @pytest.mark.asyncio
+    async def test_put_strips_listed_destinations(self, tmp_path, run, glob):
+        # GH-1482: the destinations given in a list reach put_file() and the
+        # branches of the callback without their protocol, also for the files
+        # of a glob, unlike the sources of two lists of get().
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = serve_s3_keys(fs._sync_fs, set())
+        (tmp_path / "a").write_bytes(b"a")
+        (tmp_path / "b").write_bytes(b"b")
+        sources = f"{tmp_path}/*" if glob else [str(tmp_path / "a"), str(tmp_path / "b")]
+        destinations = ["s3://bucket/up/a", "s3::bucket/up/b"]
+        received = []
+        callback = BranchRecordingCallback()
+        if run == "sync":
+            put_file = fs._sync_fs.put_file
+
+            def recording_put_file(lpath, rpath, **kwargs):
+                received.append(rpath)
+                return put_file(lpath, rpath, **kwargs)
+
+            fs._sync_fs.put_file = recording_put_file
+            fs._sync_fs.put(sources, destinations, callback=callback)
+        else:
+            put_file = fs._put_file
+
+            async def recording_put_file(lpath, rpath, **kwargs):
+                received.append(rpath)
+                return await put_file(lpath, rpath, **kwargs)
+
+            fs._put_file = recording_put_file
+            await await_bounded(fs._put(sources, destinations, callback=callback))
+        assert store == {"up/a", "up/b"}
+        assert sorted(received) == ["bucket/up/a", "bucket/up/b"]
+        assert sorted(callback.destinations) == ["bucket/up/a", "bucket/up/b"]
+
+    @pytest.mark.parametrize("run", ["sync", "async"])
+    @pytest.mark.parametrize(
+        ("destination", "match", "uploaded"),
+        [
+            pytest.param("https://bad/key", "Invalid S3 path", set(), id="not-s3"),
+            pytest.param("bucket/x?versionId=v1", "version", set(), id="version"),
+            # put_file() writes nothing to a destination without a key, so two
+            # of them are no conflict.
+            pytest.param("bucket?versionId=v1", None, {"ok"}, id="no-key"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_put_checks_destinations_first(self, tmp_path, run, destination, match, uploaded):
+        # GH-1482: put() and _put() raise for a destination that put_file()
+        # would reject before anything is uploaded, one file at a time.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = serve_s3_keys(fs._sync_fs, set())
+        sources = []
+        for name in ("a", "b", "c"):
+            (tmp_path / name).write_bytes(b"x")
+            sources.append(str(tmp_path / name))
+        args = (sources, ["bucket/ok", destination, "bucket/?versionId=v1"])
+
+        async def transfer():
+            if run == "sync":
+                fs._sync_fs.put(*args, batch_size=1)
+            else:
+                await await_bounded(fs._put(*args, batch_size=1))
+
+        if match is None:
+            await transfer()
+        else:
+            with pytest.raises(ValueError, match=match):
+                await transfer()
+        assert store == uploaded
+
+    @pytest.mark.parametrize("run", ["sync", "async"])
+    @pytest.mark.asyncio
+    async def test_put_counts_local_files(self, tmp_path, run):
+        # GH-1482: put() and _put() size and advance the callback by the
+        # local files, without the directories of a recursive copy.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = serve_s3_keys(fs._sync_fs, set())
+        (tmp_path / "src" / "empty").mkdir(parents=True)
+        (tmp_path / "src" / "a").write_bytes(b"a")
+        callback = _RecordingCallback()
+        if run == "sync":
+            fs._sync_fs.put(
+                str(tmp_path / "src"), "s3://bucket/up/", recursive=True, callback=callback
+            )
+        else:
+            await await_bounded(
+                fs._put(str(tmp_path / "src"), "s3://bucket/up/", recursive=True, callback=callback)
+            )
+        assert store == {"up/src/a"}
+        assert callback.events == [("size", 1), ("update", 1)]
+
+    @pytest.mark.parametrize("run", ["sync", "async"])
+    @pytest.mark.parametrize("method", ["get", "put"])
+    @pytest.mark.asyncio
+    async def test_failed_transfer_advances_progress(self, tmp_path, run, method):
+        # GH-1482: get() and put() advance the callback as each transfer
+        # ends, also a failed one, as _get() and _put() do.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, {"a"})
+        (tmp_path / "dir").mkdir()
+        if method == "get":
+            # A directory cannot be written as a file; Windows raises
+            # PermissionError.
+            args, error = (
+                (["bucket/a"], [str(tmp_path / "dir")]),
+                (
+                    IsADirectoryError,
+                    PermissionError,
+                ),
+            )
+        else:
+            args, error = ([str(tmp_path / "missing")], ["bucket/x"]), FileNotFoundError
+        callback = _RecordingCallback()
+
+        async def transfer():
+            if run == "sync":
+                getattr(fs._sync_fs, method)(*args, callback=callback)
+            else:
+                await await_bounded(getattr(fs, f"_{method}")(*args, callback=callback))
+
+        with pytest.raises(error):
+            await transfer()
+        assert callback.events == [("size", 1), ("update", 1)]
+
     def test_put_in_transaction_names_destinations_after_local_files(self, tmp_path):
         # GH-1404: in a transaction, the file of a destination named after a
         # local file joins the transaction of this filesystem.
