@@ -1221,6 +1221,21 @@ For example, `~(any_(flags) == True)` can become an element-wise `!= True` compa
 To negate the whole match, always explicitly group the comparison first: `~(any_(flags) == True).self_group()`.
 Quantifiers over subqueries retain their usual SQL compilation.
 
+`func.filter(array, lambda)` compiles to Athena's `filter()` function.
+A string or other bind parameter as the second argument is the text of the lambda expression, which is inserted into the SQL unquoted when the statement runs, so pass only trusted text.
+`literal_column()` and `text()` also give the lambda expression.
+
+```python
+from sqlalchemy import bindparam, func, select, String
+
+statement = select(func.filter(orders.c.item_ids, "x -> x > 1"))
+statement = select(func.filter(orders.c.item_ids, bindparam("predicate", type_=String)))
+result = conn.execute(statement, {"predicate": "x -> x > 1"})
+```
+
+`str()` of the compiled statement shows a bind parameter lambda as `__[POSTCOMPILE_<name>]`.
+Compile with `compile_kwargs={"literal_binds": True}` or `compile_kwargs={"render_postcompile": True}` to get the lambda text in the SQL.
+
 #### Partial ARRAY updates
 
 Use indexed or sliced columns as UPDATE assignment keys on Iceberg tables.
