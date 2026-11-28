@@ -74,6 +74,7 @@ from tests.pyathena.util import (
     BranchRecordingCallback,
     OpaquePath,
     ThrottledOperation,
+    call_bounded,
     forking,
     interrupt_each_opcode,
     mock_client,
@@ -1900,15 +1901,16 @@ class TestS3FileSystem:
                 raise FileNotFoundError(request["Key"])
             return {"ContentLength": 2, "ETag": '"e"', "LastModified": last_modified}
 
+        def list_objects_v2(request):
+            if not request["Prefix"].startswith("dir"):
+                return {"KeyCount": 0}
+            # A listed child has a time of its own, which is not the
+            # directory's.
+            child = {"Key": "dir/x", "LastModified": datetime(2026, 2, 3, tzinfo=UTC)}
+            return {"KeyCount": 1, "Contents": [child]}
+
         self._record_requests(
-            fs,
-            responses={
-                "head_object": head_object,
-                "list_objects_v2": lambda request: {
-                    "KeyCount": 1,
-                    "Contents": [{"Key": "dir/x"}],
-                },
-            },
+            fs, responses={"head_object": head_object, "list_objects_v2": list_objects_v2}
         )
 
         assert fs.modified("s3://bucket/key") == last_modified
@@ -5949,20 +5951,17 @@ class TestS3FileSystem:
             assert f.read(20) == data[5:25]
             assert f.read() == data[25:]
 
-    @pytest.mark.parametrize(
-        ("kwargs", "expected"),
-        [({}, "bytes"), ({"default_cache_type": "none"}, "none")],
-        ids=["unset", "given"],
-    )
-    def test_open_default_cache_type(self, kwargs, expected):
-        # A file opened without cache_type uses the default_cache_type of the
-        # filesystem, which is "bytes" unless it is given.
-        fs = S3FileSystem(client=S3_CLIENT, skip_instance_cache=True, **kwargs)
+    def test_open_default_cache_type(self, monkeypatch):
+        # A file opened without cache_type uses the documented default,
+        # "bytes", of a filesystem built without default_cache_type. fsspec's
+        # configuration, which would supply one, is cleared.
+        monkeypatch.setattr(fsspec.config, "conf", {})
+        fs = S3FileSystem(client=S3_CLIENT, skip_instance_cache=True)
         fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
         fs._info_entry.return_value.size = 4
 
         with fs.open("s3://bucket/key", "rb") as f:
-            assert f.cache.name == expected
+            assert f.cache.name == "bytes"
 
     def test_read_parallel_ranges_in_order(self):
         # The ranges of a parallel read are joined in their order, also when
@@ -6423,10 +6422,10 @@ class TestS3FileSystem:
             for record in caplog.records
         )
 
-    def test_copy_object_with_multipart_upload_interrupted_part_wait(self, caplog):
+    def test_copy_object_with_multipart_upload_interrupted_part_wait(self):
         # An interrupt while the cleanup waits for the running part copies
-        # stops it before the abort, and the upload ID is logged for a later
-        # abort.
+        # stops it, without the abort, while the part still runs, and the
+        # upload ID is logged for a later abort.
         fs = self._make_fs()
         fs.core.create_multipart_upload = mock.MagicMock(
             return_value=S3MultipartUpload(
@@ -6434,8 +6433,14 @@ class TestS3FileSystem:
             )
         )
         part_2_started = threading.Event()
-        release = threading.Event()
+        logged = threading.Event()
         interrupts = []
+        logged_while_running = []
+
+        class UploadIdLogged(logging.Handler):
+            def emit(self, record):
+                if record.levelno == logging.WARNING and "uploadid" in record.getMessage():
+                    logged.set()
 
         def upload_part_copy(**kwargs):
             if kwargs["part_number"] == 1:
@@ -6443,7 +6448,8 @@ class TestS3FileSystem:
                 assert part_2_started.wait(EVENT_TIMEOUT)
                 raise RuntimeError("copy failed")
             part_2_started.set()
-            assert release.wait(EVENT_TIMEOUT)
+            # Runs until the stopped cleanup logs the upload ID.
+            logged_while_running.append(logged.wait(EVENT_TIMEOUT))
             return SimpleNamespace(etag='"e"', part_number=kwargs["part_number"])
 
         init = _S3WriteSession.__init__
@@ -6455,8 +6461,7 @@ class TestS3FileSystem:
                 def wait(self, timeout=None):
                     # The first wait of the abort, for the running part copy.
                     if session.state is _S3WriteState.ABORTING and not interrupts:
-                        interrupts.append(part_2_started.is_set() and not release.is_set())
-                        release.set()
+                        interrupts.append(part_2_started.is_set() and not logged.is_set())
                         raise KeyboardInterrupt
                     return super().wait(timeout)
 
@@ -6468,13 +6473,17 @@ class TestS3FileSystem:
         # The HeadObject of the source.
         fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
         fs.core.abort_multipart_upload = mock.MagicMock()
+        handler = UploadIdLogged()
+        logger = logging.getLogger("pyathena.filesystem.s3")
+        logger.addHandler(handler)
 
         try:
             with (
                 mock.patch.object(_S3WriteSession, "__init__", init_with_interrupt),
                 pytest.raises(KeyboardInterrupt),
             ):
-                fs._copy_object_with_multipart_upload(
+                call_bounded(
+                    fs._copy_object_with_multipart_upload,
                     S3Path("bucket", "src"),
                     S3Path("bucket", "dst"),
                     MetadataDirective="REPLACE",
@@ -6482,14 +6491,12 @@ class TestS3FileSystem:
                     AnnotationDirective="EXCLUDE",
                 )
         finally:
-            release.set()
+            logger.removeHandler(handler)
+            logged.set()
 
         assert interrupts == [True]
+        assert logged_while_running == [True]
         fs.core.abort_multipart_upload.assert_not_called()
-        assert any(
-            record.levelname == "WARNING" and "uploadid" in record.getMessage()
-            for record in caplog.records
-        )
 
     @pytest.mark.parametrize(
         "block_size",
@@ -7436,8 +7443,8 @@ class TestS3FileSystem:
             files[0].commit()
         assert not fs.exists(path)
 
-    # Smaller than the block size (5 MiB), so a single request writes the
-    # object, as for any other size below the block size.
+    # The object stays smaller than the block size (5 MiB) after each append,
+    # so each close writes it with a single request.
     @pytest.mark.parametrize(("base", "exp"), [(1, 2**10)])
     def test_append(self, fs, base, exp):
         # TODO: Check the metadata is kept.
@@ -8233,13 +8240,16 @@ class TestS3FileSystem:
         signed = time.time()
         parsed = urllib.parse.urlparse(url)
         query = urllib.parse.parse_qs(parsed.query)
-        expires = int(query["Expires"][0])
-        with urllib.request.urlopen(url) as r:
+        with urllib.request.urlopen(url, timeout=60) as r:
             data = r.read()
 
         assert "https" in url
-        # The URL expires the given number of seconds after it was signed.
-        assert int(requested) + 100 <= expires <= signed + 100
+        # The URL expires the given number of seconds after it was signed, in
+        # the fields of the client's signature version.
+        if "X-Amz-Expires" in query:
+            assert query["X-Amz-Expires"] == ["100"]
+        else:
+            assert int(requested) + 100 <= int(query["Expires"][0]) <= signed + 100
         assert data == b"0123456789"
 
     def test_mkdir_and_rmdir(self, fs):
