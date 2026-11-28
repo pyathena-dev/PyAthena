@@ -67,15 +67,17 @@ Markdown-only changes need no live AWS tests; inspect the actual workflow path f
 
 ## Check shared behavior differentially
 
-A change to a rule that many callers depend on, such as path normalization or parsing, path pairing, cache keys, request parameter selection, or a shared default, needs a differential check.
+A change to a caller-visible rule shared by more than one path, such as path normalization or parsing, path pairing, cache keys, request parameter selection, or a default shared by synchronous and asynchronous variants, needs a differential check; so does a refactor meant to leave such a rule unchanged.
 Build it before implementing, from a matrix of the inputs that the change targets and the neighboring inputs that it must leave unchanged.
 Cover the public operations that consume the rule, synchronous and asynchronous variants, and subclasses or configurations that the rule reads.
-Run the same matrix through the merge base and the branch with the same fake service, and compare the results and the requests of each case.
-Run it twice on the merge base first; make any order-dependent case deterministic, such as with one worker, and record why.
-List the intended differences with the agreed design.
-Rerun the check after the implementation and after every repair; a difference outside the intended rows is a defect to fix or a design change to agree, not a review finding to wait for.
-The harness is a temporary comparison tool, not a test suite: keep it outside tracked files, record its matrix and result in the PR, and give the matrix to reviewers.
-Regression tests still follow the rules above, for the contracts the change adds.
+Run the same matrix through the merge base and the branch, giving each case the same initial fake-service state and an empty request log, and compare the results, exceptions, and requests of each case.
+Run it twice on the merge base first.
+Make an order-dependent case deterministic with a fixed schedule that keeps any concurrency the contract depends on, not by serializing the code under test, and record how.
+With the agreed design, write down the expected difference of each intended row: its result, exception, and requests.
+Rerun the check after the implementation and after every repair.
+Every expected difference must appear; any other difference, including an extra one in an intended row, is a defect to fix or a design change to agree, not a review finding to wait for.
+The harness is a temporary comparison tool, not a test suite: keep it in a per-task OS temporary directory, run it without the test suite's session hooks, which create AWS resources, record its matrix and result in the PR, and give the matrix to reviewers.
+Regression tests still follow the rules above for every behavior that the change adds, changes, or restores.
 
 ## Freeze review scope and preserve evidence
 
