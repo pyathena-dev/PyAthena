@@ -1222,7 +1222,7 @@ To negate the whole match, always explicitly group the comparison first: `~(any_
 Quantifiers over subqueries retain their usual SQL compilation.
 
 `func.filter(array, lambda)` compiles to Athena's `filter()` function.
-A string or other bind parameter as the second argument is the text of the lambda expression, which is inserted into the SQL unquoted when the statement runs, so pass only trusted text.
+A string, or a bind parameter of type `String` or without a type, as the second argument is the text of the lambda expression, which is inserted into the SQL unquoted when the statement runs, so pass only trusted text.
 `literal_column()` and `text()` also give the lambda expression.
 
 ```python
@@ -1233,10 +1233,10 @@ statement = select(func.filter(orders.c.item_ids, bindparam("predicate", type_=S
 result = conn.execute(statement, {"predicate": "x -> x > 1"})
 ```
 
-A statement with a bind parameter lambda can't run with a list of parameter sets (`executemany()`); use `literal_column()` or `text()` for the lambda there.
+A statement with such a lambda, including a plain string, can't run with a list of parameter sets (`executemany()`); use `literal_column()` or `text()` for the lambda there.
 
 `str()` of the compiled statement shows a bind parameter lambda as `__[POSTCOMPILE_<name>]`.
-Compile with `compile_kwargs={"render_postcompile": True}` to get the lambda text in the SQL; give a lambda that is only an execution parameter its value first, as in `statement.params(predicate="x -> x > 1")`.
+Compile with the Athena dialect and `compile_kwargs={"render_postcompile": True}`, such as `statement.compile(conn, compile_kwargs={"render_postcompile": True})`, to get the lambda text in the SQL; give a lambda that is only an execution parameter its value first, as in `statement.params(predicate="x -> x > 1")`.
 
 #### Partial ARRAY updates
 

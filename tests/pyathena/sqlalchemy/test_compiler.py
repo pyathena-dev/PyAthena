@@ -277,6 +277,15 @@ class TestAthenaStatementCompiler:
             "SELECT filter(numbers, x -> x > 1) AS filter_1"
         )
 
+    def test_visit_filter_func_typed_bind(self):
+        # A bind of another type is a value, not the lambda text.
+        statement = select(
+            func.filter(column("numbers", ARRAY(Integer)), bindparam("lambda_", type_=Integer))
+        )
+        assert str(statement.compile(dialect=self.dialect)) == (
+            "SELECT filter(numbers, %(lambda_)s) AS filter_1"
+        )
+
     def test_visit_filter_func_literal_binds(self):
         expression = func.filter(column("numbers", ARRAY(Integer)), literal("x -> x > 0"))
         compiled = select(expression).compile(

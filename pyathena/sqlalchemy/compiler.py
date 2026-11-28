@@ -1014,8 +1014,9 @@ class AthenaStatementCompiler(SQLCompiler):
     def visit_filter_func(self, fn: Function[Any], **kw: Any) -> str:
         """Render Athena ``filter()`` with a lambda expression.
 
-        A bind parameter second argument, such as the string ``"x -> x > 1"``, is
-        the text of the lambda and is rendered unquoted, so pass only trusted text.
+        A string or untyped bind parameter second argument, such as the string
+        ``"x -> x > 1"``, is the text of the lambda and is rendered unquoted, so
+        pass only trusted text. Other arguments are compiled as they are.
 
         Args:
             fn: The function expression.
@@ -1038,11 +1039,13 @@ class AthenaStatementCompiler(SQLCompiler):
         # Process the array expression normally
         array_sql = self.process(array_expr, **kw)
 
-        if isinstance(lambda_expr, BindParameter):
-            # A bind value such as 'x -> x > 0' is the lambda itself. The value is
-            # not part of the statement cache key, so it is rendered as a
+        if isinstance(lambda_expr, BindParameter) and isinstance(
+            lambda_expr.type, (types.String, types.NullType)
+        ):
+            # A string bind value such as 'x -> x > 0' is the lambda itself. The
+            # value is not part of the statement cache key, so it is rendered as a
             # literal_execute parameter when the statement runs, not into the
-            # cached SQL.
+            # cached SQL. The bind type is part of the key, so the choice is too.
             lambda_sql = self.process(
                 type_coerce(lambda_expr, _AthenaLambda()), **{**kw, "literal_execute": True}
             )
