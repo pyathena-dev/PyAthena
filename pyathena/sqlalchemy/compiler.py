@@ -1193,8 +1193,20 @@ class AthenaDDLCompiler(DDLCompiler):
         return self._preparer
 
     @preparer.setter
-    def preparer(self, value: IdentifierPreparer):
-        pass
+    def preparer(self, value: IdentifierPreparer) -> None:
+        """Keep a DDL preparer and replace any other preparer with one.
+
+        ``Compiler.__init__`` assigns the dialect's DML preparer and then, for a
+        ``schema_translate_map``, a copy of the current preparer that renders
+        schema placeholders. Keeping that copy translates the schema while
+        quoting with backticks and the DDL reserved words.
+
+        Args:
+            value: The preparer to use.
+        """
+        if not isinstance(value, AthenaDDLIdentifierPreparer):
+            value = AthenaDDLIdentifierPreparer(self.dialect)
+        self._preparer = value
 
     def __init__(
         self,
@@ -1216,7 +1228,6 @@ class AthenaDDLCompiler(DDLCompiler):
             compile_kwargs: Compiler keyword arguments. ``None`` is replaced with
                 an empty mapping.
         """
-        self._preparer = AthenaDDLIdentifierPreparer(dialect)
         super().__init__(
             dialect=dialect,
             statement=statement,
@@ -1443,9 +1454,10 @@ class AthenaDDLCompiler(DDLCompiler):
         The dialect keyword argument ``awsathena_location`` gives the location.
         Without it, the location is ``<base>/<schema>/<table>/``, where the base
         is the ``location`` connection option or the S3 staging directory, and
-        the schema of an unqualified table is the database of the statement's
-        cursor, taken from ``cursor_kwargs`` over the connection. Without a
-        database, the cursor runs in Athena's ``default`` database.
+        the schema is the table's schema after the ``schema_translate_map``.
+        For a table left without a schema, it is the database of the
+        statement's cursor, taken from ``cursor_kwargs`` over the connection.
+        Without a database, the cursor runs in Athena's ``default`` database.
 
         Args:
             table: The table being created.
@@ -1465,8 +1477,11 @@ class AthenaDDLCompiler(DDLCompiler):
             if not base_location:
                 return None
             base_location += "/" if not base_location.endswith("/") else ""
+            schema = table.schema
+            if self.schema_translate_map and schema in self.schema_translate_map:
+                schema = self.schema_translate_map[schema]
             schema = (
-                table.schema
+                schema
                 or self._get_cursor_option(
                     connect_opts, "schema_name", connect_opts.get("schema_name")
                 )
