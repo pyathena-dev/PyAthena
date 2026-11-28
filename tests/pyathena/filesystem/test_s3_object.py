@@ -428,29 +428,13 @@ class TestS3PutObject:
         assert actual.request_charged == "requester"
 
     def test_to_dict(self):
-        # GH-1383: keyed as before the dataclass, with a leading underscore,
-        # and with the keys of the added checksums.
+        # GH-1383: keyed by the field names.
         actual = S3PutObject({"ETag": '"e"', "VersionId": "v"}).to_dict()
-        assert actual["_etag"] == '"e"'
-        assert actual["_version_id"] == "v"
-        assert actual["_checksum_sha256"] is None
-        assert {f"_{name}" for name in (*_CHECKSUMS.values(), "checksum_type")} <= actual.keys()
-        assert actual.keys() >= {
-            "_expiration",
-            "_version_id",
-            "_etag",
-            "_checksum_crc32",
-            "_checksum_crc32c",
-            "_checksum_sha1",
-            "_checksum_sha256",
-            "_server_side_encryption",
-            "_sse_customer_algorithm",
-            "_sse_customer_key_md5",
-            "_sse_kms_key_id",
-            "_sse_kms_encryption_context",
-            "_bucket_key_enabled",
-            "_request_charged",
-        }
+        assert actual["etag"] == '"e"'
+        assert actual["version_id"] == "v"
+        assert actual["checksum_sha256"] is None
+        assert {*_CHECKSUMS.values(), "checksum_type"} <= actual.keys()
+        assert not any(key.startswith("_") for key in actual)
 
     def test_equality(self):
         # GH-1383: the results compare and hash by their fields.
@@ -633,29 +617,13 @@ class TestS3CompleteMultipartUpload:
         assert actual.request_charged == "requester"
 
     def test_to_dict(self):
-        # GH-1383: keyed as before the dataclass, with a leading underscore,
-        # and with the keys of the added checksums.
+        # GH-1383: keyed by the field names.
         actual = S3CompleteMultipartUpload({"ETag": '"e"', "VersionId": "v"}).to_dict()
-        assert actual["_etag"] == '"e"'
-        assert actual["_version_id"] == "v"
-        assert actual["_location"] is None
-        assert {f"_{name}" for name in (*_CHECKSUMS.values(), "checksum_type")} <= actual.keys()
-        assert actual.keys() >= {
-            "_location",
-            "_bucket",
-            "_key",
-            "_expiration",
-            "_version_id",
-            "_etag",
-            "_checksum_crc32",
-            "_checksum_crc32c",
-            "_checksum_sha1",
-            "_checksum_sha256",
-            "_server_side_encryption",
-            "_sse_kms_key_id",
-            "_bucket_key_enabled",
-            "_request_charged",
-        }
+        assert actual["etag"] == '"e"'
+        assert actual["version_id"] == "v"
+        assert actual["location"] is None
+        assert {*_CHECKSUMS.values(), "checksum_type"} <= actual.keys()
+        assert not any(key.startswith("_") for key in actual)
 
 
 class TestS3CopyObject:

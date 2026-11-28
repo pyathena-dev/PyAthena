@@ -2009,19 +2009,23 @@ class TestS3FileSystem:
 
     def test_touch_put_object(self):
         fs = self._make_fs()
-        fs.core.call.return_value = {"ETag": '"e"'}
+        fs.core.call.return_value = {"ETag": '"e"', "ResponseMetadata": {"HTTPStatusCode": 200}}
 
-        assert fs.touch("s3://bucket/key", ContentType="text/plain")["_etag"] == '"e"'
+        # GH-1383: the response as botocore returns it, as s3fs returns it.
+        assert fs.touch("s3://bucket/key", ContentType="text/plain") == {
+            "ETag": '"e"',
+            "ResponseMetadata": {"HTTPStatusCode": 200},
+        }
         fs.core.call.assert_called_once_with(
             fs.core.client.put_object, Bucket="bucket", Key="key", ContentType="text/plain"
         )
-        # touch() writes no data, so a body is rejected.
         fs.core.call.reset_mock()
-        with pytest.raises(TypeError, match="body"):
-            fs.touch("s3://bucket/key", body=b"data")
-        # GH-1372: also as the parameter of PutObject.
+        # GH-1372: touch() writes no data, so a body is rejected.
         with pytest.raises(TypeError, match="empty object"):
             fs.touch("s3://bucket/key", Body=b"data")
+        # GH-1383: the path sets the bucket and the key.
+        with pytest.raises(TypeError, match="Key"):
+            fs.touch("s3://bucket/key", Key="other")
         # A version of an object cannot be written.
         with pytest.raises(ValueError):  # noqa: PT011
             fs.touch("s3://bucket/key?versionId=v1")

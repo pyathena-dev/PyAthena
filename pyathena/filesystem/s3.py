@@ -2691,11 +2691,11 @@ class S3FileSystem(AbstractFileSystem):
                 except ``Body``: the object is empty.
 
         Returns:
-            The PutObject response as a dictionary (see
-            :meth:`S3PutObject.to_dict`).
+            The PutObject response as botocore returns it, including
+            ``ResponseMetadata``, as s3fs returns it.
 
         Raises:
-            TypeError: If kwargs has ``Body``.
+            TypeError: If kwargs has ``Body``, ``Bucket`` or ``Key``.
             ValueError: If the path has a version ID, is a bucket, or exists
                 while ``truncate`` is False.
         """
@@ -2710,11 +2710,11 @@ class S3FileSystem(AbstractFileSystem):
         if not s3_path.key:
             raise ValueError("Cannot touch the bucket.")
 
-        # The empty body is passed, so that a body keyword argument raises
-        # TypeError.
-        object_ = self.core.put_object(s3_path, None, **kwargs)
+        response = self.core.call(
+            self.core.client.put_object, Bucket=s3_path.bucket, Key=s3_path.key, **kwargs
+        )
         self.invalidate_cache(path)
-        return object_.to_dict()
+        return response
 
     def mv(self, path1, path2, recursive=False, maxdepth=None, batch_size=None, **kwargs) -> None:
         """Move files from one S3 location to another.
