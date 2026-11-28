@@ -4862,6 +4862,68 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="do not match"):
             fs.open("s3://bucket/key?versionId=v2", "rb", version_id="v1")
 
+    @pytest.mark.parametrize(
+        ("path", "kwargs"),
+        [
+            ("s3://bucket/key", {"VersionId": "v1"}),
+            ("s3://bucket/key", {"VersionId": "v1", "version_id": "v1"}),
+            ("s3://bucket/key?versionId=v1", {"VersionId": "v1"}),
+        ],
+    )
+    def test_open_version_id_parameter(self, path, kwargs):
+        # GH-1437: a VersionId parameter names the version that is looked up,
+        # as version_id does. The lookup sized the file by the current
+        # version, which is empty here, so the read returned b"".
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        requests = []
+
+        def call(method, **request):
+            requests.append((method._extract_mock_name().split(".")[-1], request))
+            if request.get("VersionId") == "v1":
+                if "Range" in request:
+                    return {"Body": io.BytesIO(b"data")}
+                return {"ContentLength": 4, "ETag": '"v1"', "VersionId": "v1"}
+            return {"ContentLength": 0, "ETag": '"current"'}
+
+        fs.core.call.side_effect = call
+
+        with fs.open(path, "rb", **kwargs) as f:
+            assert f.read() == b"data"
+        assert requests == [
+            ("head_object", {"Bucket": "bucket", "Key": "key", "VersionId": "v1"}),
+            (
+                "get_object",
+                {
+                    "Bucket": "bucket",
+                    "Key": "key",
+                    "VersionId": "v1",
+                    "IfMatch": '"v1"',
+                    "Range": "bytes=0-3",
+                },
+            ),
+        ]
+        # A reopened (e.g., unpickled) file reads the version of its path.
+        assert f.__reduce__()[1][1] == "bucket/key?versionId=v1"
+
+    @pytest.mark.parametrize(
+        ("path", "mode", "kwargs", "match"),
+        [
+            ("s3://bucket/key", "rb", {"VersionId": "v1", "version_id": "v2"}, "do not match"),
+            ("s3://bucket/key?versionId=v2", "rb", {"VersionId": "v1"}, "do not match"),
+            ("s3://bucket/key", "wb", {"VersionId": "v1"}, "Cannot write"),
+        ],
+    )
+    def test_open_version_id_parameter_invalid(self, path, mode, kwargs, match):
+        # GH-1437: a VersionId parameter is checked as version_id is, before
+        # any request.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+
+        with pytest.raises(ValueError, match=match):
+            fs.open(path, mode, **kwargs)
+        fs.core.call.assert_not_called()
+
     def test_open_version_aware_pins_version_in_path(self):
         # GH-979: the version observed at open time is carried in the path as
         # an explicit version is, so that the metadata, attributes and URL of

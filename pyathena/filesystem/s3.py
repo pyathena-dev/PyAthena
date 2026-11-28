@@ -5008,10 +5008,12 @@ class S3FileTarget:
             block_size: The block size of the file.
             version_id: The version ID to read. Must match the version ID in
                 the path if both are given. A version cannot be given, in
-                either form, for writing or appending.
+                any form, for writing or appending.
             size: The size of the object to read, if known.
             request_kwargs: The parameters of the S3 requests of the file. A
-                copy is kept.
+                copy is kept. A non-empty ``VersionId`` among them is taken
+                as ``version_id`` and must match the other forms of the
+                version.
 
         Returns:
             The resolved target.
@@ -5044,6 +5046,17 @@ class S3FileTarget:
                 )
         elif path_version_id:
             version_id = path_version_id
+        if requested_version_id := kwargs.get("VersionId"):
+            # A VersionId parameter names the version as version_id does, so
+            # that the lookup sizes the version that the reads get. An empty
+            # one is sent as given, as cat_file() sends it.
+            if version_id and requested_version_id != version_id:
+                raise ValueError(
+                    f"The VersionId: {requested_version_id} specified in the parameters and "
+                    f"the version_id: {version_id} specified in the argument or the path "
+                    "do not match."
+                )
+            version_id = kwargs.pop("VersionId")
         if version_id and "r" not in mode:
             raise ValueError("Cannot write to the file with the version specified.")
         if version_id and not path_version_id:
@@ -5197,8 +5210,9 @@ class S3File(AbstractBufferedFile):
                 (see :meth:`S3FileTarget.resolve`).
             mode: The file mode: ``rb``, ``wb``, ``ab``, or ``xb``.
             version_id: The version ID to read. Must match the version ID in
-                the path if both are given. A version cannot be given, in
-                either form, for writing or appending.
+                the path, and a ``VersionId`` parameter, if they are given. A
+                version cannot be given, in any form, for writing or
+                appending.
             max_workers: The number of parallel requests of the file: range
                 reads, part copies, and part uploads. A write keeps at most
                 ``max_workers`` parts, including the part copies of an append,
