@@ -639,7 +639,21 @@ class TestAioS3FileSystem:
             ("_checksum", "checksum", ("s3://bucket/key",), {"refresh": True, "fn": 1}, True),
             ("_created", "created", ("s3://bucket/key",), {}, True),
             ("_modified", "modified", ("s3://bucket/key",), {}, True),
-            ("_tree", "tree", ("s3://bucket/dir",), {"recursion_limit": 1}, True),
+            (
+                "_tree",
+                "tree",
+                ("s3://bucket/dir",),
+                {
+                    "recursion_limit": 1,
+                    "max_display": 1,
+                    "display_size": True,
+                    "prefix": ">",
+                    "is_last": False,
+                    "first": False,
+                    "indent_size": 2,
+                },
+                True,
+            ),
         ],
     )
     @pytest.mark.asyncio
@@ -672,6 +686,8 @@ class TestAioS3FileSystem:
         task = asyncio.ensure_future(getattr(fs, method)(*args, **kwargs))
         try:
             await asyncio.wait_for(wait_entered(), EVENT_TIMEOUT)
+            # The coroutine waits for the call.
+            assert not task.done()
         finally:
             released.set()
         assert await asyncio.wait_for(task, EVENT_TIMEOUT) is result
