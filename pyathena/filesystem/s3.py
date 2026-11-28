@@ -3266,7 +3266,7 @@ class S3FileSystem(AbstractFileSystem):
                     else destination
                 )
                 key = ("object", id(destination))
-                if isinstance(raw, FileIO) and not raw.closed:
+                if type(raw) is FileIO and not raw.closed:
                     info = os.fstat(raw.fileno())
                     if S_ISREG(info.st_mode):
                         key = ("file", info.st_dev, info.st_ino)
