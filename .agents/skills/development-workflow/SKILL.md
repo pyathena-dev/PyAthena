@@ -74,7 +74,8 @@ Run the same matrix through the merge base and the branch with the same fake ser
 Run it twice on the merge base first; make any order-dependent case deterministic, such as with one worker, and record why.
 List the intended differences with the agreed design.
 Rerun the check after the implementation and after every repair; a difference outside the intended rows is a defect to fix or a design change to agree, not a review finding to wait for.
-Keep the harness outside tracked files, record its matrix and result in the PR, and give the matrix to reviewers.
+The harness is a temporary comparison tool, not a test suite: keep it outside tracked files, record its matrix and result in the PR, and give the matrix to reviewers.
+Regression tests still follow the rules above, for the contracts the change adds.
 
 ## Freeze review scope and preserve evidence
 
