@@ -3630,11 +3630,11 @@ class S3FileSystem(AbstractFileSystem):
         """
         # In a transaction, through the buffered open() path, which keeps the
         # deferred-commit semantics of fsspec transactions.
-        self._pipe_file_with(
+        self._pipe_file_with_opener(
             path, value, mode, self._open_path if self._intrans else None, **kwargs
         )
 
-    def _pipe_file_with(
+    def _pipe_file_with_opener(
         self,
         path: str | os.PathLike[str],
         value: bytes | bytearray | memoryview,
@@ -4167,9 +4167,9 @@ class S3FileSystem(AbstractFileSystem):
             the method returns without performing any operation. Bucket-only
             destinations (without key) are also not supported.
         """
-        self._put_file_with(lpath, rpath, callback, mode, self._open_path, **kwargs)
+        self._put_file_with_opener(lpath, rpath, callback, mode, self._open_path, **kwargs)
 
-    def _put_file_with(
+    def _put_file_with_opener(
         self,
         lpath: str | os.PathLike[str],
         rpath: str | os.PathLike[str] | S3Path,

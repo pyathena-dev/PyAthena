@@ -475,7 +475,7 @@ class AioS3FileSystem(AsyncFileSystem):
             # The transaction belongs to this filesystem, not to the internal
             # S3FileSystem, so write through open() to defer the commit to it.
             await self._write_in_transaction(
-                functools.partial(self._sync_fs._pipe_file_with, path, value, mode, **kwargs)
+                functools.partial(self._sync_fs._pipe_file_with_opener, path, value, mode, **kwargs)
             )
             return
         await self._thread_pool.run(self._sync_fs.pipe_file, path, value, mode=mode, **kwargs)
@@ -516,7 +516,7 @@ class AioS3FileSystem(AsyncFileSystem):
             # See _pipe_file.
             await self._write_in_transaction(
                 functools.partial(
-                    self._sync_fs._put_file_with, lpath, rpath, callback, mode, **kwargs
+                    self._sync_fs._put_file_with_opener, lpath, rpath, callback, mode, **kwargs
                 )
             )
             return
