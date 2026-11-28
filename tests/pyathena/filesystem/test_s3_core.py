@@ -938,6 +938,7 @@ class TestS3Core:
 
     def test_delete_object(self):
         core, stubber = _make_core()
+        stubber.add_response("delete_object", {}, {"Bucket": "bucket", "Key": "key"})
         # A versioned bucket creates a delete marker for a path without a
         # version.
         stubber.add_response(
@@ -957,12 +958,14 @@ class TestS3Core:
         )
         with stubber:
             # GH-1383: the version that the request created or deleted.
+            unversioned = core.delete_object(S3Path("bucket", "key"))
             marker = core.delete_object(S3Path("bucket", "key"))
             deleted = core.delete_object(
                 S3Path("bucket", "key", "v1"), BypassGovernanceRetention=True
             )
         stubber.assert_no_pending_responses()
-        assert type(marker) is S3DeleteObject
+        assert type(unversioned) is S3DeleteObject
+        assert (unversioned.version_id, unversioned.delete_marker) == (None, False)
         assert (marker.version_id, marker.delete_marker) == ("m1", True)
         assert (deleted.version_id, deleted.delete_marker) == ("v1", False)
 

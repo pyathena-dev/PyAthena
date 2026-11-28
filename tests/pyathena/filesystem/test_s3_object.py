@@ -434,8 +434,7 @@ class TestS3PutObject:
         assert actual["_etag"] == '"e"'
         assert actual["_version_id"] == "v"
         assert actual["_checksum_sha256"] is None
-        assert actual["_checksum_crc64nvme"] is None
-        assert actual["_checksum_type"] is None
+        assert {f"_{name}" for name in (*_CHECKSUMS.values(), "checksum_type")} <= actual.keys()
         assert actual.keys() >= {
             "_expiration",
             "_version_id",
@@ -452,13 +451,6 @@ class TestS3PutObject:
             "_bucket_key_enabled",
             "_request_charged",
         }
-
-    def test_repr(self):
-        # GH-1383: the representation, which logs may show, leaves out the
-        # encryption context.
-        actual = S3PutObject({"ETag": '"e"', "SSEKMSEncryptionContext": "secret-context"})
-        assert "secret-context" not in repr(actual)
-        assert actual.sse_kms_encryption_context == "secret-context"
 
     def test_equality(self):
         # GH-1383: the results compare and hash by their fields.
@@ -647,8 +639,7 @@ class TestS3CompleteMultipartUpload:
         assert actual["_etag"] == '"e"'
         assert actual["_version_id"] == "v"
         assert actual["_location"] is None
-        assert actual["_checksum_crc64nvme"] is None
-        assert actual["_checksum_type"] is None
+        assert {f"_{name}" for name in (*_CHECKSUMS.values(), "checksum_type")} <= actual.keys()
         assert actual.keys() >= {
             "_location",
             "_bucket",
@@ -750,6 +741,15 @@ def test_checksums(model, result_key):
         name: f"value of {key}" for key, name in _CHECKSUMS.items()
     }
     assert actual.checksum_type == "FULL_OBJECT"
+
+
+@pytest.mark.parametrize("model", [S3PutObject, S3MultipartUpload])
+def test_repr_leaves_out_encryption_context(model):
+    # GH-1383: the representation, which logs may show, leaves out the
+    # encryption context; the field keeps its value.
+    actual = model({"SSEKMSEncryptionContext": "secret-context"})
+    assert "secret-context" not in repr(actual)
+    assert actual.sse_kms_encryption_context == "secret-context"
 
 
 @pytest.mark.parametrize(
