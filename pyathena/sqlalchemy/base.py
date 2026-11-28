@@ -377,6 +377,23 @@ class AthenaDialect(DefaultDialect):
         """Return a cursor option, letting ``cursor_kwargs`` override the connection default."""
         return raw_connection.cursor_kwargs.get(name, getattr(raw_connection, name))
 
+    @classmethod
+    def _reflection_schema(cls, raw_connection: PoolProxiedConnection, schema: str | None) -> str:
+        """Return the schema that a reflection call reads.
+
+        Without an explicit schema, it is the database that statements run in:
+        the cursor's ``schema_name``, which ``cursor_kwargs`` can override, or
+        Athena's ``default`` database when the cursor has none.
+
+        Args:
+            raw_connection: The pooled DB-API connection.
+            schema: The schema passed to the reflection call, if any.
+
+        Returns:
+            The schema name.
+        """
+        return schema or cls._cursor_option(raw_connection, "schema_name") or "default"
+
     @staticmethod
     def _fold_table_name(catalog: str | None, name: str) -> str:
         """Glue lowercases table names, so ``AwsDataCatalog`` lookups fold case."""
@@ -397,7 +414,7 @@ class AthenaDialect(DefaultDialect):
     def _get_table(self, connection, table_name: str, schema: str | None = None, **kw):
         raw_connection = self._raw_connection(connection)
         catalog = self._cursor_option(raw_connection, "catalog_name")
-        schema = schema if schema else self._cursor_option(raw_connection, "schema_name")
+        schema = self._reflection_schema(raw_connection, schema)
         name = self._fold_table_name(catalog, str(table_name))
         # Key by the metadata request, not the reflection method's arguments.
         # Listings and individual lookups share positive results in this Inspector.
@@ -463,7 +480,7 @@ class AthenaDialect(DefaultDialect):
     def _get_columns(self, connection, table_name: str, schema: str | None = None, **kw):
         raw_connection = self._raw_connection(connection)
         catalog = self._cursor_option(raw_connection, "catalog_name")
-        schema = schema if schema else self._cursor_option(raw_connection, "schema_name")
+        schema = self._reflection_schema(raw_connection, schema)
         name = self._fold_table_name(catalog, str(table_name))
         info_cache = kw.get("info_cache")
         if info_cache is None:
@@ -627,7 +644,7 @@ class AthenaDialect(DefaultDialect):
     def _get_tables(self, connection, schema: str | None = None, **kw):
         raw_connection = self._raw_connection(connection)
         catalog = self._cursor_option(raw_connection, "catalog_name")
-        schema = schema if schema else self._cursor_option(raw_connection, "schema_name")
+        schema = self._reflection_schema(raw_connection, schema)
         info_cache = kw.get("info_cache")
         if info_cache is None:
             info_cache = {}
@@ -708,7 +725,7 @@ class AthenaDialect(DefaultDialect):
         self, connection: Connection, view_name: str, schema: str | None = None, **kw
     ):
         raw_connection = self._raw_connection(connection)
-        schema = schema if schema else self._cursor_option(raw_connection, "schema_name")
+        schema = self._reflection_schema(raw_connection, schema)
         query = f"""SHOW CREATE VIEW "{schema}"."{view_name}";"""
         with self._internal_cursor(raw_connection) as cursor:
             try:

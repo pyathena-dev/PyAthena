@@ -75,6 +75,7 @@ async with engine.connect() as connection:
 ## Reflection and identifiers
 
 The dialect reflects schemas, tables, views, columns, comments, and Athena table options.
+Without an explicit schema, reflection reads the database that statements run in: the cursor's `schema_name` (which `cursor_kwargs` can override), or `default` when that is not set.
 Athena does not support primary key, foreign key, unique, or index constraints.
 Its `CREATE TABLE` syntax does not enforce `nullable=False`, and reflected columns report `nullable=True` and `autoincrement=False`.
 Iceberg strings do not preserve `CHAR` or `VARCHAR` length constraints; `CHAR` is not a supported Iceberg type.
