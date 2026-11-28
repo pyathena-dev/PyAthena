@@ -307,6 +307,25 @@ blocks them:
 `max_workers` defaults to the `max_pool_connections` of the S3 client, 10 unless
 configured, as for `S3FileSystem`.
 
+`metadata()`, `getxattr()`, `setxattr()`, `get_tags()`, `put_tags()`, `chmod()`,
+`object_version_info()`, `list_multipart_uploads()`, `clear_multipart_uploads()`,
+`checksum()`, `created()`, `modified()`, `walk()`, `tree()`, `touch()`, and `rmdir()`
+run on the caller's thread, as with `S3FileSystem`, instead of through fsspec's event
+loop, so they also work inside a running event loop; the parallel requests of a
+recursive `chmod()` and of `clear_multipart_uploads()` run in the request pool. The
+coroutines `_metadata()`, `_getxattr()`, `_setxattr()`, `_get_tags()`, `_put_tags()`,
+`_chmod()`, `_object_version_info()`, `_list_multipart_uploads()`,
+`_clear_multipart_uploads()`, `_checksum()`, `_created()`, `_modified()`, `_tree()`,
+`_touch()`, and `_rmdir()` run them in the threads of the filesystem, and so do the
+listings of the asynchronous generator `_walk()`. A cancellation of
+`_clear_multipart_uploads()` that stops its call before the listing returns aborts no
+upload.
+
+`default_block_size`, `default_cache_type`, `max_workers`, `s3_additional_kwargs`,
+`allow_bucket_creation`, `allow_bucket_deletion`, `version_aware`, and `request_kwargs`
+are read-only attributes that return those of the internal `S3FileSystem`;
+`request_kwargs` returns a copy.
+
 The pools create threads as the calls need them, and each call runs with the caller's
 context variables, as with `asyncio.to_thread()`.
 In a forked child process, a pool creates new threads.
@@ -361,7 +380,9 @@ order of the transfers raise `ValueError` before anything is transferred, as wit
 into it one after another, in order, with `n` = 1.
 A recursive `_put()` sends no request for the local directories. `_rm()` sends
 `batch_size` DeleteObjects requests at a time, `max_workers` by default and with `-1`; its
-`max_workers` argument is a deprecated alias of `batch_size`.
+`max_workers` argument is a deprecated alias of `batch_size`. The `batch_size` argument
+of `AioS3FileSystem`, fsspec's batch size of these coroutines, does not apply to `_rm()`,
+which follows a `batch_size` in fsspec's configuration for the `s3` or `s3a` protocol.
 
 ### Executor strategy
 

@@ -4643,16 +4643,28 @@ class S3FileSystem(AbstractFileSystem):
 
         Uploads completed or aborted after listing are already cleared.
         All abort results are checked before another abort error is raised.
+        When the enclosing scopes are stopped by the time a listing that
+        returned uploads has ended, such as by the cancellation of
+        ``AioS3FileSystem._clear_multipart_uploads()``, nothing is aborted.
 
         Args:
             path: S3 bucket or key path (e.g., "bucket", "s3://bucket" or
                 "s3://bucket/prefix"). If the path contains a key, only the
                 uploads to that key and to the keys under ``key/`` are
                 aborted, as listed by :meth:`list_multipart_uploads`.
+
+        Raises:
+            concurrent.futures.CancelledError: If the enclosing scopes are
+                stopped when a listing that returned uploads has ended.
+            OSError: The error of an abort that failed, other than for an
+                upload that no longer exists.
         """
         uploads = self.list_multipart_uploads(path)
         if not uploads:
             return
+        # A caller that stopped during the listing, such as a cancelled
+        # _clear_multipart_uploads() of AioS3FileSystem, aborts nothing.
+        raise_if_stopped("abort the listed multipart uploads")
         # Every abort runs also after another failed, and an interrupt cancels
         # those that have not started.
         results = self._map(
@@ -4678,7 +4690,7 @@ class S3FileSystem(AbstractFileSystem):
             isinstance(error, FileNotFoundError) and S3ClientError.code_of(error) == "NoSuchUpload"
         )
 
-    def created(self, path: str | os.PathLike[str]) -> datetime:
+    def created(self, path: str | os.PathLike[str]) -> datetime | None:
         """Return the creation time of the path.
 
         Returns the same value as :meth:`modified`.
@@ -4687,11 +4699,12 @@ class S3FileSystem(AbstractFileSystem):
             path: S3 path (s3://bucket/key).
 
         Returns:
-            The last-modified time of the object.
+            The last-modified time of the object, or None for a bucket or a
+            directory, which have none.
         """
         return self.modified(path)
 
-    def modified(self, path: str | os.PathLike[str]) -> datetime:
+    def modified(self, path: str | os.PathLike[str]) -> datetime | None:
         """Return the last-modified time of the path.
 
         Args:
@@ -4702,7 +4715,7 @@ class S3FileSystem(AbstractFileSystem):
             buckets and directories.
         """
         info = self._info_entry(path)
-        return cast(datetime, info.get("last_modified"))
+        return cast(datetime | None, info.get("last_modified"))
 
     def invalidate_cache(self, path: str | os.PathLike[str] | None = None) -> None:
         """Remove the cached entries of the path and its parent paths.

@@ -277,6 +277,13 @@ class AioS3FileSystem(AsyncFileSystem):
     The implementation uses composition: an internal ``S3FileSystem`` instance handles
     all boto3 calls, while this class delegates to it in the threads of its pool.
     This avoids diamond inheritance issues and keeps all boto3 logic in one place.
+    Some synchronous methods, such as :meth:`metadata`, :meth:`get_tags`
+    and :meth:`tree`, call it on the caller's thread instead of through
+    fsspec's event loop, so that they also work inside a running event loop;
+    their coroutine forms, such as :meth:`_metadata`, run in the threads of
+    the pool. The s3fs attributes of ``S3FileSystem``, such as
+    ``max_workers`` and ``version_aware``, are read-only properties that
+    return those of the internal filesystem.
 
     File handles created by ``_open`` run their parallel operations (range
     reads, multipart uploads) in that request pool, as ``S3File`` does.
@@ -343,7 +350,12 @@ class AioS3FileSystem(AsyncFileSystem):
             version_aware: Passed to the internal ``S3FileSystem``.
             asynchronous: Passed to ``fsspec.asyn.AsyncFileSystem``.
             loop: Passed to ``fsspec.asyn.AsyncFileSystem``.
-            batch_size: Passed to ``fsspec.asyn.AsyncFileSystem``.
+            batch_size: Passed to ``fsspec.asyn.AsyncFileSystem``: the
+                default batch size of fsspec's batch coroutines, such as
+                ``_get()``, ``_put()``, ``_copy()`` and ``_mv()``. It is not
+                passed to the internal ``S3FileSystem``, whose ``batch_size``
+                ``_rm()`` follows: ``max_workers`` unless fsspec's
+                configuration for the protocol sets one.
             client: Passed to the internal ``S3FileSystem``. A filesystem with
                 a given client cannot be pickled.
             retry_config: Passed to the internal ``S3FileSystem``.
@@ -424,6 +436,51 @@ class AioS3FileSystem(AsyncFileSystem):
             # S3FileSystem, which creates the one that both use, exists.
             return
         sync_fs.dircache = value
+
+    @property
+    def default_block_size(self) -> int:
+        """The default block size of the files of the wrapped ``S3FileSystem``."""
+        return self._sync_fs.default_block_size
+
+    @property
+    def default_cache_type(self) -> str:
+        """The default cache type of the files of the wrapped ``S3FileSystem``."""
+        return self._sync_fs.default_cache_type
+
+    @property
+    def max_workers(self) -> int:
+        """The ``max_workers`` of the wrapped ``S3FileSystem``.
+
+        The size of its request pool and of the thread pool of this
+        filesystem, and the default number of parallel requests of the files
+        and copies.
+        """
+        return self._sync_fs.max_workers
+
+    @property
+    def s3_additional_kwargs(self) -> dict[str, Any]:
+        """The ``s3_additional_kwargs`` of the wrapped ``S3FileSystem``, the same dictionary."""
+        return self._sync_fs.s3_additional_kwargs
+
+    @property
+    def allow_bucket_creation(self) -> bool:
+        """Whether ``mkdir()`` and ``makedirs()`` may create a bucket."""
+        return self._sync_fs.allow_bucket_creation
+
+    @property
+    def allow_bucket_deletion(self) -> bool:
+        """Whether ``rmdir()`` may delete a bucket."""
+        return self._sync_fs.allow_bucket_deletion
+
+    @property
+    def version_aware(self) -> bool:
+        """Whether reads pin the version observed at open time and ``ls()`` may list versions."""
+        return self._sync_fs.version_aware
+
+    @property
+    def request_kwargs(self) -> dict[str, Any]:
+        """A copy of the ``request_kwargs`` of the wrapped ``S3FileSystem``."""
+        return self._sync_fs.request_kwargs
 
     def close(self) -> None:
         """Release the threads of the filesystem, which stays usable, once they are idle.
@@ -595,10 +652,12 @@ class AioS3FileSystem(AsyncFileSystem):
             path: S3 path (s3://bucket/key) or list of paths to delete.
             recursive: Whether to delete all objects below the paths.
             batch_size: Number of DeleteObjects requests to send at the same
-                time. None or -1 is ``max_workers``; the ``batch_size`` of
-                the filesystem, which is that of fsspec's other batch
-                coroutines, does not apply. ``max_workers`` is a deprecated
-                alias.
+                time. None takes the ``batch_size`` of the internal
+                ``S3FileSystem``, which only fsspec's configuration for the
+                protocol sets; None or -1 there is ``max_workers``. The
+                ``batch_size`` argument of this filesystem, that of fsspec's
+                other batch coroutines, does not apply. ``max_workers`` is a
+                deprecated alias.
             maxdepth: Maximum depth to expand when ``recursive`` is True.
             **kwargs: Additional parameters passed to the DeleteObjects API.
                 ``Quiet`` (default True) sets the quiet mode of the requests.
@@ -1681,6 +1740,51 @@ class AioS3FileSystem(AsyncFileSystem):
         if not topdown:
             yield path, names, listed
 
+    async def _tree(
+        self,
+        path: str | os.PathLike[str] = "/",
+        recursion_limit: int = 2,
+        max_display: int = 25,
+        display_size: bool = False,
+        prefix: str = "",
+        is_last: bool = True,
+        first: bool = True,
+        indent_size: int = 4,
+    ) -> str:
+        """Return a tree of the paths below a path, in the threads of the filesystem.
+
+        See :meth:`tree`.
+
+        Args:
+            path: The root path, as a string or an ``os.PathLike``.
+            recursion_limit: Maximum depth of the tree.
+            max_display: Maximum number of entries shown per directory.
+            display_size: Whether to show the sizes of the files.
+            prefix: The prefix of each line.
+            is_last: Whether the path is the last entry of its directory.
+            first: Whether the path is the root of the tree.
+            indent_size: Number of spaces per level.
+
+        Returns:
+            The tree as a string.
+        """
+        return cast(
+            str,
+            await self._thread_pool.run(
+                functools.partial(
+                    self._sync_fs.tree,
+                    path,
+                    recursion_limit=recursion_limit,
+                    max_display=max_display,
+                    display_size=display_size,
+                    prefix=prefix,
+                    is_last=is_last,
+                    first=first,
+                    indent_size=indent_size,
+                )
+            ),
+        )
+
     def tree(
         self,
         path: str | os.PathLike[str] = "/",
@@ -1925,6 +2029,23 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return cast(str, self._sync_fs.sign(path, expiration=expiration, **kwargs))
 
+    async def _metadata(self, path: str | os.PathLike[str] | S3Path, **kwargs) -> S3Metadata:
+        """Return the metadata of the path, in the threads of the filesystem.
+
+        See :meth:`metadata`.
+
+        Args:
+            path: S3 path (s3://bucket/key) to get metadata for, or an
+                ``S3Path``, as for :meth:`S3FileSystem.metadata`.
+            **kwargs: Additional parameters passed to the HeadObject API.
+
+        Returns:
+            S3Metadata of the object.
+        """
+        return await self._thread_pool.run(
+            functools.partial(self._sync_fs.metadata, path, **kwargs)
+        )
+
     def metadata(self, path: str | os.PathLike[str] | S3Path, **kwargs) -> S3Metadata:
         """Return the metadata of the path.
 
@@ -1939,6 +2060,26 @@ class AioS3FileSystem(AsyncFileSystem):
             S3Metadata of the object.
         """
         return self._sync_fs.metadata(path, **kwargs)
+
+    async def _getxattr(
+        self, path: str | os.PathLike[str] | S3Path, attr_name: str, **kwargs
+    ) -> str | None:
+        """Get a user-defined metadata attribute of the path, in the threads of the filesystem.
+
+        See :meth:`getxattr`.
+
+        Args:
+            path: S3 path (s3://bucket/key) to get the attribute for, or an
+                ``S3Path``.
+            attr_name: The name of the attribute.
+            **kwargs: Additional parameters passed to the HeadObject API.
+
+        Returns:
+            The value of the attribute, or None if the attribute is not set.
+        """
+        return await self._thread_pool.run(
+            functools.partial(self._sync_fs.getxattr, path, attr_name, **kwargs)
+        )
 
     def getxattr(
         self, path: str | os.PathLike[str] | S3Path, attr_name: str, **kwargs
@@ -1957,6 +2098,28 @@ class AioS3FileSystem(AsyncFileSystem):
             The value of the attribute, or None if the attribute is not set.
         """
         return self._sync_fs.getxattr(path, attr_name, **kwargs)
+
+    async def _setxattr(
+        self,
+        path: str | os.PathLike[str] | S3Path,
+        copy_kwargs: dict[str, Any] | None = None,
+        **kwargs,
+    ) -> None:
+        """Set the user-defined metadata of the path, in the threads of the filesystem.
+
+        See :meth:`setxattr`.
+
+        Args:
+            path: S3 path (s3://bucket/key) to set metadata for, or an
+                ``S3Path``.
+            copy_kwargs: Additional parameters to use for the underlying
+                CopyObject API call.
+            **kwargs: Key-value pairs of metadata to set; a None value deletes the
+                key.
+        """
+        await self._thread_pool.run(
+            functools.partial(self._sync_fs.setxattr, path, copy_kwargs=copy_kwargs, **kwargs)
+        )
 
     def setxattr(
         self,
@@ -1978,6 +2141,19 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         self._sync_fs.setxattr(path, copy_kwargs=copy_kwargs, **kwargs)
 
+    async def _get_tags(self, path: str | os.PathLike[str]) -> dict[str, str]:
+        """Retrieve the tag key/values for the given path, in the threads of the filesystem.
+
+        See :meth:`get_tags`.
+
+        Args:
+            path: S3 path (s3://bucket/key) to get tags for.
+
+        Returns:
+            Dictionary mapping tag keys to tag values.
+        """
+        return await self._thread_pool.run(self._sync_fs.get_tags, path)
+
     def get_tags(self, path: str | os.PathLike[str]) -> dict[str, str]:
         """Retrieve the tag key/values for the given path.
 
@@ -1991,6 +2167,22 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return self._sync_fs.get_tags(path)
 
+    async def _put_tags(
+        self, path: str | os.PathLike[str], tags: dict[str, str], mode: str = "o"
+    ) -> None:
+        """Set the tags for the given existing key, in the threads of the filesystem.
+
+        See :meth:`put_tags`.
+
+        Args:
+            path: S3 path (s3://bucket/key) of the existing key.
+            tags: Tags to apply.
+            mode: ``o`` to overwrite the existing tags or ``m`` to merge with them.
+        """
+        await self._thread_pool.run(
+            functools.partial(self._sync_fs.put_tags, path, tags, mode=mode)
+        )
+
     def put_tags(self, path: str | os.PathLike[str], tags: dict[str, str], mode: str = "o") -> None:
         """Set the tags for the given existing key.
 
@@ -2002,6 +2194,24 @@ class AioS3FileSystem(AsyncFileSystem):
             mode: ``o`` to overwrite the existing tags or ``m`` to merge with them.
         """
         self._sync_fs.put_tags(path, tags, mode=mode)
+
+    async def _chmod(
+        self, path: str | os.PathLike[str], acl: str, recursive: bool = False, **kwargs
+    ) -> None:
+        """Set the canned ACL of a bucket or key, in the threads of the filesystem.
+
+        See :meth:`chmod`.
+
+        Args:
+            path: S3 path (s3://bucket or s3://bucket/key) to set the ACL on.
+            acl: The canned ACL to apply.
+            recursive: Whether to apply the ACL to all keys below the path too.
+            **kwargs: Additional parameters passed to the PutObjectAcl or
+                PutBucketAcl API.
+        """
+        await self._thread_pool.run(
+            functools.partial(self._sync_fs.chmod, path, acl, recursive=recursive, **kwargs)
+        )
 
     def chmod(
         self, path: str | os.PathLike[str], acl: str, recursive: bool = False, **kwargs
@@ -2018,6 +2228,27 @@ class AioS3FileSystem(AsyncFileSystem):
                 PutBucketAcl API.
         """
         self._sync_fs.chmod(path, acl, recursive=recursive, **kwargs)
+
+    async def _object_version_info(
+        self, path: str | os.PathLike[str], delete_markers: bool = False, **kwargs
+    ) -> list[S3ObjectVersion]:
+        """List the versions of the objects of the path, in the threads of the filesystem.
+
+        See :meth:`object_version_info`.
+
+        Args:
+            path: S3 path (s3://bucket/key or a key prefix) to list the versions for.
+            delete_markers: Whether to include delete markers in the result.
+            **kwargs: Additional parameters passed to the ListObjectVersions API.
+
+        Returns:
+            List of S3ObjectVersion instances describing the versions.
+        """
+        return await self._thread_pool.run(
+            functools.partial(
+                self._sync_fs.object_version_info, path, delete_markers=delete_markers, **kwargs
+            )
+        )
 
     def object_version_info(
         self, path: str | os.PathLike[str], delete_markers: bool = False, **kwargs
@@ -2036,6 +2267,21 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return self._sync_fs.object_version_info(path, delete_markers=delete_markers, **kwargs)
 
+    async def _list_multipart_uploads(
+        self, path: str | os.PathLike[str]
+    ) -> list[S3MultipartUpload]:
+        """List in-progress (incomplete) multipart uploads, in the threads of the filesystem.
+
+        See :meth:`list_multipart_uploads`.
+
+        Args:
+            path: S3 bucket or key path (e.g., "s3://bucket" or "s3://bucket/prefix").
+
+        Returns:
+            List of S3MultipartUpload instances describing the uploads.
+        """
+        return await self._thread_pool.run(self._sync_fs.list_multipart_uploads, path)
+
     def list_multipart_uploads(self, path: str | os.PathLike[str]) -> list[S3MultipartUpload]:
         """List in-progress (incomplete) multipart uploads in a bucket.
 
@@ -2049,6 +2295,16 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return self._sync_fs.list_multipart_uploads(path)
 
+    async def _clear_multipart_uploads(self, path: str | os.PathLike[str]) -> None:
+        """Abort any incomplete multipart uploads, in the threads of the filesystem.
+
+        See :meth:`clear_multipart_uploads`.
+
+        Args:
+            path: S3 bucket or key path (e.g., "s3://bucket" or "s3://bucket/prefix").
+        """
+        await self._thread_pool.run(self._sync_fs.clear_multipart_uploads, path)
+
     def clear_multipart_uploads(self, path: str | os.PathLike[str]) -> None:
         """Abort any incomplete multipart uploads in the bucket.
 
@@ -2058,6 +2314,23 @@ class AioS3FileSystem(AsyncFileSystem):
             path: S3 bucket or key path (e.g., "s3://bucket" or "s3://bucket/prefix").
         """
         self._sync_fs.clear_multipart_uploads(path)
+
+    async def _checksum(self, path: str | os.PathLike[str], **kwargs) -> int:
+        """Get the checksum of an S3 object or directory, in the threads of the filesystem.
+
+        See :meth:`checksum`.
+
+        Args:
+            path: S3 path (s3://bucket/key) to get the checksum for.
+            **kwargs: Additional arguments passed to :meth:`S3FileSystem.checksum`.
+
+        Returns:
+            Integer checksum derived from the ETag or the directory token.
+        """
+        return cast(
+            int,
+            await self._thread_pool.run(functools.partial(self._sync_fs.checksum, path, **kwargs)),
+        )
 
     def checksum(self, path: str | os.PathLike[str], **kwargs) -> int:
         """Get the checksum of an S3 object or directory.
@@ -2073,7 +2346,21 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return cast(int, self._sync_fs.checksum(path, **kwargs))
 
-    def created(self, path: str | os.PathLike[str]) -> datetime:
+    async def _created(self, path: str | os.PathLike[str]) -> datetime | None:
+        """Return the creation time of the path, in the threads of the filesystem.
+
+        See :meth:`created`.
+
+        Args:
+            path: S3 path (s3://bucket/key).
+
+        Returns:
+            The last-modified time of the object, or None for a bucket or a
+            directory, which have none.
+        """
+        return await self._thread_pool.run(self._sync_fs.created, path)
+
+    def created(self, path: str | os.PathLike[str]) -> datetime | None:
         """Return the creation time of the path.
 
         See :meth:`S3FileSystem.created`.
@@ -2082,11 +2369,26 @@ class AioS3FileSystem(AsyncFileSystem):
             path: S3 path (s3://bucket/key).
 
         Returns:
-            The last-modified time of the object.
+            The last-modified time of the object, or None for a bucket or a
+            directory, which have none.
         """
         return self._sync_fs.created(path)
 
-    def modified(self, path: str | os.PathLike[str]) -> datetime:
+    async def _modified(self, path: str | os.PathLike[str]) -> datetime | None:
+        """Return the last-modified time of the path, in the threads of the filesystem.
+
+        See :meth:`modified`.
+
+        Args:
+            path: S3 path (s3://bucket/key).
+
+        Returns:
+            The last-modified time of the object, or None for a bucket or a
+            directory, which have none.
+        """
+        return await self._thread_pool.run(self._sync_fs.modified, path)
+
+    def modified(self, path: str | os.PathLike[str]) -> datetime | None:
         """Return the last-modified time of the path.
 
         See :meth:`S3FileSystem.modified`.
@@ -2095,7 +2397,8 @@ class AioS3FileSystem(AsyncFileSystem):
             path: S3 path (s3://bucket/key).
 
         Returns:
-            The last-modified time of the object.
+            The last-modified time of the object, or None for a bucket or a
+            directory, which have none.
         """
         return self._sync_fs.modified(path)
 
