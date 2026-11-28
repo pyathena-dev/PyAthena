@@ -355,9 +355,10 @@ can be given to `open`, `pipe`, and `put` as keyword arguments or in
 `s3_additional_kwargs`, and to all of them through the `s3_additional_kwargs` argument
 of `S3FileSystem`. The parameters of a call take precedence over those of the
 filesystem. A file sends each of its requests only the parameters that the S3 operation
-accepts, so, for example, `ServerSideEncryption` for writes is not sent with reads. A
-`pipe` of data up to the block size sends its parameters with a single PutObject
-request as given. `put` sets `ContentType` from the file extension unless the call or
+accepts, so, for example, `ServerSideEncryption` for writes is not sent with reads. The
+parameters yield to the fields that a request sets itself, such as `Bucket`, `Key` and
+`Body`. A `pipe` of data up to the block size sends its parameters with a single
+PutObject request. `put` sets `ContentType` from the file extension unless the call or
 the filesystem gives one.
 
 The parameters in the `s3_additional_kwargs` argument of `S3FileSystem` that authorize
@@ -766,6 +767,13 @@ missing file.
 Requests sent through `fs.core` do not invalidate the filesystem's cache: call
 `fs.invalidate_cache()` after a change, or make it through the filesystem.
 
+The keyword arguments of an operation are additional request parameters. A field that
+the operation sets from its other arguments, such as `Bucket` and `Key` from a path,
+raises `TypeError` if it is also given as a parameter. A field counts as set only when
+an argument sets it: `get_object()` with no range accepts `Range`, and a path without a
+version ID accepts `VersionId`. The `request_kwargs` of the core and the fields that
+`replace_object_metadata()` retains yield to the parameters of the call.
+
 ```python
 import boto3
 
@@ -847,8 +855,8 @@ core.replace_object_metadata(path, head, {**head, "attr1": "value1"})
 ```
 
 `generate_presigned_url()` signs a URL locally, for `get_object` unless another client
-method is given, and sends no request. Its parameters take precedence over the
-`Bucket`, `Key` and `VersionId` of the path. The `request_kwargs` of the core, such as
+method is given, and sends no request. The `Bucket` and `Key` of the path, and its
+`VersionId` if it has one, raise `TypeError` if they are also given as parameters. The `request_kwargs` of the core, such as
 `RequestPayer`, are not included in the signed parameters; pass them as parameters
 of `generate_presigned_url()` to sign them.
 
@@ -912,6 +920,9 @@ Both planners accept `first_part_number` to include previously copied or uploade
 `upload_part_copy()` sends a planned range with an exclusive end; `None` sends no range of its own, as with the core primitive.
 
 The writer filters inherited and per-request parameters by operation; per-request parameters take precedence.
+The inherited parameters yield to the fields that a request sets, such as `Key`, `UploadId` and `PartNumber`.
+The parts inherit neither the checksum values, `ContentMD5` nor `ContentLength` of the whole object, nor `ChecksumAlgorithm` when the upload has one, and the completion does not inherit `ChecksumType` when the upload has one; the upload's are sent instead.
+The completion inherits the checksum values of the whole object only when its checksum type is `FULL_OBJECT`, for which S3 checks them.
 It retains the upload identity after completion and after an abort failure, and clears it only after a successful abort.
 The caller can therefore retry a failed abort.
 The writer does not invalidate the filesystem cache; call `fs.invalidate_cache()` after a direct write.

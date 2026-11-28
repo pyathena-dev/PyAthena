@@ -3692,6 +3692,10 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs.pop("s3_additional_kwargs", {}),
             **kwargs,
         }
+        # As in the open() path, the parameters yield to the fields that the
+        # write sets.
+        for name in ("Bucket", "Key", "Body"):
+            request_kwargs.pop(name, None)
         if mode == "create":
             # Checked up front, as open() does in "xb" mode, and with
             # IfNoneMatch for an object created since.
@@ -4955,6 +4959,11 @@ class S3FileSystem(AbstractFileSystem):
         )
 
 
+# The fields that a read of a file sets, to which its parameters yield, without
+# and with the version ID of the file.
+_READ_FIELDS = frozenset(["Bucket", "Key", "Range"])
+_VERSION_READ_FIELDS = _READ_FIELDS | {"VersionId"}
+
 # The parameters of the encryption of a written object, kept from an appended
 # object as a whole.
 _ENCRYPTION_PARAMS = frozenset(
@@ -5362,17 +5371,19 @@ class S3File(AbstractBufferedFile):
         """The bucket, key and version of the object that the file reads or writes."""
         return S3Path(self.bucket, self.key, self.version_id)
 
-    def _get_request_kwargs(self, method: str) -> dict[str, Any]:
-        """Select the parameters of the file that an S3 operation accepts.
+    def _get_request_kwargs(self) -> dict[str, Any]:
+        """Select the parameters of the file that a read of it takes.
 
-        Args:
-            method: The name of the client method, such as ``get_object``.
+        The parameters of the file yield to the fields that the read sets:
+        its bucket, key and range, and its version ID if it has one.
 
         Returns:
-            The parameters in ``s3_additional_kwargs`` that the operation
-            accepts.
+            The parameters in ``s3_additional_kwargs`` that GetObject
+            accepts, except those fields.
         """
-        return self.fs.core.operation_params(method, self.s3_additional_kwargs)
+        params = self.fs.core.operation_params("get_object", self.s3_additional_kwargs)
+        fields = _VERSION_READ_FIELDS if self.version_id else _READ_FIELDS
+        return {k: v for k, v in params.items() if k not in fields}
 
     def close(self) -> None:
         """Close the file, flushing any written data, and shut down its executor.
@@ -6077,7 +6088,7 @@ class S3File(AbstractBufferedFile):
             start, end, max_workers=self.max_workers, worker_block_size=self.blocksize
         )
         path = S3Path(self.bucket, self.key, self.version_id)
-        request_kwargs = self._get_request_kwargs("get_object")
+        request_kwargs = self._get_request_kwargs()
         if len(ranges) > 1:
             # Not kept by a variable of this frame, which the traceback of an
             # interrupt keeps (F5).
@@ -6152,7 +6163,7 @@ class S3File(AbstractBufferedFile):
         block = self.blocksize if self.blocksize > 0 else max(size, 1)
         window = min(self.max_workers, self.fs._request_pool.max_workers)
         path = S3Path(self.bucket, self.key, self.version_id)
-        read = functools.partial(self._get_range, path, **self._get_request_kwargs("get_object"))
+        read = functools.partial(self._get_range, path, **self._get_request_kwargs())
         wave = window * block
         result: S3MapResult[bytes] | None = None
         try:

@@ -83,6 +83,18 @@ def _make_core(region_name="us-east-1", **kwargs):
     return S3Core(client, retry_config=RetryConfig(attempt=1), **kwargs), Stubber(client)
 
 
+# A multipart upload with a checksum algorithm and type of its own.
+_UPLOAD = S3MultipartUpload(
+    {
+        "Bucket": "bucket",
+        "Key": "key",
+        "UploadId": "u",
+        "ChecksumAlgorithm": "SHA256",
+        "ChecksumType": "COMPOSITE",
+    }
+)
+
+
 class TestS3Core:
     @pytest.mark.parametrize(
         ("method", "params", "expected"),
@@ -414,24 +426,16 @@ class TestS3Core:
         stubber.assert_no_pending_responses()
         assert data == b"data"
 
-    @pytest.mark.parametrize(
-        ("range_", "expected"),
-        [
-            # The range of the call takes precedence over a parameter.
-            ((0, 3), "bytes=0-2"),
-            # Without one, the parameter is sent.
-            (None, "bytes=1-2"),
-        ],
-    )
-    def test_get_object_range_parameter(self, range_, expected):
+    def test_get_object_range_parameter(self):
+        # Without a range of the call, the parameter is sent.
         core, stubber = _make_core()
         stubber.add_response(
             "get_object",
             {"Body": StreamingBody(io.BytesIO(b"ab"), 2)},
-            {"Bucket": "bucket", "Key": "key", "Range": expected},
+            {"Bucket": "bucket", "Key": "key", "Range": "bytes=1-2"},
         )
         with stubber:
-            core.get_object(S3Path("bucket", "key"), range_, Range="bytes=1-2")
+            core.get_object(S3Path("bucket", "key"), None, Range="bytes=1-2")
         stubber.assert_no_pending_responses()
 
     @pytest.mark.parametrize(
@@ -478,10 +482,6 @@ class TestS3Core:
             (None, {}, {}),
             (b"", {}, {}),
             (None, {"Body": b"x"}, {"Body": b"x"}),
-            # The body of the call takes precedence over a parameter.
-            (b"data", {"Body": b"x"}, {"Body": b"data"}),
-            # So do the bucket and the key of the path.
-            (None, {"Bucket": "other", "Key": "other"}, {}),
         ],
     )
     def test_put_object(self, body, params, expected):
@@ -1017,6 +1017,33 @@ class TestS3Core:
             result = core.delete_objects(S3DeleteBatch("bucket", (S3Path("bucket", "a"),)))
         assert result == S3DeleteResult("bucket")
 
+    @pytest.mark.parametrize(
+        ("response", "expected"),
+        [
+            # The response's configuration, as S3 returns it.
+            ({"ChecksumAlgorithm": "SHA256", "ChecksumType": "COMPOSITE"}, ("SHA256", "COMPOSITE")),
+            # GH-1383: that of the request, where the response omits it.
+            ({}, ("CRC32", "FULL_OBJECT")),
+        ],
+    )
+    def test_create_multipart_upload_checksum(self, response, expected):
+        core, stubber = _make_core(request_kwargs={"ChecksumAlgorithm": "CRC32"})
+        stubber.add_response(
+            "create_multipart_upload",
+            {"Bucket": "bucket", "Key": "key", "UploadId": "u", **response},
+            {
+                "Bucket": "bucket",
+                "Key": "key",
+                "ChecksumAlgorithm": "CRC32",
+                "ChecksumType": "FULL_OBJECT",
+            },
+        )
+        with stubber:
+            upload = core.create_multipart_upload(
+                S3Path("bucket", "key"), ChecksumType="FULL_OBJECT"
+            )
+        assert (upload.checksum_algorithm, upload.checksum_type) == expected
+
     def test_create_multipart_upload(self):
         core, stubber = _make_core()
         stubber.add_response(
@@ -1025,10 +1052,7 @@ class TestS3Core:
             {"Bucket": "bucket", "Key": "key", "ContentType": "text/csv"},
         )
         with stubber:
-            # The key of the path takes precedence over a parameter.
-            upload = core.create_multipart_upload(
-                S3Path("bucket", "key"), ContentType="text/csv", Key="other"
-            )
+            upload = core.create_multipart_upload(S3Path("bucket", "key"), ContentType="text/csv")
         assert upload.upload_id == "u"
 
     @pytest.mark.parametrize(
@@ -1149,8 +1173,6 @@ class TestS3Core:
                 S3MultipartUpload({"Bucket": "bucket", "Key": "key", "UploadId": "u"}),
                 parts,
                 RequestPayer="requester",
-                # The given parts take precedence.
-                MultipartUpload={"Parts": []},
             )
         assert (completed.etag, completed.version_id) == ('"dst"', "v-dst")
 
@@ -1238,20 +1260,9 @@ class TestS3Core:
             },
         )
         with stubber:
-            # The identity and the part number override the per-call fields,
-            # and the other parameters, such as the checksum of the part, are
-            # sent.
+            # The other parameters, such as the checksum of the part, are sent.
             part = core.upload_part(
-                upload,
-                1,
-                b"data",
-                Bucket="other",
-                Key="other",
-                UploadId="other",
-                PartNumber=99,
-                ChecksumAlgorithm="CRC32",
-                ChecksumSHA256="c2hh",
-                SSECustomerAlgorithm="AES256",
+                upload, 1, b"data", ChecksumSHA256="c2hh", SSECustomerAlgorithm="AES256"
             )
         stubber.assert_no_pending_responses()
         assert (part.part_number, part.etag) == (1, '"part"')
@@ -1428,6 +1439,29 @@ class TestS3Core:
         if version_id:
             expected.update({"VersionId": version_id})
         stubber.add_response("head_object", response, expected)
+
+    def test_plan_multipart_copy_checksum_type(self):
+        # GH-1383: the creation sends the checksum type of the copy, and the
+        # completion takes it from the upload, so the plan's completion
+        # parameters do not repeat it.
+        core, stubber = _make_core()
+        size = core.MULTIPART_UPLOAD_MAX_PART_SIZE + 1
+        stubber.add_response(
+            "head_object", {"ContentLength": size}, {"Bucket": "bucket", "Key": "src"}
+        )
+        with stubber:
+            plan = core.plan_multipart_copy(
+                S3Path("bucket", "src"),
+                S3Path("bucket", "dst"),
+                MetadataDirective="REPLACE",
+                TaggingDirective="REPLACE",
+                AnnotationDirective="EXCLUDE",
+                ChecksumAlgorithm="CRC32",
+                ChecksumType="FULL_OBJECT",
+                ExpectedBucketOwner="111122223333",
+            )
+        assert plan.create_params["ChecksumType"] == "FULL_OBJECT"
+        assert plan.complete_params == {"ExpectedBucketOwner": "111122223333"}
 
     def test_plan_multipart_copy(self):
         # The source is read as CopyObject would read it: the version that
@@ -1611,9 +1645,8 @@ class TestS3Core:
             },
         )
         with stubber:
-            # The key of the path takes precedence over a parameter.
             names = core.list_object_annotations(
-                S3Path("bucket", "key", "v1"), RequestPayer="requester", Key="other"
+                S3Path("bucket", "key", "v1"), RequestPayer="requester"
             )
         stubber.assert_no_pending_responses()
         assert names == ["a1"]
@@ -1661,8 +1694,6 @@ class TestS3Core:
                 ExpectedBucketOwner="111111111111",
                 ExpectedSourceBucketOwner="222222222222",
                 ContentType="text/csv",
-                # A field of the request takes precedence.
-                ObjectIfMatch='"other"',
             )
         stubber.assert_no_pending_responses()
         assert payload.closed
@@ -1933,6 +1964,61 @@ class TestS3Core:
             core.replace_object_metadata(S3Path("bucket", "key"), S3Metadata({}), {}, **{name: "x"})
 
     @pytest.mark.parametrize(
+        ("method", "args", "field"),
+        [
+            ("head_object", (S3Path("bucket", "key"),), "Bucket"),
+            ("head_bucket", ("bucket",), "Bucket"),
+            ("get_object", (S3Path("bucket", "key", "v1"),), "VersionId"),
+            ("get_object", (S3Path("bucket", "key"), (0, 3)), "Range"),
+            ("put_object", (S3Path("bucket", "key"), b"data"), "Body"),
+            ("create_bucket", ("bucket", "private"), "ACL"),
+            ("delete_bucket", ("bucket",), "Bucket"),
+            ("get_bucket_versioning", ("bucket",), "Bucket"),
+            ("delete_object", (S3Path("bucket", "key"),), "Key"),
+            ("delete_objects", (S3DeleteBatch("bucket", (S3Path("bucket", "a"),)),), "Delete"),
+            ("create_multipart_upload", (S3Path("bucket", "key"),), "Key"),
+            ("upload_part", (_UPLOAD, 1, b"data"), "PartNumber"),
+            ("upload_part", (_UPLOAD, 1, b"data"), "ChecksumAlgorithm"),
+            (
+                "upload_part_copy",
+                (_UPLOAD, 1, S3Path("bucket", "src"), (0, 3)),
+                "CopySourceRange",
+            ),
+            ("complete_multipart_upload", (_UPLOAD, []), "MultipartUpload"),
+            ("complete_multipart_upload", (_UPLOAD, []), "ChecksumType"),
+            ("abort_multipart_upload", (_UPLOAD,), "UploadId"),
+            ("copy_object", (S3Path("bucket", "src"), S3Path("bucket", "dst")), "CopySource"),
+            (
+                "plan_multipart_copy",
+                (S3Path("bucket", "src"), S3Path("bucket", "dst")),
+                "Key",
+            ),
+            ("list_object_annotations", (S3Path("bucket", "key"),), "ContinuationToken"),
+            # Checked before the source annotation is read.
+            (
+                "copy_object_annotation",
+                ("a1", S3Path("bucket", "src"), S3Path("bucket", "dst"), "v1", '"e"'),
+                "ObjectIfMatch",
+            ),
+            ("get_object_tagging", (S3Path("bucket", "key"),), "Key"),
+            ("put_object_tagging", (S3Path("bucket", "key"), {}), "Tagging"),
+            ("put_object_acl", (S3Path("bucket", "key"), "private"), "ACL"),
+            ("put_bucket_acl", ("bucket", "private"), "Bucket"),
+            ("generate_presigned_url", (S3Path("bucket", "key"),), "Key"),
+            ("list_objects_page", ("bucket",), "Prefix"),
+            ("list_object_versions_page", ("bucket", "", None, "k"), "KeyMarker"),
+            ("list_multipart_uploads_page", ("bucket", "p"), "Prefix"),
+            ("list_buckets_page", ("token",), "ContinuationToken"),
+        ],
+    )
+    def test_params_set_by_arguments(self, method, args, field):
+        # GH-1383: a field that the other arguments set raises TypeError when
+        # also given as a parameter, and no request is sent.
+        core, stubber = _make_core()
+        with stubber, pytest.raises(TypeError, match=field):
+            getattr(core, method)(*args, **{field: "x"})
+
+    @pytest.mark.parametrize(
         ("path", "client_method", "params", "key", "query"),
         [
             (S3Path("bucket", "key"), "get_object", {}, "key", {}),
@@ -1943,22 +2029,16 @@ class TestS3Core:
                 "key",
                 {"versionId": ["null"], "response-content-type": ["text/csv"]},
             ),
-            # The parameters take precedence over the path.
+            # A path without a version accepts one as a parameter.
             (
-                S3Path("bucket", "key", "v1"),
+                S3Path("bucket", "key"),
                 "get_object",
-                {"Key": "other"},
-                "other",
+                {"VersionId": "v1"},
+                "key",
                 {"versionId": ["v1"]},
             ),
             # A parameter that only PutObject accepts signs the method given.
-            (
-                S3Path("bucket", "key"),
-                "put_object",
-                {"Key": "other", "ContentType": "text/csv"},
-                "other",
-                {},
-            ),
+            (S3Path("bucket", "key"), "put_object", {"ContentType": "text/csv"}, "key", {}),
         ],
     )
     def test_generate_presigned_url(self, path, client_method, params, key, query):

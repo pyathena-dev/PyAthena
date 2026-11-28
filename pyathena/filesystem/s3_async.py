@@ -34,7 +34,9 @@ from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.utils import isfilelike, stringify_path
 
 from pyathena.filesystem.s3 import (
+    _READ_FIELDS,
     _UNPICKLABLE_CLIENT_MESSAGE,
+    _VERSION_READ_FIELDS,
     S3File,
     S3FileSystem,
     S3FileTarget,
@@ -2667,17 +2669,19 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
         """
         raise TypeError("AioS3StreamedFile is asynchronous; use 'async with'.")
 
-    def _get_request_kwargs(self, method: str) -> dict[str, Any]:
-        """Select the parameters of the file that an S3 operation accepts.
+    def _get_request_kwargs(self) -> dict[str, Any]:
+        """Select the parameters of the file that a read of it takes.
 
-        Args:
-            method: The name of the client method, such as ``upload_part``.
+        The parameters of the file yield to the fields that the read sets:
+        its bucket, key and range, and its version ID if it has one.
 
         Returns:
-            The parameters in ``s3_additional_kwargs`` that the operation
-            accepts.
+            The parameters in ``s3_additional_kwargs`` that GetObject
+            accepts, except those fields.
         """
-        return self.fs.core.operation_params(method, self.s3_additional_kwargs)
+        params = self.fs.core.operation_params("get_object", self.s3_additional_kwargs)
+        fields = _VERSION_READ_FIELDS if self.version_id else _READ_FIELDS
+        return {k: v for k, v in params.items() if k not in fields}
 
     async def read(self, length: int = -1) -> bytes:
         """Read bytes from the file.
@@ -3072,7 +3076,7 @@ class AioS3StreamedFile(AbstractAsyncStreamedFile):
             start, end, max_workers=self.max_workers, worker_block_size=self.blocksize
         )
         path = S3Path(self.bucket, self.key, self.version_id)
-        request_kwargs = self._get_request_kwargs("get_object")
+        request_kwargs = self._get_request_kwargs()
         # Not kept by a variable of this frame, which the traceback of a
         # cancellation keeps (F5).
         return b"".join(

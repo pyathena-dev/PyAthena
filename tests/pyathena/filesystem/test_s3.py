@@ -2114,6 +2114,13 @@ class TestS3FileSystem:
             ServerSideEncryption="AES256",
             ContentType="text/plain",
         )
+        # GH-1383: the parameters yield to the fields that the write sets, as
+        # they do when the value is large enough for the open() path.
+        fs.core.put_object.reset_mock()
+        fs.pipe_file("s3://bucket/key", b"data", Key="other", Body=b"other")
+        fs.core.put_object.assert_called_once_with(
+            S3Path("bucket", "key"), b"data", ServerSideEncryption="AES256"
+        )
 
     def test_asynchronous_ignored(self):
         # GH-1339: like fsspec's other synchronous filesystems, the registered "s3"
@@ -7692,10 +7699,19 @@ class TestS3FileSystem:
         assert raised.value is error
 
     @pytest.mark.parametrize(
-        ("algorithm", "checksum_type"),
-        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+        ("algorithm", "checksum_type", "echoed"),
+        [
+            (None, None, True),
+            ("SHA256", None, True),
+            ("CRC32", None, True),
+            ("CRC32", "FULL_OBJECT", True),
+            # GH-1383: an upload created without the checksum fields in its
+            # response uses those of the request.
+            ("CRC32", "FULL_OBJECT", False),
+            ("SHA256", "COMPOSITE", False),
+        ],
     )
-    def test_multipart_copy_uses_creation_algorithm(self, algorithm, checksum_type):
+    def test_multipart_copy_uses_creation_algorithm(self, algorithm, checksum_type, echoed):
         fs = S3FileSystem(
             key="dummy",
             secret="dummy",
@@ -7715,7 +7731,12 @@ class TestS3FileSystem:
             )
             stubber.add_response(
                 "create_multipart_upload",
-                {"Bucket": "bucket", "Key": "dst", "UploadId": "u", **checksum_kwargs},
+                {
+                    "Bucket": "bucket",
+                    "Key": "dst",
+                    "UploadId": "u",
+                    **(checksum_kwargs if echoed else {}),
+                },
                 {"Bucket": "bucket", "Key": "dst", **checksum_kwargs},
             )
             for number, range_ in (

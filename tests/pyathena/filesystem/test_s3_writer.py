@@ -114,11 +114,22 @@ class TestS3MultipartWriter:
         with pytest.raises(ValueError, match=r"has no key|Cannot write to a version"):
             S3MultipartWriter(writer._core, path, block_size=4)
 
-    def test_writer_requests(self):
+    @pytest.mark.parametrize(
+        ("algorithm", "checksum_type"), [("SHA256", "COMPOSITE"), ("CRC32", "FULL_OBJECT")]
+    )
+    def test_writer_requests(self, algorithm, checksum_type):
+        checksum = f"Checksum{algorithm}"
         params = {
             "ContentType": "text/plain",
             "RequestPayer": "requester",
-            "ChecksumAlgorithm": "SHA256",
+            "ChecksumAlgorithm": algorithm,
+            # GH-1383: the parameters of the whole object reach neither the
+            # parts nor, for the type, the completion, which takes the
+            # checksum value only for the FULL_OBJECT type.
+            "ChecksumType": checksum_type,
+            checksum: "whole",
+            "ContentMD5": "md5",
+            "ContentLength": 8,
         }
         writer, stubber = _make_writer(request_kwargs=params)
         # The writer keeps a copy of the inherited parameters.
@@ -126,30 +137,31 @@ class TestS3MultipartWriter:
         identity = {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
         stubber.add_response(
             "create_multipart_upload",
-            {**identity, "ChecksumAlgorithm": "SHA256", "ChecksumType": "COMPOSITE"},
+            {**identity, "ChecksumAlgorithm": algorithm, "ChecksumType": checksum_type},
             {
                 "Bucket": "bucket",
                 "Key": "key",
                 # A per-request parameter overrides the inherited one.
                 "ContentType": "text/csv",
                 "RequestPayer": "requester",
-                "ChecksumAlgorithm": "SHA256",
+                "ChecksumAlgorithm": algorithm,
+                "ChecksumType": checksum_type,
             },
         )
         stubber.add_response(
             "upload_part",
-            {"ETag": '"one"', "ChecksumSHA256": "first"},
+            {"ETag": '"one"', checksum: "first"},
             {
                 **identity,
                 "PartNumber": 1,
                 "Body": b"abcd",
-                "ChecksumAlgorithm": "SHA256",
+                "ChecksumAlgorithm": algorithm,
                 "RequestPayer": "requester",
             },
         )
         stubber.add_response(
             "upload_part_copy",
-            {"CopyPartResult": {"ETag": '"two"', "ChecksumSHA256": "second"}},
+            {"CopyPartResult": {"ETag": '"two"', checksum: "second"}},
             {
                 **identity,
                 "PartNumber": 2,
@@ -163,12 +175,13 @@ class TestS3MultipartWriter:
             {"ETag": '"done"'},
             {
                 **identity,
-                "ChecksumType": "COMPOSITE",
+                "ChecksumType": checksum_type,
+                **({checksum: "whole"} if checksum_type == "FULL_OBJECT" else {}),
                 "RequestPayer": "requester",
                 "MultipartUpload": {
                     "Parts": [
-                        {"PartNumber": 1, "ETag": '"one"', "ChecksumSHA256": "first"},
-                        {"PartNumber": 2, "ETag": '"two"', "ChecksumSHA256": "second"},
+                        {"PartNumber": 1, "ETag": '"one"', checksum: "first"},
+                        {"PartNumber": 2, "ETag": '"two"', checksum: "second"},
                     ]
                 },
             },
@@ -184,6 +197,61 @@ class TestS3MultipartWriter:
             assert isinstance(result, S3CompleteMultipartUpload)
             assert result.etag == '"done"'
             assert writer.upload is upload
+            stubber.assert_no_pending_responses()
+
+    @pytest.mark.parametrize("checksum_type", [None, "FULL_OBJECT"])
+    def test_writer_requests_without_upload_checksum(self, checksum_type):
+        # GH-1383: without an algorithm and a type of the upload, such as an
+        # upload known from a listing, the parts and the completion inherit
+        # those of the write, and the completion takes the checksum value of
+        # the whole object only for the FULL_OBJECT type.
+        params = {"ChecksumAlgorithm": "CRC32", "ChecksumCRC32": "whole"}
+        if checksum_type:
+            params["ChecksumType"] = checksum_type
+        writer, stubber = _make_writer(request_kwargs=params)
+        identity = {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+        writer.upload = S3MultipartUpload(identity)
+        stubber.add_response(
+            "upload_part",
+            {"ETag": '"one"'},
+            {**identity, "PartNumber": 1, "Body": b"abcd", "ChecksumAlgorithm": "CRC32"},
+        )
+        stubber.add_response(
+            "complete_multipart_upload",
+            {"ETag": '"done"'},
+            {
+                **identity,
+                **(
+                    {"ChecksumType": checksum_type, "ChecksumCRC32": "whole"}
+                    if checksum_type
+                    else {}
+                ),
+                "MultipartUpload": {"Parts": [{"PartNumber": 1, "ETag": '"one"'}]},
+            },
+        )
+        with stubber:
+            writer.complete([writer.upload_part(1, b"abcd")])
+            stubber.assert_no_pending_responses()
+
+    def test_writer_copy_range_parameter(self):
+        # GH-1383: an inherited CopySourceRange yields to the range of a copy,
+        # and is sent by a copy without a range of its own.
+        writer, stubber = _make_writer(request_kwargs={"CopySourceRange": "bytes=0-3"})
+        identity = {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+        copy = {"CopySource": {"Bucket": "source", "Key": "old"}}
+        stubber.add_response(
+            "create_multipart_upload", identity, {"Bucket": "bucket", "Key": "key"}
+        )
+        for number, range_ in ((1, "bytes=4-7"), (2, "bytes=0-3")):
+            stubber.add_response(
+                "upload_part_copy",
+                {"CopyPartResult": {"ETag": f'"{number}"'}},
+                {**identity, **copy, "PartNumber": number, "CopySourceRange": range_},
+            )
+        with stubber:
+            writer.initiate()
+            writer.upload_part_copy(1, S3Path("source", "old"), (4, 8))
+            writer.upload_part_copy(2, S3Path("source", "old"))
             stubber.assert_no_pending_responses()
 
     def test_writer_failed_abort_is_retryable(self):
@@ -306,6 +374,47 @@ def _start(session):
 
 
 class TestS3WriteSession:
+    @pytest.mark.parametrize("range_", [None, (0, 4)])
+    def test_copy_has_a_range_of_its_own(self, range_):
+        # GH-1383: a part copy of a write, which copies the whole source
+        # without a range, does not inherit a CopySourceRange that would
+        # shorten it, as for an append.
+        client = boto3.client(
+            "s3", region_name="us-east-1", aws_access_key_id="dummy", aws_secret_access_key="dummy"
+        )
+        core = S3Core(client, retry_config=RetryConfig(attempt=1))
+        identity = {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+        expected = {"CopySourceRange": "bytes=0-3"} if range_ else {}
+        with S3ThreadPool(max_workers=1) as executor, Stubber(client) as stubber:
+            stubber.add_response(
+                "create_multipart_upload", identity, {"Bucket": "bucket", "Key": "key"}
+            )
+            stubber.add_response(
+                "upload_part_copy",
+                {"CopyPartResult": {"ETag": '"one"'}},
+                {
+                    **identity,
+                    "PartNumber": 1,
+                    "CopySource": {"Bucket": "bucket", "Key": "old"},
+                    **expected,
+                },
+            )
+            session = _S3WriteSession(
+                core,
+                S3Path("bucket", "key"),
+                executor,
+                block_size=5 * 2**20,
+                max_workers=1,
+                request_kwargs={"CopySourceRange": "bytes=0-1"},
+            )
+            _start(session)
+            session.submit_copy(1, S3Path("bucket", "old"), range_)
+            session.wait_ready()
+            session.check()
+            stubber.assert_no_pending_responses()
+            stubber.add_response("abort_multipart_upload", {}, identity)
+            session.abort()
+
     @pytest.mark.parametrize("stopped", ["start", "submit", "queued", "completion"])
     def test_stopped_write_sends_nothing_more(self, stopped):
         # GH-1322 (B2): once an enclosing stop scope is stopped, such as that
