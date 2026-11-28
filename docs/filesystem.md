@@ -619,8 +619,7 @@ Only a
 path is a version; any other `?` is part of the key. Slashes at the end of the query
 belong to the version ID, which may end in slashes: `s3://YOUR_S3_BUCKET/key?versionId=v1/`
 is version `v1/` of `key`, also when a file of that version is reopened (e.g., when it is
-unpickled). A query that names no version without the slashes, such as `?versionId=/`, is
-part of the key. In a `glob()` pattern, where `?` matches any character, a trailing
+unpickled). In a `glob()` pattern, where `?` matches any character, a trailing
 slash after such a query still selects directories. A path with a version is not a
 glob pattern: `copy()`, `mv()` and `get()` copy that version to a destination named
 after its key. `ls()` and `find()` of a key path with a version return only that

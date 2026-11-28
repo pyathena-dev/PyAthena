@@ -1954,7 +1954,7 @@ class S3FileSystem(AbstractFileSystem):
         stripped = cls._strip_protocol(path)
         name, version_id = S3Path.split_version_id(stripped)
         if version_id is None:
-            return super()._parent(stripped)
+            return super()._parent(path)
         if "/" not in name:
             return cls.root_marker
         # As fsspec joins the parent to the root marker.
@@ -2650,7 +2650,7 @@ class S3FileSystem(AbstractFileSystem):
             ValueError: If the ACL is invalid, the path is empty, or
                 botocore rejects the parameters of the CreateBucket request.
         """
-        path = self._strip_protocol(path)
+        path = self._strip_protocol(path).rstrip("/")
         if not path:
             raise ValueError("Cannot create the root directory.")
         s3_path = S3Path.parse(path)

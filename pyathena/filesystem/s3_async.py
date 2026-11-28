@@ -1890,7 +1890,7 @@ class AioS3FileSystem(AsyncFileSystem):
         stripped = cls._strip_protocol(path)
         name, version_id = S3Path.split_version_id(stripped)
         if version_id is None:
-            return super()._parent(stripped)
+            return super()._parent(path)
         if "/" not in name:
             return cls.root_marker
         # As fsspec joins the parent to the root marker.
