@@ -1926,8 +1926,11 @@ class S3FileSystem(AbstractFileSystem):
     def _parent(cls, path):
         """Return the parent of a path, as fsspec's ``_parent()`` does.
 
-        The parent of a path with a version ID is that of the path without
-        it: ``bucket/a/key?versionId=x/y`` is in ``bucket/a``.
+        A path with a version ID is split at the last slash before its version
+        ID query, also when the version ID contains slashes:
+        ``bucket/a/key?versionId=x/y`` is in ``bucket/a``, and the version
+        ``bucket/a/dir/?versionId=v1`` of a folder marker in ``bucket/a/dir``,
+        as fsspec splits it.
 
         Args:
             path: The path.
@@ -1935,7 +1938,11 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The parent path, without the protocol.
         """
-        return super()._parent(S3Path.split_version_id(cls._strip_protocol(path))[0])
+        stripped = cls._strip_protocol(path)
+        name, version_id = S3Path.split_version_id(stripped)
+        if version_id is None:
+            return super()._parent(stripped)
+        return name.rsplit("/", 1)[0] if "/" in name else cls.root_marker
 
     def unstrip_protocol(self, name: str | os.PathLike[str]) -> str:
         """Add the protocol to a path, as fsspec's ``unstrip_protocol()`` does.
@@ -2966,7 +2973,13 @@ class S3FileSystem(AbstractFileSystem):
             if not (
                 pairing.skips_directories
                 and (
-                    S3Path.split_trailing_separators(name)[1]
+                    # A listed entry is named after its key, whose trailing
+                    # slash names a directory.
+                    (
+                        trailing_sep(name)
+                        if isinstance(target, S3Path)
+                        else S3PathPairing.ends_with_separator(name)
+                    )
                     or (not versioned and self.isdir(target))
                 )
             )

@@ -94,7 +94,7 @@ class S3PathPairing:
         return (
             isinstance(self.path1, str)
             and not self._is_glob(self.path1)
-            and not S3Path.split_trailing_separators(self.path1)[1]
+            and not self.ends_with_separator(self.path1)
             and isinstance(self.path2, str)
             and not trailing_sep(self.path2)
         )
@@ -141,9 +141,8 @@ class S3PathPairing:
         # As in fsspec's copy(); destination_is_dir is None only when
         # looks_up_destination is false, where the other terms decide.
         dest_is_dir = isinstance(path2, str) and (trailing_sep(path2) or bool(destination_is_dir))
-        # A trailing slash names the contents of a directory, unless it
-        # belongs to a version ID.
-        contents = isinstance(path1, str) and bool(S3Path.split_trailing_separators(path1)[1])
+        # A trailing separator names the contents of a directory.
+        contents = isinstance(path1, str) and self.ends_with_separator(path1)
         exists = source_is_str and (
             (glob and len(sources) == 1) or (not glob and dest_is_dir and not contents)
         )
@@ -380,6 +379,24 @@ class S3PathPairing:
             else:
                 unversioned_paths.append(p)
         return versioned_paths, unversioned_paths
+
+    @staticmethod
+    def ends_with_separator(path: str) -> bool:
+        """Return whether a source path string ends with a separator, which names a directory.
+
+        As fsspec's ``trailing_sep()``, except that the slashes that end a
+        version ID (see :meth:`S3Path.split_trailing_separators`) are not
+        separators.
+
+        Args:
+            path: The path string.
+
+        Returns:
+            Whether the path ends with a separator.
+        """
+        if path.endswith("/"):
+            return bool(S3Path.split_trailing_separators(path)[1])
+        return bool(trailing_sep(path))
 
     @staticmethod
     def _is_glob(path: str) -> bool:

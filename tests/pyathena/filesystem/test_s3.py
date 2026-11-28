@@ -561,6 +561,9 @@ class TestS3FileSystem:
             # A query that names no version without the slash is a key.
             ("s3://bucket/key?versionId=/", "bucket/key?versionId=", "bucket"),
             ("s3://bucket/dir//", "bucket/dir", "bucket"),
+            # A version of a folder marker is in the directory of the marker.
+            ("s3://bucket/a/dir/?versionId=v1", "bucket/a/dir/?versionId=v1", "bucket/a/dir"),
+            ("s3://bucket/?versionId=v1", "bucket/?versionId=v1", "bucket"),
         ],
     )
     def test_strip_protocol_keeps_version_slashes(self, path, stripped, parent):
@@ -5102,6 +5105,20 @@ class TestS3FileSystem:
             pairs = [c.args[:2] for c in fs.cp_file.call_args_list]
             expected = "s3://bucket/out/key"
         assert [(str(p1), str(p2)) for p1, p2 in pairs] == [("bucket/key?versionId=v1/", expected)]
+
+    def test_copy_listed_marker_that_looks_like_a_version(self):
+        # GH-1469: a listed key is named after its key, whose trailing slash
+        # names a directory even after what looks like a version ID query, so
+        # the folder marker d/x?versionId=1/ is left out of a copy with a
+        # maxdepth, as other directories are.
+        fs = self._make_fs()
+        self._serve_keys(fs, {"d/x?versionId=1/", "d/y"})
+        fs.cp_file = mock.MagicMock()
+
+        fs.copy("s3://bucket/d", "s3://bucket/out/", recursive=True, maxdepth=2)
+        assert [(str(c.args[0]), str(c.args[1])) for c in fs.cp_file.call_args_list] == [
+            ("bucket/d/y", "bucket/out/y")
+        ]
 
     def test_glob_pattern_ending_in_a_slash_after_a_query(self):
         # GH-1469: in a glob pattern, "?" matches any character, and a
