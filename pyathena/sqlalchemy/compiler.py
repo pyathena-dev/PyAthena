@@ -1047,27 +1047,11 @@ class AthenaStatementCompiler(SQLCompiler):
             )
 
         if isinstance(left_type, types.Numeric) or isinstance(right_type, types.Numeric):
-
-            def decimal_operand(operand):
-                """Render an operand, casting a DECIMAL literal column to ``DECIMAL(38, scale)``.
-
-                Args:
-                    operand: The left or right operand of the division.
-
-                Returns:
-                    The operand SQL.
-                """
-                operand_type = operand.type
-                if (
-                    isinstance(operand, ColumnClause)
-                    and operand.is_literal
-                    and isinstance(operand_type, types.Numeric)
-                    and operand_type.precision is not None
-                ):
-                    operand = Cast(operand, types.DECIMAL(38, operand_type.scale or 0))
-                return self.process(operand, **kw)
-
-            return decimal_operand(binary.left) + " / " + decimal_operand(binary.right)
+            return (
+                self.process(self._cast_decimal_literal_column(binary.left), **kw)
+                + " / "
+                + self.process(self._cast_decimal_literal_column(binary.right), **kw)
+            )
 
         if isinstance(left_type, types.Integer) and isinstance(right_type, types.Integer):
             return (
@@ -1077,6 +1061,29 @@ class AthenaStatementCompiler(SQLCompiler):
             )
 
         return super().visit_truediv_binary(binary, operator, **kw)
+
+    def _cast_decimal_literal_column(self, operand):
+        """Cast a ``literal_column()`` typed DECIMAL with a precision to ``DECIMAL(38, scale)``.
+
+        Athena reads a decimal literal such as ``5.52`` as DOUBLE, so a literal column
+        keeps its declared DECIMAL type only through a cast. The widest precision keeps
+        the cast from overflowing.
+
+        Args:
+            operand: An operand of an arithmetic expression.
+
+        Returns:
+            The cast operand, or the operand itself if it is not such a literal column.
+        """
+        operand_type = operand.type
+        if (
+            isinstance(operand, ColumnClause)
+            and operand.is_literal
+            and isinstance(operand_type, types.Numeric)
+            and operand_type.precision is not None
+        ):
+            return Cast(operand, types.DECIMAL(38, operand_type.scale or 0))
+        return operand
 
     @override
     def visit_cast(self, cast: Cast[Any], **kwargs):
