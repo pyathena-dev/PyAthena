@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from itertools import product
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import exc, select, types, util
+from sqlalchemy import exc, select, type_coerce, types, util
 from sqlalchemy.sql import operators, visitors
 from sqlalchemy.sql import util as sql_util
 from sqlalchemy.sql.compiler import (
@@ -55,6 +55,7 @@ from pyathena.util import override
 if TYPE_CHECKING:
     from sqlalchemy import (
         CheckConstraint,
+        Dialect,
         ForeignKeyConstraint,
         PrimaryKeyConstraint,
         Table,
@@ -63,7 +64,7 @@ if TYPE_CHECKING:
     from sqlalchemy.sql.ddl import CreateTable
     from sqlalchemy.sql.functions import Function
     from sqlalchemy.sql.selectable import GenerativeSelect
-    from sqlalchemy.sql.type_api import TypeEngine
+    from sqlalchemy.sql.type_api import TypeEngine, _LiteralProcessorType
 
     from pyathena.sqlalchemy.base import AthenaDialect
 
@@ -611,6 +612,28 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
         return self.visit_array(type_, **kw)
 
 
+class _AthenaLambda(types.String):
+    """The type of a bind parameter that holds the text of a lambda expression."""
+
+    @override
+    def literal_processor(self, dialect: Dialect) -> _LiteralProcessorType[Any]:
+        """Return a processor that renders the lambda text as SQL, not as a string.
+
+        Args:
+            dialect: The dialect rendering the value.
+
+        Returns:
+            The processor, which doubles ``%`` for paramstyles that need it.
+        """
+        double_percents = dialect.identifier_preparer._double_percents
+
+        def process(value: Any) -> str:
+            text = str(value)
+            return text.replace("%", "%%") if double_percents else text
+
+        return process
+
+
 class AthenaStatementCompiler(SQLCompiler):
     """SQL statement compiler for Amazon Athena queries.
 
@@ -989,10 +1012,21 @@ class AthenaStatementCompiler(SQLCompiler):
         return outer._annotate({"_pyathena_array_result": True})
 
     def visit_filter_func(self, fn: Function[Any], **kw: Any) -> str:
-        """Compile Athena filter() function with lambda expressions.
+        """Render Athena ``filter()`` with a lambda expression.
 
-        Supports syntax: filter(array_expr, lambda_expr)
-        Example: filter(ARRAY[1, 2, 3], x -> x > 1)
+        A string or untyped bind parameter second argument, such as the string
+        ``"x -> x > 1"``, is the text of the lambda and is rendered unquoted, so
+        pass only trusted text. Other arguments are compiled as they are.
+
+        Args:
+            fn: The function expression.
+            **kw: Compiler keyword arguments.
+
+        Returns:
+            The ``filter()`` function call, such as ``filter(ARRAY[1, 2, 3], x -> x > 1)``.
+
+        Raises:
+            CompileError: If the function does not have exactly two arguments.
         """
         if len(fn.clauses.clauses) != 2:
             raise exc.CompileError(
@@ -1005,10 +1039,16 @@ class AthenaStatementCompiler(SQLCompiler):
         # Process the array expression normally
         array_sql = self.process(array_expr, **kw)
 
-        # Process lambda expression - handle string literals as lambda expressions
-        if isinstance(lambda_expr, BindParameter) and isinstance(lambda_expr.value, str):
-            # Handle string literal lambda expressions like 'x -> x > 0'
-            lambda_sql = lambda_expr.value
+        if isinstance(lambda_expr, BindParameter) and isinstance(
+            lambda_expr.type, (types.String, types.NullType)
+        ):
+            # A string bind value such as 'x -> x > 0' is the lambda itself. The
+            # value is not part of the statement cache key, so it is rendered as a
+            # literal_execute parameter when the statement runs, not into the
+            # cached SQL. The bind type is part of the key, so the choice is too.
+            lambda_sql = self.process(
+                type_coerce(lambda_expr, _AthenaLambda()), **{**kw, "literal_execute": True}
+            )
         else:
             # Process as regular SQL expression
             lambda_sql = self.process(lambda_expr, **kw)

@@ -2,8 +2,8 @@
 
 # SQLAlchemy
 
-Install SQLAlchemy with `pip install "SQLAlchemy>=2.0.0"` or `pip install PyAthena[sqlalchemy]`.
-Supported SQLAlchemy is 2.0.0 or higher.
+Install SQLAlchemy with `pip install "SQLAlchemy>=2.0.23"` or `pip install PyAthena[sqlalchemy]`.
+Supported SQLAlchemy is 2.0.23 or higher.
 
 For async support (`create_async_engine`), install with `pip install PyAthena[aiosqlalchemy]`.
 
@@ -1220,6 +1220,23 @@ SQLAlchemy can rewrite negation into an element-wise comparison before dialect c
 For example, `~(any_(flags) == True)` can become an element-wise `!= True` comparison; older SQLAlchemy 2.0 releases also rewrite non-boolean comparisons this way.
 To negate the whole match, always explicitly group the comparison first: `~(any_(flags) == True).self_group()`.
 Quantifiers over subqueries retain their usual SQL compilation.
+
+`func.filter(array, lambda)` compiles to Athena's `filter()` function.
+A string, or a bind parameter of type `String` or without a type, as the second argument is the text of the lambda expression, which is inserted into the SQL unquoted when the statement runs, so pass only trusted text.
+`literal_column()` and `text()` also give the lambda expression.
+
+```python
+from sqlalchemy import bindparam, func, select, String
+
+statement = select(func.filter(orders.c.item_ids, "x -> x > 1"))
+statement = select(func.filter(orders.c.item_ids, bindparam("predicate", type_=String)))
+result = conn.execute(statement, {"predicate": "x -> x > 1"})
+```
+
+A statement with such a lambda, including a plain string, can't run with more than one parameter set (`executemany()`); use `literal_column()` or `text()` for the lambda there.
+
+`str()` of the compiled statement shows a bind parameter lambda as `__[POSTCOMPILE_<name>]`.
+Compile with the Athena dialect and `compile_kwargs={"render_postcompile": True}`, such as `statement.compile(conn, compile_kwargs={"render_postcompile": True})`, to get the lambda text in the SQL; give a lambda that is only an execution parameter its value first, as in `statement.params(predicate="x -> x > 1")`.
 
 #### Partial ARRAY updates
 
