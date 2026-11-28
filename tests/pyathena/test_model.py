@@ -434,6 +434,21 @@ class TestAthenaTableMetadata:
             "OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat'"
         )
 
+    def test_serde_properties_preserves_prefix_inside_key(self):
+        response = {
+            "TableMetadata": {
+                "Parameters": {
+                    "serde.param.custom.serde.param.tag": "a",
+                    "serde.param.field.delim": ",",
+                }
+            }
+        }
+        actual = AthenaTableMetadata(response)
+        assert actual.serde_properties == {
+            "custom.serde.param.tag": "a",
+            "field.delim": ",",
+        }
+
     @pytest.mark.parametrize("key", ["parquet.compress", "write.compress"])
     def test_compression_ignores_properties_not_applied_on_write(self, key):
         # Athena ignores these spellings when writing, so the table data does
