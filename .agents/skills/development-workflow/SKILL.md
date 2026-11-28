@@ -18,7 +18,7 @@ Keep unrelated worktrees and changes intact.
 ## Prepare and publish
 
 1. Establish the intended behavior and affected surfaces before editing.
-   For a change to shared behavior, build the [differential check](#check-shared-behavior-differentially) first.
+   For a change to, or a refactor of, a caller-visible rule shared by more than one path, build the [differential check](#check-shared-behavior-differentially) first.
    Create one dedicated worktree per PR from the fetched `origin/master`, or from the agreed parent branch for a stacked PR.
 2. Implement and validate the change using the applicable checks below.
    Inspect the complete diff, changed paths, and deletions before committing and pushing.
