@@ -13,7 +13,7 @@ import contextlib
 import hashlib
 import time
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from pyathena.filesystem.s3_path import S3Path
 
@@ -21,17 +21,6 @@ if TYPE_CHECKING:
     from fsspec.dircache import DirCache
 
     from pyathena.filesystem.s3_object import S3Object
-
-# The second element of the key, ``(lookup key, _LOOKUPS_KEY)``, of the lookup
-# results of a path made with lookup request parameters.
-_LOOKUPS_KEY = "lookups"
-# The second element of the lookup key, ``(name, _VERSION_KEY, version_id)``,
-# of an explicit version, which no key of an unversioned path, a name string,
-# can equal.
-_VERSION_KEY = "versionId"
-# The spellings of the query that names a version (see S3Path), which a key
-# may end in.
-_VERSION_QUERIES = ("versionId", "versionID", "versionid", "version_id")
 
 
 class S3ListingCache:
@@ -59,6 +48,14 @@ class S3ListingCache:
         dircache: The ``DirCache`` that stores the entries, which the
             filesystem replaces when its ``dircache`` is assigned.
     """
+
+    # The second element of the key, ``(lookup key, LOOKUPS_KEY)``, of the
+    # lookup results of a path made with lookup request parameters.
+    LOOKUPS_KEY: ClassVar[str] = "lookups"
+    # The second element of the lookup key, ``(name, VERSION_KEY, version_id)``,
+    # of an explicit version, which no key of an unversioned path, a name
+    # string, can equal.
+    VERSION_KEY: ClassVar[str] = "versionId"
 
     __slots__ = ("dircache",)
 
@@ -89,8 +86,8 @@ class S3ListingCache:
         """
         return (path.name.rpartition("/")[0], "/") if path.key else ""
 
-    @staticmethod
-    def _lookup_key(path: S3Path) -> str | tuple[str, str, str]:
+    @classmethod
+    def _lookup_key(cls, path: S3Path) -> str | tuple[str, str, str]:
         """Return the key of the lookup of a path.
 
         A path without a version is cached under its name, so that a key that
@@ -105,7 +102,7 @@ class S3ListingCache:
             The key of the lookup.
         """
         if path.version_id:
-            return path.name, _VERSION_KEY, path.version_id
+            return path.name, cls.VERSION_KEY, path.version_id
         return path.name
 
     @staticmethod
@@ -152,7 +149,7 @@ class S3ListingCache:
         key = self._lookup_key(path)
         if not lookup_kwargs:
             return cast("S3Object | None", dircache.get(key))
-        lookups = dircache.get((key, _LOOKUPS_KEY))
+        lookups = dircache.get((key, self.LOOKUPS_KEY))
         cached = lookups.get(self._lookup_id(lookup_kwargs)) if lookups else None
         if cached is None:
             return None
@@ -186,7 +183,7 @@ class S3ListingCache:
         if not lookup_kwargs:
             dircache[key] = file
             return
-        lookups_key = (key, _LOOKUPS_KEY)
+        lookups_key = (key, self.LOOKUPS_KEY)
         lookups = dircache.get(lookups_key)
         if lookups is None:
             lookups = {}
@@ -362,8 +359,8 @@ class S3ListingCache:
             # The lookup of the version, the keys that end in the query in
             # each spelling that names the version, and the object path
             # without the version.
-            self._evict_lookup((base, _VERSION_KEY, version_id))
-            for query in _VERSION_QUERIES:
+            self._evict_lookup((base, self.VERSION_KEY, version_id))
+            for query in S3Path.VERSION_QUERY_NAMES:
                 self._invalidate_name(f"{base}?{query}={version_id}")
             self._invalidate_name(base)
 
@@ -403,7 +400,7 @@ class S3ListingCache:
             key: The lookup key (see :meth:`_lookup_key`).
         """
         self._evict(key)
-        self._evict((key, _LOOKUPS_KEY))
+        self._evict((key, self.LOOKUPS_KEY))
 
     def _evict(self, key: str | tuple[Any, ...]) -> None:
         """Remove a ``dircache`` entry if it exists.
