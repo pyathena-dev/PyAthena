@@ -781,7 +781,7 @@ the read; a failure to read it raises the botocore exception and is not retried.
 `put_object()` writes bytes and returns an `S3PutObject`. `copy_object()` returns an
 `S3CopyObject` with the version IDs of the copy and of its source, and `delete_object()`
 an `S3DeleteObject` with the deleted or created version ID and whether it is a delete
-marker.
+marker. The version IDs are None where the bucket is not versioned.
 
 ```python
 data = core.get_object(S3Path.parse("s3://YOUR_S3_BUCKET/path/to/object"), (0, 1024))

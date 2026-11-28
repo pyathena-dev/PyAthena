@@ -6,7 +6,7 @@ import copy
 import dataclasses
 import logging
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
@@ -1164,7 +1164,8 @@ class S3PutObject(_S3Response):
     sse_customer_algorithm: str | None
     sse_customer_key_md5: str | None
     sse_kms_key_id: str | None
-    sse_kms_encryption_context: str | None
+    # Left out of the representation, which logs may show.
+    sse_kms_encryption_context: str | None = field(repr=False)
     bucket_key_enabled: bool | None
     request_charged: str | None
 
@@ -1267,7 +1268,8 @@ class S3MultipartUpload(_S3Response):
     sse_customer_algorithm: str | None
     sse_customer_key_md5: str | None
     sse_kms_key_id: str | None
-    sse_kms_encryption_context: str | None
+    # Left out of the representation, which logs may show.
+    sse_kms_encryption_context: str | None = field(repr=False)
     bucket_key_enabled: bool | None
     request_charged: str | None
     checksum_algorithm: str | None

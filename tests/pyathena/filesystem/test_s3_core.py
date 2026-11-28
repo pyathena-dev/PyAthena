@@ -33,7 +33,9 @@ from pyathena.filesystem.s3_executor import S3ThreadPool
 from pyathena.filesystem.s3_object import (
     S3Bucket,
     S3CommonPrefix,
+    S3CopyObject,
     S3DeleteError,
+    S3DeleteObject,
     S3DeleteResult,
     S3ListBucketsPage,
     S3ListMultipartUploadsPage,
@@ -936,7 +938,13 @@ class TestS3Core:
 
     def test_delete_object(self):
         core, stubber = _make_core()
-        stubber.add_response("delete_object", {}, {"Bucket": "bucket", "Key": "key"})
+        # A versioned bucket creates a delete marker for a path without a
+        # version.
+        stubber.add_response(
+            "delete_object",
+            {"VersionId": "m1", "DeleteMarker": True},
+            {"Bucket": "bucket", "Key": "key"},
+        )
         stubber.add_response(
             "delete_object",
             {"VersionId": "v1", "DeleteMarker": False},
@@ -948,13 +956,14 @@ class TestS3Core:
             },
         )
         with stubber:
-            unversioned = core.delete_object(S3Path("bucket", "key"))
-            # GH-1383: the version that the request deleted.
+            # GH-1383: the version that the request created or deleted.
+            marker = core.delete_object(S3Path("bucket", "key"))
             deleted = core.delete_object(
                 S3Path("bucket", "key", "v1"), BypassGovernanceRetention=True
             )
         stubber.assert_no_pending_responses()
-        assert (unversioned.version_id, unversioned.delete_marker) == (None, False)
+        assert type(marker) is S3DeleteObject
+        assert (marker.version_id, marker.delete_marker) == ("m1", True)
         assert (deleted.version_id, deleted.delete_marker) == ("v1", False)
 
     def test_delete_objects(self):
@@ -1354,6 +1363,7 @@ class TestS3Core:
             core.copy_object(S3Path("bucket", "src"), S3Path("bucket", "dst"))
         stubber.assert_no_pending_responses()
         # GH-1383: the result of the copy.
+        assert type(copied) is S3CopyObject
         assert (
             copied.version_id,
             copied.copy_source_version_id,

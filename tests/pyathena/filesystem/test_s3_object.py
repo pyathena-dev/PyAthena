@@ -434,6 +434,8 @@ class TestS3PutObject:
         assert actual["_etag"] == '"e"'
         assert actual["_version_id"] == "v"
         assert actual["_checksum_sha256"] is None
+        assert actual["_checksum_crc64nvme"] is None
+        assert actual["_checksum_type"] is None
         assert actual.keys() >= {
             "_expiration",
             "_version_id",
@@ -450,6 +452,13 @@ class TestS3PutObject:
             "_bucket_key_enabled",
             "_request_charged",
         }
+
+    def test_repr(self):
+        # GH-1383: the representation, which logs may show, leaves out the
+        # encryption context.
+        actual = S3PutObject({"ETag": '"e"', "SSEKMSEncryptionContext": "secret-context"})
+        assert "secret-context" not in repr(actual)
+        assert actual.sse_kms_encryption_context == "secret-context"
 
     def test_equality(self):
         # GH-1383: the results compare and hash by their fields.
@@ -638,6 +647,8 @@ class TestS3CompleteMultipartUpload:
         assert actual["_etag"] == '"e"'
         assert actual["_version_id"] == "v"
         assert actual["_location"] is None
+        assert actual["_checksum_crc64nvme"] is None
+        assert actual["_checksum_type"] is None
         assert actual.keys() >= {
             "_location",
             "_bucket",
@@ -762,6 +773,8 @@ def test_models_set_every_field(model, args):
     # fields compare, hash and convert.
     actual = model(*args)
     assert {f.name for f in dataclasses.fields(actual)} == vars(actual).keys()
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        setattr(actual, dataclasses.fields(actual)[0].name, None)
     assert actual == model(*args)
     # Compared by their fields, which the equality of S3Metadata ignores.
     for restored in (copy.copy(actual), pickle.loads(pickle.dumps(actual))):
