@@ -352,7 +352,9 @@ reads, and each upload of `_put()`, write of `_pipe()`, and copy of `_copy()` an
 `_mv()` as many parts or part copies; a smaller `max_workers` given to the method is
 kept. `n` is the number of paired paths, or the batch size when it is smaller: the
 `batch_size` of the method, else that of the filesystem, else fsspec's default; `-1`
-counts every path. For `_put()`, `n` counts the local files only.
+counts every path. As in fsspec, an explicit `batch_size=None` of `_get()` takes
+fsspec's default instead of that of the filesystem. For `_put()`, `n` counts the local
+files only.
 Pairs of `_get()`, `_put()`, `_copy()`, and `_pipe()` whose result would depend on the
 order of the transfers raise `ValueError` before anything is transferred, as with
 `S3FileSystem` (see {ref}`filesystem`), and `_get()` with `outfile` writes the objects

@@ -1096,14 +1096,14 @@ class AioS3FileSystem(AsyncFileSystem):
         Raises:
             ValueError: If two paths of a dictionary name the same object.
         """
-        if isinstance(path, (str, os.PathLike)):
-            path = stringify_path(path)
-            count = 1
-        else:
+        if hasattr(path, "items"):
             # Any object with items(), such as a mapping, whose items fsspec
             # writes.
             path = dict(self._sync_fs._pipe_items(path))
             count = len(path)
+        else:
+            path = stringify_path(path)
+            count = 1
         # As fsspec's _pipe() resolves the batch size.
         batch_size = batch_size or self.batch_size
         batch_size, pipe_kwargs = self._transfer_kwargs(count, batch_size, kwargs, nofiles=True)

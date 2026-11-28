@@ -24,6 +24,7 @@ import pytest
 from botocore.stub import Stubber
 from fsspec import config as fsspec_config
 from fsspec.callbacks import Callback
+from fsspec.core import OpenFile
 
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import (
@@ -2668,9 +2669,11 @@ class TestAioS3FileSystem:
             ({}, {}, {"batch_size": 0}, ValueError),
         ],
     )
-    async def test_get_batch_size(self, tmp_path, fs_kwargs, conf, kwargs, expected):
+    async def test_get_batch_size(self, tmp_path, monkeypatch, fs_kwargs, conf, kwargs, expected):
         # GH-1427: _get() resolves its batch size as fsspec's _get() does, and
         # the window of each download counts the batch that fsspec runs.
+        # Only the given fsspec configuration applies, also to the filesystem.
+        monkeypatch.setattr(fsspec_config, "conf", dict(conf))
         fs = AioS3FileSystem(
             key="dummy",
             secret="dummy",
@@ -2691,12 +2694,11 @@ class TestAioS3FileSystem:
             [str(tmp_path / "0"), str(tmp_path / "1")],
             **kwargs,
         )
-        with mock.patch.dict(fsspec_config.conf, conf, clear=True):
-            if expected is ValueError:
-                with pytest.raises(ValueError, match="batch_size"):
-                    await get
-            else:
+        if expected is ValueError:
+            with pytest.raises(ValueError, match="batch_size"):
                 await get
+        else:
+            await get
         assert windows == ([] if expected is ValueError else [expected] * 2)
 
     @pytest.mark.asyncio
@@ -2813,10 +2815,14 @@ class TestAioS3FileSystem:
         # fsspec writes.
         + [(operation, {}, {}, 2, {}, 2) for operation in ("pipe-mapping", "pipe-items")],
     )
-    async def test_batch_window(self, operation, fs_kwargs, conf, count, kwargs, expected):
+    async def test_batch_window(
+        self, monkeypatch, operation, fs_kwargs, conf, count, kwargs, expected
+    ):
         # GH-1427: as in S3FileSystem, each multipart copy or write of a batch
         # gets max(1, max_workers // n) parallel requests, n being the objects
-        # that run at once. Each one used to get max_workers of them.
+        # that run at once. Each one used to get max_workers of them. Only the
+        # given fsspec configuration applies, also to the filesystem.
+        monkeypatch.setattr(fsspec_config, "conf", dict(conf))
         fs = AioS3FileSystem(
             key="dummy",
             secret="dummy",
@@ -2838,18 +2844,32 @@ class TestAioS3FileSystem:
         fs._copy_file = copy_file
         fs._sync_fs.pipe_file = pipe_file
         targets = [f"s3://bucket/dst/{i}" for i in range(count)]
-        with mock.patch.dict(fsspec_config.conf, conf, clear=True):
-            if operation == "pipe":
-                await fs._pipe(dict.fromkeys(targets, b"x"), **kwargs)
-            elif operation == "pipe-mapping":
-                await fs._pipe(collections.UserDict(dict.fromkeys(targets, b"x")), **kwargs)
-            elif operation == "pipe-items":
-                values = dict.fromkeys(targets, b"x")
-                await fs._pipe(SimpleNamespace(items=values.items), **kwargs)
-            else:
-                sources = [f"s3://bucket/src/{i}" for i in range(count)]
-                await getattr(fs, f"_{operation}")(sources, targets, **kwargs)
+        if operation == "pipe":
+            await fs._pipe(dict.fromkeys(targets, b"x"), **kwargs)
+        elif operation == "pipe-mapping":
+            await fs._pipe(collections.UserDict(dict.fromkeys(targets, b"x")), **kwargs)
+        elif operation == "pipe-items":
+            values = dict.fromkeys(targets, b"x")
+            await fs._pipe(SimpleNamespace(items=values.items), **kwargs)
+        else:
+            sources = [f"s3://bucket/src/{i}" for i in range(count)]
+            await getattr(fs, f"_{operation}")(sources, targets, **kwargs)
         assert windows == [expected] * count
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["path-like", "open-file"])
+    async def test_pipe_single_path_objects(self, path):
+        # GH-1427: a path-like object or an fsspec OpenFile names a single
+        # destination, as fsspec's stringify_path() reads it, while an object
+        # with items() holds several values.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = serve_s3_keys(fs._sync_fs, set())
+        target = PurePosixPath("bucket/key") if path == "path-like" else OpenFile(fs, "bucket/key")
+
+        await fs._pipe(target, b"x")
+        assert store == {"key"}
 
     @pytest.mark.asyncio
     async def test_put_checks_directories_in_thread(self, tmp_path):
