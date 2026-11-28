@@ -965,6 +965,7 @@ class TestS3FileSystem:
         ]
         assert self._cached(fs, listings) == []
         assert len(fs.dircache) == 1
+        assert fs._listing_cache.get_lookup(S3Path("bucket", "key"), {}) is None
         assert fs._listing_cache.get_lookup(S3Path("bucket", "key", "v2"), {}) is not None
 
     def test_listing_of_missing_version_path(self):
