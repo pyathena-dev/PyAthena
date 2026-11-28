@@ -208,6 +208,11 @@ location
 
   Description: Specifies the location of the underlying data in the Amazon S3 from which the table is created.
 
+  Without this option, the location is `<base>/<schema>/<table>/`.
+  `<base>` is the `location` connection option, or the S3 staging directory of the statement's cursor (`s3_staging_dir`) when that option is not set.
+  `<schema>` is the table's schema, or for a table without one, the cursor's `schema_name`, which `cursor_kwargs` can override.
+  Compiling `CREATE TABLE` raises `CompileError` when neither `location` nor an S3 staging directory is available.
+
   value: s3://bucket/path/to/
 
   Example:

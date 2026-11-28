@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping
 from itertools import product
@@ -30,6 +31,7 @@ from sqlalchemy.sql.elements import (
 from sqlalchemy.sql.schema import Column
 from sqlalchemy.sql.selectable import CompoundSelect, ScalarSelect
 
+from pyathena.connection import Connection
 from pyathena.model import (
     AthenaFileFormat,
     AthenaPartitionTransform,
@@ -1387,19 +1389,62 @@ class AthenaDDLCompiler(DDLCompiler):
                 "remove the dialect keyword argument `awsathena_location`"
             )
 
+    @staticmethod
+    def _get_s3_staging_dir(
+        connect_opts: Mapping[str, Any], cursor_kwargs: Mapping[str, Any]
+    ) -> str | None:
+        """Return the S3 staging directory of the statement's cursor.
+
+        The cursor takes ``s3_staging_dir`` from ``cursor_kwargs`` over the
+        connection, and the connection falls back to the
+        ``AWS_ATHENA_S3_STAGING_DIR`` environment variable when the option is
+        not given.
+
+        Args:
+            connect_opts: The dialect connection options.
+            cursor_kwargs: The connection's default cursor keyword arguments.
+
+        Returns:
+            The staging directory, or ``None`` when the cursor has none.
+        """
+        if "s3_staging_dir" in cursor_kwargs:
+            return cast(str | None, cursor_kwargs["s3_staging_dir"]) or None
+        s3_staging_dir = connect_opts.get("s3_staging_dir")
+        if s3_staging_dir is None:
+            s3_staging_dir = os.getenv(Connection._ENV_S3_STAGING_DIR)
+        return cast(str | None, s3_staging_dir) or None
+
     def _get_table_location(
         self, table: Table, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
     ) -> str | None:
+        """Return the location of a table, ending with a slash.
+
+        The dialect keyword argument ``awsathena_location`` gives the location.
+        Without it, the location is ``<base>/<schema>/<table>/``, where the base
+        is the ``location`` connection option or the S3 staging directory, and
+        the schema of an unqualified table is the database of the statement's
+        cursor, taken from ``cursor_kwargs`` over the connection.
+
+        Args:
+            table: The table being created.
+            dialect_opts: The table's ``awsathena_*`` dialect options.
+            connect_opts: The dialect connection options.
+
+        Returns:
+            The location, or ``None`` when no option gives one.
+        """
         if dialect_opts["location"]:
             location = cast(str, dialect_opts["location"])
             location += "/" if not location.endswith("/") else ""
         elif connect_opts:
-            base_location = (
-                cast(str, connect_opts["location"])
-                if "location" in connect_opts
-                else cast(str, connect_opts.get("s3_staging_dir"))
+            cursor_kwargs = cast(Mapping[str, Any], connect_opts.get("cursor_kwargs") or {})
+            base_location = cast(str | None, connect_opts.get("location")) or (
+                self._get_s3_staging_dir(connect_opts, cursor_kwargs)
             )
-            schema = table.schema if table.schema else connect_opts["schema_name"]
+            if not base_location:
+                return None
+            base_location += "/" if not base_location.endswith("/") else ""
+            schema = table.schema or cursor_kwargs.get("schema_name", connect_opts["schema_name"])
             location = f"{base_location}{schema}/{table.name}/"
         else:
             location = None
