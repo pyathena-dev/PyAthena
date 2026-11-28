@@ -227,7 +227,8 @@ compression
 
   Description: Specifies the compression format.
 
-  When the file format or the row format is set, the value is stored in the `parquet.compression` table property if the file format is `PARQUET` or the row format uses the Parquet SerDe, in `orc.compress` likewise for ORC, and in `write.compression` otherwise.
+  When the file format or the row format is set, the value is stored in the `parquet.compression` table property for the `PARQUET` file format and in `orc.compress` for `ORC`, matched case-insensitively.
+  For any other file format, the row format `SERDE '<class>'` with the Parquet or ORC SerDe class, as reflection returns it, chooses the same properties, and other tables use `write.compression`.
   It replaces a property of the same name given in a `tblproperties` dict.
 
   Value:
@@ -369,7 +370,7 @@ Within a string literal, escape a backslash or a single quote with a backslash.
 Write `%` as `%%` under the default `pyformat` parameter style, which is `%25%25` when url encoded.
 Dicts given as `serdeproperties` or `tblproperties` in `connect_args` are quoted like the table options.
 
-With the `no_parameters` execution option, the cursor does not format the statement.
+Under the `pyformat` parameter style with the `no_parameters` execution option, the cursor does not format the statement.
 Write `%` once in these strings; a `%` in a dict key or value, a comment, or a location reaches Athena doubled.
 
 For example, if you configure a projection setting `'projection.enabled'='true','projection.dt.type'='date','projection.dt.range'='NOW-1YEARS,NOW','projection.dt.format'= 'yyyy-MM-dd'` in tblproperties, it would look like this
