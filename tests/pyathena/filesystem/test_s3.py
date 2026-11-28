@@ -3317,6 +3317,73 @@ class TestS3FileSystem:
             fs.get(["s3://bucket/a", "s3://bucket/b"], [str(tmp_path / "a"), str(tmp_path / "b")])
         fs.get_file.assert_not_called()
 
+    def test_get_stream_and_path_of_one_file_conflict(self, tmp_path):
+        # GH-1425: a stream and a local path of one file conflict, as two
+        # local paths of it do. The stream was compared as an object only.
+        fs = self._make_fs()
+        fs.get_file = mock.MagicMock()
+        (tmp_path / "a").write_bytes(b"")
+        with (
+            open(tmp_path / "a", "r+b") as stream,
+            pytest.raises(ValueError, match="same destination"),
+        ):
+            fs.get(["s3://bucket/a", "s3://bucket/b"], [stream, str(tmp_path / "a")])
+        fs.get_file.assert_not_called()
+
+    @pytest.mark.parametrize("stream", ["devnull", "spooled"])
+    def test_get_streams_of_no_regular_file(self, stream):
+        # GH-1425: only the streams that open() returns for a regular file
+        # are compared by their file. Two streams of a device do not
+        # conflict, and the check does not roll a spooled temporary file
+        # over to a file on disk, as asking it for a file descriptor does.
+        fs = self._make_fs()
+        fs.get_file = mock.MagicMock()
+        with contextlib.ExitStack() as stack:
+            streams = [
+                stack.enter_context(
+                    open(os.devnull, "wb")  # noqa: SIM115
+                    if stream == "devnull"
+                    else tempfile.SpooledTemporaryFile()  # noqa: SIM115
+                )
+                for _ in range(2)
+            ]
+            fs.get(["s3://bucket/a", "s3://bucket/b"], streams)
+            assert fs.get_file.call_count == 2
+            assert not any(getattr(s, "_rolled", False) for s in streams)
+
+    def test_get_path_like_stream_destination(self, tmp_path):
+        # GH-1425: one destination that is os.PathLike is a path, also when
+        # it is file-like, as in fsspec's _get(); in a list, such an object
+        # is written into.
+        class PathLikeStream(io.BytesIO):
+            def __fspath__(self):
+                return str(tmp_path / "out")
+
+        fs = self._make_fs()
+        self._serve_keys(fs, {"a"})
+        fs.get_file = mock.MagicMock()
+
+        fs.get("s3://bucket/a", PathLikeStream())
+        assert fs.get_file.call_args.args[:2] == ("bucket/a", f"{tmp_path}/out")
+
+    def test_get_destination_sequence(self, tmp_path, monkeypatch):
+        # GH-1425: as with AioS3FileSystem.get(), a tuple of destinations is
+        # paired with a list of sources in order, as a list is, and its paths
+        # are made absolute with "~" expanded, as one destination path is.
+        # The tuple was paired with the sorted sources, and "~" was kept as a
+        # relative directory.
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.chdir(tmp_path)
+        fs = self._make_fs()
+        self._serve_keys(fs, {"a", "b"})
+        fs.get_file = mock.MagicMock()
+
+        fs.get(["s3://bucket/b", "s3://bucket/a"], ("~/b", "a"))
+        assert sorted(c.args[:2] for c in fs.get_file.call_args_list) == [
+            ("s3://bucket/a", f"{tmp_path}/a"),
+            ("s3://bucket/b", f"{tmp_path}/home/b"),
+        ]
+
     @pytest.mark.parametrize(
         ("keys", "conflict"),
         [
@@ -3376,6 +3443,46 @@ class TestS3FileSystem:
         )
         fs.copy(["s3://bucket/dir", "s3://bucket/x"], ["s3://bucket/x", "s3://bucket/y"])
         assert fs.cp_file.call_count == 2
+
+    def test_expand_path_withdirs(self):
+        # GH-1425: the expansion follows withdirs for a glob pattern, as
+        # glob() does, and lists the directories below a recursive path
+        # whatever withdirs, which get() may pass. A recursive path raised
+        # TypeError for withdirs.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs, {"d/a", "d/sub/b"})
+
+        assert fs.expand_path("bucket/d/*", withdirs=False) == ["bucket/d/a"]
+        assert fs.expand_path("bucket/d", recursive=True, withdirs=False) == [
+            "bucket/d",
+            "bucket/d/a",
+            "bucket/d/sub",
+            "bucket/d/sub/b",
+        ]
+
+    def test_cat_kwargs_of_expansion(self):
+        # GH-1425: the keyword arguments of the expansion, such as prefix and
+        # withdirs, select the paths and are not sent with GetObject, as
+        # with get(), while the request parameters are. cat() sent them all,
+        # which botocore rejected.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs, {"d/a1", "d/a2/b", "d/b1"})
+
+        assert fs.cat(
+            "s3://bucket/d/*",
+            prefix="a",
+            withdirs=False,
+            maxdepth=1,
+            refresh=True,
+            RequestPayer="requester",
+        ) == {"bucket/d/a1": b"aa"}
+        assert [r for name, r in requests if name == "get_object"] == [
+            {"RequestPayer": "requester", "Bucket": "bucket", "Key": "d/a1"}
+        ]
 
     def test_get_put_pass_kwargs_to_expansion(self, tmp_path):
         # GH-1322: as in fsspec, get() and put() pass their keyword arguments
@@ -5135,20 +5242,31 @@ class TestS3FileSystem:
             assert f.blocksize == block_size
 
     @pytest.mark.parametrize(
-        ("path", "expected"),
+        ("path", "kwargs", "lookup", "expected"),
         [
-            ("s3://bucket/key", "v1"),
+            ("s3://bucket/key", {"version_id": "v1"}, ("s3://bucket/key", "v1"), "v1"),
             # The version in the path takes precedence, as in info().
-            ("s3://bucket/key?versionId=v2", "v2"),
+            (
+                "s3://bucket/key?versionId=v2",
+                {"version_id": "v1"},
+                (S3Path("bucket", "key", "v2"), "v2"),
+                "v2",
+            ),
+            # GH-1425: also the VersionId parameter selects the version that
+            # sizes a negative offset. The current object was looked up.
+            ("s3://bucket/key", {"VersionId": "v1"}, ("s3://bucket/key", "v1"), "v1"),
+            # GH-1425: an empty VersionId is sent as given instead of reading
+            # the current object.
+            ("s3://bucket/key", {"VersionId": ""}, ("s3://bucket/key", None), ""),
         ],
     )
-    def test_cat_file_version_id(self, path, expected):
+    def test_cat_file_version_id(self, path, kwargs, lookup, expected):
         fs = self._make_fs()
         fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
         fs._info_entry.return_value.size = 10
 
         fs._call.return_value = {"Body": io.BytesIO(b"data")}
-        assert fs.cat_file(path, version_id="v1") == b"data"
+        assert fs.cat_file(path, **kwargs) == b"data"
         fs._call.assert_called_once_with(
             fs._client.get_object, Bucket="bucket", Key="key", VersionId=expected
         )
@@ -5156,8 +5274,8 @@ class TestS3FileSystem:
         # A negative offset is resolved against the size of the same version.
         fs._call.reset_mock()
         fs._call.return_value = {"Body": io.BytesIO(b"ta")}
-        assert fs.cat_file(path, start=-8, end=-6, version_id="v1") == b"ta"
-        fs._info_entry.assert_called_once_with(path, version_id=expected)
+        assert fs.cat_file(path, start=-8, end=-6, **kwargs) == b"ta"
+        fs._info_entry.assert_called_once_with(lookup[0], version_id=lookup[1])
         fs._call.assert_called_once_with(
             fs._client.get_object,
             Bucket="bucket",
@@ -5165,6 +5283,27 @@ class TestS3FileSystem:
             Range="bytes=2-3",
             VersionId=expected,
         )
+
+    def test_cat_file_range_version_ending_in_slash(self):
+        # GH-1425: a version of the path that ends in a slash sizes a
+        # negative offset, as it is read. The name of the path, which drops
+        # the slash, sized the range by another version.
+        fs = self._make_fs()
+        requests = self._record_requests(
+            fs,
+            responses={
+                "head_object": lambda request: {
+                    "ContentLength": 4 if request.get("VersionId") == "v1/" else 2,
+                    "ETag": '"e"',
+                }
+            },
+        )
+
+        assert fs.cat_file("s3://bucket/key?versionId=v1/", start=-2, end=-1) == b"aa"
+        assert [(name, r.get("VersionId"), r.get("Range")) for name, r in requests] == [
+            ("head_object", "v1/", None),
+            ("get_object", "v1/", "bytes=2-2"),
+        ]
 
     def _make_object_fs(self, data):
         # A filesystem holding one object at s3://bucket/key whose client

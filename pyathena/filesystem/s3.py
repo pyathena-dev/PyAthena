@@ -21,7 +21,8 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from glob import has_magic
-from io import BytesIO
+from io import BufferedRandom, BufferedReader, BufferedWriter, BytesIO, FileIO
+from stat import S_ISREG
 from typing import Any, BinaryIO, ClassVar, Protocol, cast
 from urllib.parse import unquote_plus
 
@@ -119,6 +120,13 @@ _LOOKUP_REQUEST_PARAMETERS = frozenset(
         "SSECustomerKey",
         "SSECustomerKeyMD5",
     }
+)
+# The keyword arguments of the expansion of paths, which are not request
+# parameters: those that _expand_unversioned(), glob() (also fsspec's) and
+# _find_paths() take or pop. A new one belongs here, or cat() sends it with
+# GetObject.
+_EXPANSION_KWARGS = frozenset(
+    {"assume_literal", "detail", "maxdepth", "prefix", "refresh", "withdirs"}
 )
 # The second element of the dircache key, ``(path, _LOOKUPS_CACHE_KEY)``, of
 # the lookup results of a path made with lookup request parameters.
@@ -2118,7 +2126,11 @@ class S3FileSystem(AbstractFileSystem):
                             add(f.name, target)
                 continue
             if recursive:
-                for f, target in self._find_paths(p, maxdepth=maxdepth, withdirs=True, **kwargs):
+                # With the directories, also when a caller's get() passes
+                # withdirs, which glob() above follows.
+                for f, target in self._find_paths(
+                    p, maxdepth=maxdepth, **{**kwargs, "withdirs": True}
+                ):
                     add(f.name, target)
             if p not in names and (not recursive or self.exists(p)):
                 add(p, p)
@@ -3094,22 +3106,27 @@ class S3FileSystem(AbstractFileSystem):
         pairs them, and that the files are downloaded in parallel, as with
         ``copy()``. The destinations named after the sources are checked to
         lie under ``lpath``. With ``outfile``, the files are written to it
-        one after another, in order.
+        one after another, in order. A sequence of local destinations, such
+        as a tuple, is paired as a list is: in order with a list of sources,
+        or with the expanded sources, which are sorted. Its paths are made
+        absolute, with ``~`` expanded, as one destination path is.
 
         A failed download starts no further one, the running ones read and
         write no further block, and the error is raised once they have ended.
 
         Args:
             rpath: Source S3 path, glob pattern, or list of them.
-            lpath: Local destination path, or list of paths or file-like
-                objects when ``rpath`` is a list.
+            lpath: Local destination path, or sequence of paths or file-like
+                objects, one for each source.
             recursive: Whether to copy the directories with their contents.
             callback: Progress callback. It and its branches for the files
                 are used from the threads that download them, one at a time.
             maxdepth: Maximum depth of a recursive copy.
             batch_size: Number of downloads to run at the same time, as in
                 ``copy()``.
-            **kwargs: Additional parameters passed to ``get_file()``.
+            **kwargs: Additional parameters passed to ``get_file()`` and, as
+                in fsspec, to the expansion of the sources, such as
+                ``prefix``.
 
         Raises:
             ValueError: If a destination named after a source lies outside
@@ -3118,9 +3135,8 @@ class S3FileSystem(AbstractFileSystem):
         """
         rpath = self._stringify_paths(rpath)
         limit = self._batch_limit(batch_size)
-        root = make_path_posix(lpath) if isinstance(lpath, (str, os.PathLike)) else lpath
         pairs = self._checked_get_pairs(
-            S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth), kwargs, **kwargs
+            rpath, lpath, kwargs, recursive=recursive, maxdepth=maxdepth, **kwargs
         )
         if not pairs:
             return
@@ -3151,8 +3167,39 @@ class S3FileSystem(AbstractFileSystem):
             return
         self._run_batch(get_pair, pairs, concurrency)
 
+    def _local_root(self, lpath: Any) -> Any:
+        """Return the local destination of a ``get()`` as :meth:`get` pairs it.
+
+        In a sequence, file-like objects are kept, also when they are
+        ``os.PathLike``, as ``get_file()`` writes into them. One
+        ``os.PathLike`` destination is a path, as in fsspec's ``_get()``.
+
+        Args:
+            lpath: Local destination path, or sequence of paths or file-like
+                objects.
+
+        Returns:
+            The absolute path, ``lpath`` if it is file-like, or a list of
+            the destinations.
+        """
+        if isinstance(lpath, (str, os.PathLike)):
+            return make_path_posix(lpath)
+        if isfilelike(lpath):
+            return lpath
+        return [
+            make_path_posix(p) if isinstance(p, (str, os.PathLike)) and not isfilelike(p) else p
+            for p in lpath
+        ]
+
     def _checked_get_pairs(
-        self, pairing: S3PathPairing, file_kwargs: Mapping[str, Any], **kwargs: Any
+        self,
+        rpath: Any,
+        lpath: Any,
+        file_kwargs: Mapping[str, Any],
+        *,
+        recursive: bool = False,
+        maxdepth: int | None = None,
+        **kwargs: Any,
     ) -> list[tuple[str | S3Path, Any]]:
         """Expand, pair and check the paths of a ``get()``.
 
@@ -3162,10 +3209,14 @@ class S3FileSystem(AbstractFileSystem):
         :meth:`_check_local_destinations`).
 
         Args:
-            pairing: The paths of the copy, with the local destination.
+            rpath: The S3 sources, with their paths as strings.
+            lpath: The local destination, as given to :meth:`get` (see
+                :meth:`_local_root`).
             file_kwargs: The arguments of ``get_file()``, whose ``outfile``
                 and ``version_id`` the checks follow.
-            **kwargs: Passed to ``expand_path()``.
+            recursive: Whether to copy the directories with their contents.
+            maxdepth: Maximum depth of a recursive copy.
+            **kwargs: Passed to the expansion of the sources.
 
         Returns:
             The S3 sources and their local destinations.
@@ -3175,6 +3226,9 @@ class S3FileSystem(AbstractFileSystem):
                 the local destination, or two downloads write the same local
                 file.
         """
+        pairing = S3PathPairing(
+            rpath, self._local_root(lpath), recursive=recursive, maxdepth=maxdepth
+        )
         pairs = self._copy_pairs(pairing, local=True, **kwargs)
         if isinstance(pairing.path2, str):
             check_contained(pairing.path2, [lp for _, lp in pairs])
@@ -3187,11 +3241,14 @@ class S3FileSystem(AbstractFileSystem):
     ) -> None:
         """Check that no two downloads of a batch write the same local file.
 
-        Destinations are compared by the object for file-like ones, by the
-        file for existing paths, such as hard links to one file, and by the
-        resolved path otherwise. A source that ``get_file()`` creates as a
-        local directory writes no file, so several of them may share a local
-        path; the sources are looked up only when their local path is shared.
+        Destinations are compared by the file for existing paths, such as
+        hard links to one file, and for the regular files that ``open()``
+        returns in binary mode, also read-only; by the object for other
+        file-like objects, such as subclasses of those or text files;
+        and by the resolved path otherwise. A source that ``get_file()``
+        creates as a local directory writes no file, so several of them may
+        share a local path; the sources are looked up only when their local
+        path is shared.
 
         Args:
             pairs: The S3 sources and their local paths or file-like objects.
@@ -3202,10 +3259,25 @@ class S3FileSystem(AbstractFileSystem):
                 a directory where another writes a file.
         """
         sources: dict[tuple[Any, ...], list[str | S3Path]] = {}
+        # The keys of file-like objects, which get_file() writes into
+        # whatever the source.
+        streams: set[tuple[Any, ...]] = set()
         for rpath, destination in pairs:
             key: tuple[Any, ...]
             if isfilelike(destination):
+                # Other streams are not asked for a file descriptor, which
+                # some create, such as a spooled temporary file.
+                raw = (
+                    getattr(destination, "raw", None)
+                    if type(destination) in (BufferedRandom, BufferedReader, BufferedWriter)
+                    else destination
+                )
                 key = ("object", id(destination))
+                if type(raw) is FileIO and not raw.closed:
+                    info = os.fstat(raw.fileno())
+                    if S_ISREG(info.st_mode):
+                        key = ("file", info.st_dev, info.st_ino)
+                streams.add(key)
             else:
                 path = os.fspath(destination)
                 try:
@@ -3219,9 +3291,8 @@ class S3FileSystem(AbstractFileSystem):
                     key = ("file", stat.st_dev, stat.st_ino)
             sources.setdefault(key, []).append(rpath)
         for key, rpaths in sources.items():
-            # get_file() writes into a file-like object whatever the source.
             if len(rpaths) > 1 and (
-                key[0] == "object"
+                key in streams
                 or not all(self._is_directory_source(rp, version_id) for rp in rpaths)
             ):
                 raise ValueError("Cannot get several paths to the same destination.")
@@ -3612,11 +3683,13 @@ class S3FileSystem(AbstractFileSystem):
             recursive: Whether to read the files below the directories.
             on_error: ``"raise"`` to raise an error of a read, ``"omit"`` to
                 leave out the paths whose read failed, or ``"return"`` to
-                return the error in place of their contents.
+                return the error in place of their contents. As in fsspec,
+                the error of a single path that is not expanded is raised.
             batch_size: Number of reads to run at the same time, as in
                 ``copy()``.
-            **kwargs: Additional parameters passed to ``expand_path()`` and
-                ``cat_file()``.
+            **kwargs: Additional parameters passed to ``expand_path()``, such
+                as ``prefix``, and to ``cat_file()``, except those of the
+                expansion.
 
         Returns:
             The contents of the path, or a dict of the contents by path if
@@ -3627,6 +3700,7 @@ class S3FileSystem(AbstractFileSystem):
         """
         limit = self._batch_limit(batch_size)
         targets = self._first_targets(self._expand_paths(path, recursive=recursive, **kwargs))
+        kwargs = self._get_read_kwargs(kwargs)
         paths = list(targets)
         if not (len(paths) > 1 or isinstance(path, list) or paths[0] != self._strip_protocol(path)):
             return self.cat_file(targets[paths[0]], **kwargs)
@@ -3765,7 +3839,7 @@ class S3FileSystem(AbstractFileSystem):
                 counts from the end of the object.
             **kwargs: Additional parameters passed to the GetObject API,
                 except ``version_id``: the version ID to read when the path
-                has none.
+                has none, which takes precedence over ``VersionId``.
 
         Returns:
             The bytes read from the object.
@@ -3796,8 +3870,8 @@ class S3FileSystem(AbstractFileSystem):
             end: Byte offset to stop reading at, as in :meth:`cat_file`.
             name: The path string that the caller passed, which ``info()``
                 looks up for the size of the object of a negative offset or
-                an empty range, and which a missing object is reported by;
-                None to look up ``path`` itself.
+                an empty range if ``path`` has no version, and which the
+                errors raised here name; None to use ``path`` itself.
             **kwargs: Additional parameters passed to the GetObject API, and
                 ``version_id``, as in :meth:`cat_file`.
 
@@ -3811,8 +3885,10 @@ class S3FileSystem(AbstractFileSystem):
         if not path.key:
             raise FileNotFoundError(name or str(path))
         version_id = kwargs.pop("version_id", None)
-        if path.version_id:
-            version_id = path.version_id
+        # The version that GetObject reads, which also sizes a negative
+        # offset: that of the path, then version_id, then the VersionId
+        # parameter, which is sent as given.
+        version_id = path.version_id or version_id or kwargs.get("VersionId") or None
         ranges: tuple[int, int | None] | None = None
         if start is not None and start < 0 and end is None:
             # S3 returns the last bytes, or the whole object when it is
@@ -3827,7 +3903,11 @@ class S3FileSystem(AbstractFileSystem):
                 # missing object.
                 lookup_kwargs = self._get_lookup_kwargs(kwargs)
                 info = self._info_entry(
-                    name if name is not None else path, version_id=version_id, **lookup_kwargs
+                    # A version of the path is looked up as parsed, also one
+                    # that ends in a slash, which the name would drop.
+                    name if name is not None and not path.version_id else path,
+                    version_id=version_id,
+                    **lookup_kwargs,
                 )
                 if (
                     info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
@@ -4726,6 +4806,21 @@ class S3FileSystem(AbstractFileSystem):
         except FileNotFoundError:
             return False
         return bool(info.get("type") != S3ObjectType.S3_OBJECT_TYPE_DIRECTORY)
+
+    @staticmethod
+    def _get_read_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+        """Select the keyword arguments of the reads of :meth:`cat`.
+
+        Those of the expansion of the paths, such as ``prefix``, are not
+        sent with GetObject.
+
+        Args:
+            kwargs: The keyword arguments to select from.
+
+        Returns:
+            The keyword arguments of ``cat_file()``.
+        """
+        return {k: v for k, v in kwargs.items() if k not in _EXPANSION_KWARGS}
 
     @staticmethod
     def _get_lookup_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:

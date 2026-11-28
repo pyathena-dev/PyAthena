@@ -21,7 +21,7 @@ import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from concurrent.futures import CancelledError, Future, wait
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import IO, TYPE_CHECKING, Any, ClassVar, cast
 
 from fsspec.asyn import (
     AbstractAsyncStreamedFile,
@@ -32,8 +32,7 @@ from fsspec.asyn import (
 )
 from fsspec.callbacks import _DEFAULT_CALLBACK
 from fsspec.core import get_compression
-from fsspec.implementations.local import make_path_posix
-from fsspec.utils import stringify_path
+from fsspec.utils import isfilelike, stringify_path
 
 from pyathena.filesystem.s3 import (
     _UNPICKLABLE_CLIENT_MESSAGE,
@@ -53,7 +52,6 @@ from pyathena.filesystem.s3_object import (
     S3ObjectVersion,
 )
 from pyathena.filesystem.s3_path import S3Path
-from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.filesystem.s3_retry import retries_stopped
 from pyathena.filesystem.s3_writer import _S3WriteSession, _S3WriteState
 from pyathena.filesystem.util import create_in_thread, override
@@ -632,10 +630,23 @@ class AioS3FileSystem(AsyncFileSystem):
     async def _get_file(
         self,
         rpath: str | os.PathLike[str] | S3Path,
-        lpath: str | os.PathLike[str],
+        lpath: str | os.PathLike[str] | IO[bytes] | None,
         callback=_DEFAULT_CALLBACK,
         **kwargs,
     ) -> None:
+        """Download an S3 file to a local path or a file-like object.
+
+        See :meth:`S3FileSystem.get_file`, which runs in the threads of the
+        filesystem.
+
+        Args:
+            rpath: S3 source path, or an ``S3Path``.
+            lpath: Local destination path, or a file-like object to write to;
+                ignored, and may be None, with ``outfile``.
+            callback: Progress callback.
+            **kwargs: Passed to :meth:`S3FileSystem.get_file`, such as
+                ``outfile``.
+        """
         _S3BatchTasks.track()
         await self._thread_pool.run(
             self._sync_fs.get_file, rpath, lpath, callback=callback, **kwargs
@@ -891,38 +902,36 @@ class AioS3FileSystem(AsyncFileSystem):
         fsspec's ``_get()``; a cancellation cancels them and waits for them,
         as in :meth:`_copy`. As in :meth:`S3FileSystem.get`, each download
         gets ``max(1, max_workers // n)`` parallel range reads, or the
-        caller's smaller ``max_workers``, where ``n`` is the number of files,
-        or ``batch_size`` when it is positive and smaller. With ``outfile``,
-        the files are written to it one after another, in order, and ``n`` is
-        1.
+        caller's smaller ``max_workers``, where ``n`` is the number of paired
+        sources, directories included, or ``batch_size`` when it is positive
+        and smaller. With ``outfile``, the files are written to it one after
+        another, in order, and ``n`` is 1.
 
         Args:
             rpath: Source S3 path, glob pattern, or list of them.
-            lpath: Local destination path, or list of paths when ``rpath`` is
-                a list.
+            lpath: Local destination path, or sequence of paths or file-like
+                objects, as in :meth:`S3FileSystem.get`.
             recursive: Whether to copy the directories with their contents.
             callback: Progress callback.
             maxdepth: Maximum depth of a recursive copy.
-            **kwargs: Additional parameters passed to ``_get_file()``, and
-                ``batch_size``, the number of downloads that fsspec runs at
-                once.
+            **kwargs: Additional parameters passed to ``_get_file()`` and to
+                the expansion of the sources, such as ``prefix``, as in
+                :meth:`S3FileSystem.get`, and ``batch_size``, the number of
+                downloads that fsspec runs at once.
 
         Raises:
             ValueError: If a destination named after a source lies outside
                 ``lpath``, or two downloads write the same local file.
         """
         rpath = self._sync_fs._stringify_paths(rpath)
-        # Local paths are made absolute, as fsspec's _get() does, so that
-        # it can create their parent directories.
-        root = (
-            make_path_posix(lpath)
-            if isinstance(lpath, (str, os.PathLike))
-            else [make_path_posix(p) if isinstance(p, (str, os.PathLike)) else p for p in lpath]
-        )
         pairs = await self._thread_pool.run(
             self._sync_fs._checked_get_pairs,
-            S3PathPairing(rpath, root, recursive=recursive, maxdepth=maxdepth),
+            rpath,
+            lpath,
             kwargs,
+            recursive=recursive,
+            maxdepth=maxdepth,
+            **kwargs,
         )
         if not pairs:
             return
@@ -937,10 +946,14 @@ class AioS3FileSystem(AsyncFileSystem):
         batch_size = kwargs.get("batch_size", self.batch_size)
         if batch_size is not None and batch_size > 0:
             concurrency = min(concurrency, batch_size)
-        # As fsspec's _get() for lists of paths.
-        for _, lp in pairs:
-            # A local path, as copy_pairs() names it.
-            os.makedirs(os.path.dirname(cast(str, lp)), exist_ok=True)
+        if kwargs.get("outfile") is None:
+            # As fsspec's _get() for lists of paths, before any download;
+            # the local paths are absolute. _get_file() writes into a
+            # file-like destination instead, as into an outfile, so no
+            # directory is created for them.
+            for _, lp in pairs:
+                if not isfilelike(lp):
+                    os.makedirs(os.path.dirname(cast(str, lp)), exist_ok=True)
         await _S3BatchTasks().run(
             self._transfer_pairs(
                 self._get_file, pairs, callback, **self._sync_fs._batch_kwargs(concurrency, kwargs)
@@ -1119,11 +1132,16 @@ class AioS3FileSystem(AsyncFileSystem):
             recursive: Whether to read the files below the directories.
             on_error: ``"raise"``, ``"omit"``, or ``"return"``.
             batch_size: Number of reads to run at the same time.
-            **kwargs: Additional parameters passed to ``_cat_file()``.
+            **kwargs: Additional parameters passed to the expansion of the
+                paths, such as ``prefix``, and to ``_cat_file()``, except
+                those of the expansion, as in :meth:`S3FileSystem.cat`.
 
         Returns:
             The bytes of a single path, or a dictionary of the paths and
-            their bytes.
+            their bytes, which holds the error of a failed read with
+            ``on_error="return"`` and leaves out its path with ``"omit"``.
+            As in fsspec, the error of the read of a single path is returned
+            unless ``on_error`` is ``"raise"``.
         """
         return await _S3BatchTasks().run(
             self._cat_paths(
@@ -1136,26 +1154,32 @@ class AioS3FileSystem(AsyncFileSystem):
     ) -> Any:
         """Read the contents of one or more paths as fsspec's ``_cat()`` does.
 
-        Unlike fsspec, each path that the expansion returns is read by its
+        Unlike fsspec, each path that a listing returns is read by its
         bucket and key (see :meth:`S3FileSystem._expand_paths`), never by
-        parsing its name.
+        parsing its name, and the keyword arguments of the expansion, such as
+        ``prefix``, select the paths, as in :meth:`S3FileSystem.cat`.
 
         Args:
             path: S3 path, glob pattern, or list of them.
             recursive: Whether to read the files below the directories.
             on_error: ``"raise"``, ``"omit"``, or ``"return"``.
             batch_size: Number of reads to run at the same time.
-            **kwargs: Additional parameters passed to the reads.
+            **kwargs: Additional parameters passed to the expansion and the
+                reads, as in :meth:`_cat`.
 
         Returns:
             The bytes of a single path, or a dictionary of the paths and
-            their bytes.
+            their bytes, which holds the error of a failed read with
+            ``on_error="return"`` and leaves out its path with ``"omit"``.
+            As in fsspec, the error of the read of a single path is returned
+            unless ``on_error`` is ``"raise"``.
         """
-        # As in fsspec, the expansion does not receive the parameters of the
-        # reads.
         targets = self._sync_fs._first_targets(
-            await self._thread_pool.run(self._sync_fs._expand_paths, path, recursive=recursive)
+            await self._thread_pool.run(
+                self._sync_fs._expand_paths, path, recursive=recursive, **kwargs
+            )
         )
+        kwargs = self._sync_fs._get_read_kwargs(kwargs)
         paths = list(targets)
         out = await _run_coros_in_chunks(
             [self._cat_file(target, **kwargs) for target in targets.values()],

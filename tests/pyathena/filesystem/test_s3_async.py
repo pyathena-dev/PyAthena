@@ -2767,6 +2767,86 @@ class TestAioS3FileSystem:
         assert outfile.getvalue() == b"".join(p.encode() + b";" for p in sources)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("path_like", [False, True])
+    async def test_get_file_like_destinations(self, tmp_path, path_like):
+        # GH-1425: as in S3FileSystem.get(), a list of destinations may hold
+        # file-like objects, which the files are written into, also when
+        # they are os.PathLike, and the parent directories of a local path
+        # are created. _get() created the parent directory of every
+        # destination first, which raised TypeError for a file-like object,
+        # and wrote to the path of an os.PathLike one.
+        class PathLikeStream(io.BytesIO):
+            def __fspath__(self):
+                return str(tmp_path / "unused" / "stream")
+
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, {"a", "b"})
+        serve = fs._sync_fs._call
+
+        def call(method, **request):
+            # Each object holds its key twice, so that the destinations tell
+            # the objects apart.
+            response = serve(method, **request)
+            if "Body" in response:
+                response = {**response, "Body": io.BytesIO(request["Key"].encode() * 2)}
+            return response
+
+        fs._sync_fs._call = fs._sync_fs._core.call = call
+        stream = PathLikeStream() if path_like else io.BytesIO()
+
+        await await_bounded(
+            fs._get(["s3://bucket/a", "s3://bucket/b"], [stream, str(tmp_path / "new" / "b")])
+        )
+        assert stream.getvalue() == b"aa"
+        assert (tmp_path / "new" / "b").read_bytes() == b"bb"
+        assert not (tmp_path / "unused").exists()
+
+    @pytest.mark.asyncio
+    async def test_get_uncreatable_directory_fails_first(self, tmp_path):
+        # GH-1425: as in fsspec's _get(), the parent directories of the local
+        # paths are created before any download, so a directory that cannot
+        # be created fails before the other files are downloaded.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs._sync_fs, {"a", "b"})
+        (tmp_path / "file").write_bytes(b"")
+
+        with pytest.raises(FileExistsError):
+            await await_bounded(
+                fs._get(
+                    ["s3://bucket/a", "s3://bucket/b"],
+                    [str(tmp_path / "a"), str(tmp_path / "file" / "b")],
+                    batch_size=1,
+                )
+            )
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["file"]
+        assert not any(name == "get_object" for name, _ in requests)
+
+    @pytest.mark.asyncio
+    async def test_get_outfile_creates_no_directories(self, tmp_path):
+        # GH-1425: as in S3FileSystem.get(), the local paths that _get_file()
+        # ignores for an outfile are not created. _get() created their parent
+        # directories.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, {"a", "b"})
+        outfile = io.BytesIO()
+
+        await await_bounded(
+            fs._get(
+                ["s3://bucket/a", "s3://bucket/b"],
+                [str(tmp_path / "new" / "unused")] * 2,
+                outfile=outfile,
+            )
+        )
+        assert outfile.getvalue() == b"aaaa"
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.asyncio
     async def test_expand_path_kwargs(self):
         # GH-1337: the keyword arguments of _expand_path() reach the listing,
         # as with S3FileSystem.expand_path(). fsspec's _expand_path() takes
@@ -2779,6 +2859,55 @@ class TestAioS3FileSystem:
         assert await fs._expand_path("s3://bucket/dir", recursive=True, prefix="a") == [
             "bucket/dir",
             "bucket/dir/a1",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_get_passes_kwargs_to_expansion(self, tmp_path):
+        # GH-1425: as with S3FileSystem.get(), the keyword arguments of
+        # _get() reach the expansion of the sources, such as prefix, and
+        # select the same objects; withdirs, which the expansion sets itself,
+        # is accepted. They were passed to _get_file() only, and every object
+        # below the source was downloaded.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, {"dir/a1", "dir/b1"})
+
+        await await_bounded(
+            fs._get(
+                "s3://bucket/dir",
+                str(tmp_path / "out"),
+                recursive=True,
+                prefix="a",
+                withdirs=True,
+            )
+        )
+        assert [p.name for p in (tmp_path / "out").iterdir()] == ["a1"]
+
+    @pytest.mark.asyncio
+    async def test_cat_passes_kwargs_to_expansion(self):
+        # GH-1425: as with S3FileSystem.cat(), the keyword arguments of _cat()
+        # reach the expansion of the paths, such as prefix and withdirs, and
+        # are not sent with GetObject, while the request parameters are. They
+        # were sent with GetObject only, which botocore rejected, and did not
+        # select the paths.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs._sync_fs, {"d/a1", "d/a2/b", "d/b1"})
+
+        assert await await_bounded(
+            fs._cat(
+                "s3://bucket/d/*",
+                prefix="a",
+                withdirs=False,
+                maxdepth=1,
+                refresh=True,
+                RequestPayer="requester",
+            )
+        ) == {"bucket/d/a1": b"aa"}
+        assert [r for name, r in requests if name == "get_object"] == [
+            {"RequestPayer": "requester", "Bucket": "bucket", "Key": "d/a1"}
         ]
 
     @pytest.mark.asyncio
