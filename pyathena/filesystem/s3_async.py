@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from botocore.client import BaseClient
+    from fsspec.dircache import DirCache
 
     from pyathena.filesystem.s3 import _Connection
     from pyathena.filesystem.s3_retry import RetryPolicy
@@ -384,8 +385,6 @@ class AioS3FileSystem(AsyncFileSystem):
         # requests that they run in parallel in the request pool of the
         # internal S3FileSystem, which runs no call that waits.
         self._thread_pool = S3ThreadPool(self._sync_fs.max_workers)
-        # Share dircache for cache coherence between async and sync instances
-        self.dircache = self._sync_fs.dircache
 
     @override
     def __reduce__(self) -> tuple[Any, ...]:
@@ -407,6 +406,25 @@ class AioS3FileSystem(AsyncFileSystem):
     def core(self) -> S3Core:
         """The typed S3 operations of the wrapped ``S3FileSystem``."""
         return self._sync_fs.core
+
+    @property
+    def dircache(self) -> DirCache:
+        """The ``dircache`` of the wrapped ``S3FileSystem``, which both filesystems use."""
+        return cast("DirCache", self._sync_fs.dircache)
+
+    @dircache.setter
+    def dircache(self, value: DirCache) -> None:
+        """Replace the ``dircache`` of the wrapped ``S3FileSystem``.
+
+        Args:
+            value: The new ``dircache``.
+        """
+        sync_fs = getattr(self, "_sync_fs", None)
+        if sync_fs is None:
+            # fsspec's __init__ assigns a dircache before the wrapped
+            # S3FileSystem, which creates the one that both use, exists.
+            return
+        sync_fs.dircache = value
 
     def close(self) -> None:
         """Release the threads of the filesystem, which stays usable, once they are idle.

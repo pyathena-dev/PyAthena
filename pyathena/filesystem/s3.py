@@ -8,13 +8,11 @@ import contextlib
 import contextvars
 import functools
 import gc
-import hashlib
 import logging
 import mimetypes
 import os.path
 import sys
 import threading
-import time
 import warnings
 from collections.abc import Callable, Generator, Iterable, Mapping
 from copy import deepcopy
@@ -39,6 +37,7 @@ from fsspec.implementations.local import LocalFileSystem, make_path_posix, trail
 from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import check_contained, isfilelike, other_paths, stringify_path, tokenize
 
+from pyathena.filesystem.s3_cache import S3ListingCache
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import (
@@ -129,13 +128,6 @@ _LOOKUP_REQUEST_PARAMETERS = frozenset(
 _EXPANSION_KWARGS = frozenset(
     {"assume_literal", "detail", "maxdepth", "prefix", "refresh", "withdirs"}
 )
-# The second element of the dircache key, ``(path, _LOOKUPS_CACHE_KEY)``, of
-# the lookup results of a path made with lookup request parameters.
-_LOOKUPS_CACHE_KEY = "lookups"
-# The second element of the dircache key,
-# ``(name, _VERSION_CACHE_KEY, version_id)``, of the lookup of an explicit
-# version, which no key of an unversioned path, a name string, can equal.
-_VERSION_CACHE_KEY = "versionId"
 
 
 class CompressedBuffer(BytesIO):
@@ -524,6 +516,9 @@ class S3FileSystem(AbstractFileSystem):
                 fsspec's configuration supplies.
         """
         super().__init__(*args, **kwargs)
+        # The lookups and listings, kept in the dircache, which an
+        # AioS3FileSystem shares with its internal S3FileSystem.
+        self._listing_cache = S3ListingCache(self)
         self.batch_size = self._check_batch_size(batch_size)
         self._client_injected = client is not None or connection is not None
         client, retry_config = self._resolve_injected_client(
@@ -774,9 +769,9 @@ class S3FileSystem(AbstractFileSystem):
     ) -> S3Object | None:
         """Get the bucket as a directory object with HeadBucket.
 
-        The result is cached under the bucket name, apart for each set of
-        lookup parameters (see ``_get_cached_lookup``). A missing bucket
-        evicts its entries and the cached bucket listing that still lists it.
+        The result is cached apart for each set of lookup parameters (see
+        :meth:`S3ListingCache.get_lookup`). A missing bucket evicts its
+        entries and the cached bucket listing that still lists it.
 
         Args:
             bucket: The bucket name.
@@ -788,22 +783,18 @@ class S3FileSystem(AbstractFileSystem):
             The bucket object, or None if the bucket does not exist.
         """
         lookup_kwargs = lookup_kwargs or {}
-        file = None if refresh else self._get_cached_lookup(bucket, lookup_kwargs)
+        path = S3Path(bucket)
+        file = None if refresh else self._listing_cache.get_lookup(path, lookup_kwargs)
         if file is None:
             try:
                 bucket_entry = self.core.head_bucket(
                     bucket, **self.core.operation_params("head_bucket", lookup_kwargs)
                 )
             except FileNotFoundError:
-                self._evict_cache(bucket)
-                self._evict_cache((bucket, _LOOKUPS_CACHE_KEY))
-                # Evict the cached bucket listing only if it still lists the bucket.
-                buckets = self.dircache.get("")
-                if buckets and any(b.name == bucket for b in buckets):
-                    self._evict_cache("")
+                self._listing_cache.evict_missing(path)
                 return None
             file = S3Object.from_bucket(bucket_entry)
-            self._cache_lookup(bucket, lookup_kwargs, file)
+            self._listing_cache.put_lookup(path, lookup_kwargs, file)
         return file
 
     def _head_object(
@@ -814,13 +805,11 @@ class S3FileSystem(AbstractFileSystem):
     ) -> S3Object | None:
         """Get the object with HeadObject.
 
-        The result is cached under the lookup cache key of the path (see
-        :meth:`_lookup_cache_key`), which keeps an explicit version apart
-        from the key and from other versions, apart for each set of lookup
-        parameters (see ``_get_cached_lookup``). An explicitly requested
-        ``"null"`` version is not cached. A missing object evicts its entries
-        and, unless a version was requested, the cached listing of its parent
-        that still lists it.
+        The result is cached apart for an explicit version and for each set
+        of lookup parameters, except for an explicitly requested ``"null"``
+        version (see :meth:`S3ListingCache.put_lookup`). A missing object
+        evicts its entries and, unless a version was requested, the cached
+        listing of its parent that still lists it.
 
         Args:
             path: The path of the object, optionally with a version ID.
@@ -832,81 +821,30 @@ class S3FileSystem(AbstractFileSystem):
             The object, or None if it does not exist.
         """
         version_id = path.version_id
-        # Chosen before a version_aware lookup pins the version, so that the
-        # lookup of the key stays cached under the key.
-        cache_key = self._lookup_cache_key(path)
-        # Writes invalidate only the path without the version, and an
-        # overwrite replaces the "null" version of a bucket without
-        # versioning, so that version is looked up every time.
-        cacheable = version_id != "null"
         lookup_kwargs = lookup_kwargs or {}
-        file = None if refresh else self._get_cached_lookup(cache_key, lookup_kwargs)
+        file = None if refresh else self._listing_cache.get_lookup(path, lookup_kwargs)
         if file is None:
             try:
                 metadata = self.core.head_object(
                     path, **self.core.operation_params("head_object", lookup_kwargs)
                 )
             except FileNotFoundError:
-                self._evict_cache(cache_key)
-                self._evict_cache((cache_key, _LOOKUPS_CACHE_KEY))
-                if not version_id:
-                    # Evict the cached listing of the parent only if it still
-                    # lists the path.
-                    parent_key = (self._listing_name(path), "/")
-                    files = self.dircache.get(parent_key)
-                    if files and any(f.name == path.name for f in files):
-                        self._evict_cache(parent_key)
+                self._listing_cache.evict_missing(path)
                 return None
             if self.version_aware and not version_id:
                 # Pin the version of the object so that subsequent reads see
                 # the version observed here even if the object is overwritten.
                 version_id = metadata.version_id
             file = S3Object.from_metadata(metadata, version_id=version_id)
-            if cacheable:
-                self._cache_lookup(cache_key, lookup_kwargs, file)
+            # Cached under the path as looked up, so that the lookup of the
+            # key stays cached under the key when the version is pinned.
+            self._listing_cache.put_lookup(path, lookup_kwargs, file)
         return file
-
-    @staticmethod
-    def _lookup_cache_key(path: S3Path) -> str | tuple[str, str, str]:
-        """Return the dircache key of the lookup of a path.
-
-        A path without a version is cached under its name, so that a key that
-        ends in a query such as ``?versionId=v1`` is cached under its own
-        name. An explicit version is cached under
-        ``(name, _VERSION_CACHE_KEY, version_id)``, which no name equals.
-
-        Args:
-            path: The path of the bucket or the object.
-
-        Returns:
-            The dircache key.
-        """
-        if path.version_id:
-            return path.name, _VERSION_CACHE_KEY, path.version_id
-        return path.name
-
-    @staticmethod
-    def _listing_name(path: S3Path) -> str:
-        """Return the name of the directory whose listing holds the key of a path.
-
-        The name of the key is cut at its last slash, without parsing it, so
-        that the directory is named as its listing names it: ``bucket/a`` for
-        the key ``a/x``, ``bucket/a/`` for ``a//x``, and
-        ``bucket/a/dir?versionId=v1`` for ``a/dir?versionId=v1/x``.
-
-        Args:
-            path: The path of an object.
-
-        Returns:
-            The name of the directory, or the bucket for a key without a
-            slash.
-        """
-        return path.name.rpartition("/")[0]
 
     def _ls_buckets(self, refresh: bool = False) -> list[S3Object]:
         """List the buckets with ListBuckets, following its pages.
 
-        The listing is cached under ``""``.
+        The listing is cached.
 
         Args:
             refresh: If True, bypass the cache and call ListBuckets.
@@ -914,12 +852,12 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The buckets as directory objects.
         """
-        buckets = None if refresh else self.dircache.get("")
+        buckets = None if refresh else self._listing_cache.get_buckets()
         if buckets is None:
             buckets = [
                 S3Object.from_bucket(b) for page in self.core.list_buckets() for b in page.buckets
             ]
-            self.dircache[""] = buckets
+            self._listing_cache.put_buckets(buckets)
         return buckets
 
     def _ls_dirs(
@@ -980,10 +918,10 @@ class S3FileSystem(AbstractFileSystem):
     ) -> list[S3Object]:
         """List the objects and common prefixes under the key prefix of a directory.
 
-        A complete, non-empty listing of the directory is cached under
-        ``(name, delimiter)``, with the name of the directory, and an empty
-        one, or a listing that raises FileNotFoundError because the bucket
-        does not exist, evicts it. ``invalidate_cache`` drops it when the
+        A complete, non-empty listing of the directory is cached with the
+        name of the directory and the delimiter, and an empty one, or a
+        listing that raises FileNotFoundError because the bucket does not
+        exist, evicts it. ``invalidate_cache`` drops it when the
         path or a path under it is invalidated.
 
         A common prefix is named after its prefix without the final
@@ -1006,10 +944,12 @@ class S3FileSystem(AbstractFileSystem):
         """
         bucket = directory.bucket
         use_cache = not prefix
-        cache_key = (directory.name, delimiter)
-        cached = self.dircache.get(cache_key) if use_cache and not refresh else None
+        name = directory.name
+        cached = (
+            self._listing_cache.get_listing(name, delimiter) if use_cache and not refresh else None
+        )
         if cached is not None:
-            return cast(list[S3Object], cached)
+            return cached
 
         files: list[S3Object] = []
         try:
@@ -1024,13 +964,13 @@ class S3FileSystem(AbstractFileSystem):
                 files.extend(S3Object.from_summary(o) for o in page.objects)
         except FileNotFoundError:
             # The bucket does not exist, so the cached listing is stale.
-            self._evict_cache(cache_key)
+            self._listing_cache.evict_listing(name, delimiter)
             raise
         if use_cache:
             if files:
-                self.dircache[cache_key] = files
+                self._listing_cache.put_listing(name, delimiter, files)
             else:
-                self._evict_cache(cache_key)
+                self._listing_cache.evict_listing(name, delimiter)
         return files
 
     def ls(
@@ -1394,7 +1334,7 @@ class S3FileSystem(AbstractFileSystem):
         if (page.key_count or 0) > 0 or page.objects or page.common_prefixes:
             # Nothing caches the key prefix, and the cached listing of the
             # parent may predate it.
-            self._evict_cache((self._listing_name(path), "/"))
+            self._listing_cache.evict_listing(S3ListingCache.listing_name(path), "/")
             return self._directory_object(
                 path.bucket, path.key.rstrip("/") if path.key else None, version_id
             )
@@ -2660,7 +2600,7 @@ class S3FileSystem(AbstractFileSystem):
             )
             # invalidate_cache of the bucket keeps the cached bucket
             # listing, so evict it directly.
-            self._evict_cache("")
+            self._listing_cache.evict_buckets()
             self.invalidate_cache(s3_path.bucket)
         else:
             # exists() has already confirmed the bucket does not exist,
@@ -2729,7 +2669,7 @@ class S3FileSystem(AbstractFileSystem):
         self.invalidate_cache(s3_path.bucket)
         # invalidate_cache of the bucket keeps the cached bucket listing,
         # so evict it directly.
-        self._evict_cache("")
+        self._listing_cache.evict_buckets()
 
     def touch(
         self, path: str | os.PathLike[str], truncate: bool = True, **kwargs
@@ -4771,86 +4711,23 @@ class S3FileSystem(AbstractFileSystem):
             path: The path to invalidate. If None, clear the whole cache.
         """
         if path is None:
-            self.dircache.clear()
+            self._listing_cache.clear()
             return
         raw = stringify_path(path)
-        stripped = self._strip_protocol(raw)
-        if not stripped:
-            self._evict_cache("")
-            return
+        # The path without the protocol, with the trailing slashes that
+        # _strip_protocol() strips.
         trailing = len(raw) - len(raw.rstrip("/"))
-        for spelling in (stripped, stripped + "/" * trailing) if trailing else (stripped,):
-            base, version_id = S3Path.split_version_id(spelling)
-            if not version_id:
-                # Also the directory of a trailing slash.
-                self._invalidate_name(spelling)
-                continue
-            # The lookup of the version, as _lookup_cache_key() keys it, the
-            # keys that end in the query in each spelling that names the
-            # version, and the object path without the version.
-            self._evict_lookup((base, _VERSION_CACHE_KEY, version_id))
-            for query in ("versionId", "versionID", "versionid", "version_id"):
-                self._invalidate_name(f"{base}?{query}={version_id}")
-            self._invalidate_name(base)
+        self._listing_cache.invalidate_path(self._strip_protocol(raw) + "/" * trailing)
 
     def _invalidate(self, path: S3Path) -> None:
         """Remove the cached entries of a path and of the directories above it.
 
-        A path with a version removes the lookup of that version (see
-        :meth:`_lookup_cache_key`), and then the entries of its key. The
-        names of the directories above it are cut at their last slash
-        without parsing them, so that a directory named with a version ID
-        query or an empty segment is invalidated as it is listed.
+        See :meth:`S3ListingCache.invalidate`.
 
         Args:
             path: The path of the bucket or the object.
         """
-        if path.version_id:
-            self._evict_lookup(self._lookup_cache_key(path))
-        self._invalidate_name(path.name)
-
-    def _invalidate_name(self, name: str) -> None:
-        """Remove the cached entries of a name and of the directories above it.
-
-        The names of the directories are cut at their last slash without
-        parsing them, so that a directory named with a version ID query or
-        an empty segment is invalidated as it is listed.
-
-        Args:
-            name: The name of the bucket, the directory or the object, without
-                the protocol.
-        """
-        while name:
-            # _ls_prefix caches listings under (name, delimiter).
-            for cache_key in ((name, "/"), (name, "")):
-                self._evict_cache(cache_key)
-            self._evict_lookup(name)
-            name = name.rpartition("/")[0]
-
-    def _evict_lookup(self, key: str | tuple[str, str, str]) -> None:
-        """Remove the cached lookups under a lookup cache key, with and without parameters.
-
-        Args:
-            key: The lookup cache key (see :meth:`_lookup_cache_key`).
-        """
-        self._evict_cache(key)
-        self._evict_cache((key, _LOOKUPS_CACHE_KEY))
-
-    def _evict_cache(self, key: str | tuple[Any, ...]) -> None:
-        """Remove a dircache entry if it exists.
-
-        ``DirCache.pop()`` reads and then deletes the entry, so it raises
-        KeyError when another thread removes the same entry in between,
-        such as the request threads of ``rm()`` invalidating a shared parent
-        at once. A single ``del`` raises KeyError only when the entry is
-        already gone, which this ignores.
-
-        Args:
-            key: The dircache key, a path, a ``(path, delimiter)`` listing
-                key, or a ``(path, _LOOKUPS_CACHE_KEY)`` key.
-        """
-        with contextlib.suppress(KeyError):
-            del self.dircache[key]
+        self._listing_cache.invalidate(path)
 
     def _key_exists(self, path: S3Path, lookup_kwargs: Mapping[str, Any]) -> bool:
         """Check whether an object exists at the key of the path as written.
@@ -4927,96 +4804,12 @@ class S3FileSystem(AbstractFileSystem):
         """
         return {k: v for k, v in kwargs.items() if k in _LOOKUP_REQUEST_PARAMETERS}
 
-    def _get_cached_lookup(
-        self, path: str | tuple[str, str, str], lookup_kwargs: Mapping[str, Any]
-    ) -> S3Object | None:
-        """Get the cached HeadObject or HeadBucket result of a lookup.
-
-        A lookup without lookup parameters uses the entry under the path. A
-        lookup with them uses only the result of a lookup with the same
-        values, cached under ``(path, _LOOKUPS_CACHE_KEY)``, because the
-        authorization of the request depends on them. Each of these results
-        expires on its own after the ``listings_expiry_time`` of the
-        dircache.
-
-        Args:
-            path: The lookup cache key of the object (see
-                :meth:`_lookup_cache_key`), or the bucket name.
-            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``).
-
-        Returns:
-            The cached object, or None if there is none.
-        """
-        if not lookup_kwargs:
-            return cast("S3Object | None", self.dircache.get(path))
-        lookups = self.dircache.get((path, _LOOKUPS_CACHE_KEY))
-        cached = lookups.get(self._get_lookup_cache_id(lookup_kwargs)) if lookups else None
-        if cached is None:
-            return None
-        cached_at, file = cached
-        expiry_time = self.dircache.listings_expiry_time
-        if expiry_time and time.time() - cached_at > expiry_time:
-            # Caching the result of any parameters renews the dircache entry
-            # of the path, so each result expires on its own.
-            return None
-        return cast(S3Object, file)
-
-    def _cache_lookup(
-        self, path: str | tuple[str, str, str], lookup_kwargs: Mapping[str, Any], file: S3Object
-    ) -> None:
-        """Cache the HeadObject or HeadBucket result of a lookup.
-
-        Args:
-            path: The lookup cache key of the object (see
-                :meth:`_lookup_cache_key`), or the bucket name.
-            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
-                that the request was made with.
-            file: The object to cache.
-        """
-        if not lookup_kwargs:
-            self.dircache[path] = file
-            return
-        key = (path, _LOOKUPS_CACHE_KEY)
-        lookups = self.dircache.get(key)
-        if lookups is None:
-            lookups = {}
-        # Updated in place: a copy written back could replace a result that
-        # another thread has cached since for other parameters.
-        lookups[self._get_lookup_cache_id(lookup_kwargs)] = (time.time(), file)
-        # Set again so that the expiry time of the entry is renewed.
-        self.dircache[key] = lookups
-
-    @staticmethod
-    def _get_lookup_cache_id(lookup_kwargs: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
-        """Identify a set of lookup parameters in the cache.
-
-        Args:
-            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``).
-
-        Returns:
-            The sorted parameters, with ``SSECustomerKey`` replaced by its
-            SHA-256 digest so that the cache does not keep the key.
-        """
-        return tuple(
-            sorted(
-                (
-                    k,
-                    hashlib.sha256(v if isinstance(v, bytes) else str(v).encode()).hexdigest()
-                    if k == "SSECustomerKey"
-                    else v,
-                )
-                for k, v in lookup_kwargs.items()
-            )
-        )
-
     def _ls_from_cache(self, path: S3Path) -> list[S3Object] | S3Object | None:
-        """Check the dircache for a cached entry of the path.
+        """Check the listing cache for a cached entry of the path.
 
         fsspec's implementation looks up listings under the path itself, but
-        S3FileSystem caches a single S3Object under the lookup cache key of
-        an object or a bucket (HeadObject/HeadBucket results, see
-        :meth:`_lookup_cache_key`), the bucket listing under ``""``, and the
-        other listings under ``(name, delimiter)`` (see ``_ls_prefix``).
+        S3FileSystem caches the lookups and the listings under the keys of
+        its listing cache (see :meth:`S3ListingCache.get_entries`).
 
         Args:
             path: The path of the bucket or the object.
@@ -5033,24 +4826,7 @@ class S3FileSystem(AbstractFileSystem):
             FileNotFoundError: If a cached listing of the parent directory of
                 a key path does not contain the path.
         """
-        cache = self.dircache.get(self._lookup_cache_key(path))
-        if cache is not None:
-            return cast("list[S3Object] | S3Object", cache)
-        if path.version_id:
-            return None
-        if path.key:
-            parent_cache = self.dircache.get((self._listing_name(path), "/"))
-        else:
-            parent_cache = self.dircache.get("")
-        if parent_cache is not None:
-            files = [f for f in parent_cache if f["name"] == path.name]
-            if files:
-                return files
-            if path.key:
-                raise FileNotFoundError(str(path))
-            # The bucket listing holds only the buckets that the caller owns,
-            # so a bucket missing from it is looked up with HeadBucket.
-        return None
+        return self._listing_cache.get_entries(path)
 
     def _open_path(self, path: str | os.PathLike[str] | S3Path, mode: str, **kwargs) -> S3File:
         """Open a binary file as ``open()`` does, also for an ``S3Path``.

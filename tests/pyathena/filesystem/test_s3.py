@@ -54,6 +54,7 @@ from pyathena.filesystem.s3 import (
     S3FileSystem,
     _handed_over_closes,
 )
+from pyathena.filesystem.s3_cache import S3ListingCache
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3MultipartCopyPlan
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool, _S3Batch, _S3PoolScope
@@ -110,6 +111,7 @@ class TestS3FileSystem:
         # __init__ which would require a boto3 client.
         fs = S3FileSystem.__new__(S3FileSystem)
         fs.dircache = DirCache()
+        fs._listing_cache = S3ListingCache(fs)
         client = mock.MagicMock()
         client.meta.method_to_api_mapping = S3_CLIENT.meta.method_to_api_mapping
         client.meta.service_model = S3_CLIENT.meta.service_model
@@ -138,19 +140,80 @@ class TestS3FileSystem:
         )
 
     @staticmethod
-    def _barrier_dircache(key):
-        # Build a DirCache that holds every reader of the key until two
-        # threads have read it, so that both read before either deletes.
+    def _barrier_dircache():
+        # Build a DirCache that holds every reader of the entry cached first
+        # until two threads have read it, so that both read before either
+        # deletes.
         barrier = threading.Barrier(2, timeout=5)
 
         class BarrierDirCache(DirCache):
+            first = None
+
+            def __setitem__(self, key, value):
+                if self.first is None:
+                    self.first = key
+                super().__setitem__(key, value)
+
             def __getitem__(self, item):
                 value = super().__getitem__(item)
-                if item == key:
+                if item == self.first:
                     barrier.wait()
                 return value
 
         return BarrierDirCache()
+
+    @staticmethod
+    def _cache(fs, *entries, value=None):
+        # Cache an entry for each description: ("buckets",), ("listing",
+        # name, delimiter), or ("lookup", path) and ("lookups", path), the
+        # lookup of an S3Path without and with lookup parameters. The value
+        # defaults to an empty listing or a directory entry of the path.
+        cache = fs._listing_cache
+        for kind, *args in entries:
+            if kind == "buckets":
+                cache.put_buckets([] if value is None else value)
+            elif kind == "listing":
+                cache.put_listing(*args, [] if value is None else value)
+            else:
+                (path,) = args
+                cache.put_lookup(
+                    path,
+                    TestS3FileSystem.LOOKUP_KWARGS if kind == "lookups" else {},
+                    fs._directory_object(path.bucket, path.key) if value is None else value,
+                )
+
+    @staticmethod
+    def _cached(fs, entries):
+        # The descriptions, as _cache() takes them, of the entries that the
+        # listing cache holds.
+        cache = fs._listing_cache
+
+        def get(kind, *args):
+            if kind == "buckets":
+                return cache.get_buckets()
+            if kind == "listing":
+                return cache.get_listing(*args)
+            return cache.get_lookup(
+                args[0], TestS3FileSystem.LOOKUP_KWARGS if kind == "lookups" else {}
+            )
+
+        return [e for e in entries if get(*e) is not None]
+
+    def test_unused_filesystem_is_freed_without_the_cycle_collector(self):
+        # GH-1384: the result sets release their filesystem, and its
+        # dircache, with them. The listing cache refers to it weakly.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        freed = weakref.ref(fs)
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            del fs
+            assert freed() is None
+        finally:
+            if enabled:
+                gc.enable()
 
     def test_get_client_compatible_with_s3fs(self):
         # Only constructs a boto3 client; no AWS access.
@@ -210,7 +273,7 @@ class TestS3FileSystem:
     def test_cached_object_is_not_a_listing_of_its_children(self):
         fs = self._make_fs()
         obj = self._file_object("key")
-        fs.dircache["bucket/key"] = obj
+        fs._listing_cache.put_lookup(S3Path("bucket", "key"), {}, obj)
         fs._call.side_effect = FileNotFoundError
 
         assert fs.info("s3://bucket/key") == obj
@@ -246,10 +309,9 @@ class TestS3FileSystem:
         # A key that is both an object and a key prefix is an object, as the
         # uncached lookup with HeadObject finds.
         fs = self._make_fs()
-        fs.dircache[("bucket", "/")] = [
-            fs._directory_object("bucket", "d"),
-            self._file_object("d"),
-        ]
+        fs._listing_cache.put_listing(
+            "bucket", "/", [fs._directory_object("bucket", "d"), self._file_object("d")]
+        )
 
         assert fs.isfile("s3://bucket/d")
         fs._call.assert_not_called()
@@ -258,7 +320,7 @@ class TestS3FileSystem:
         # The listing of the path cannot tell whether an object of the same
         # name exists.
         fs = self._make_fs()
-        fs.dircache[("bucket/d", "/")] = [self._file_object("d/direct")]
+        fs._listing_cache.put_listing("bucket/d", "/", [self._file_object("d/direct")])
         fs._call.return_value = {"ContentLength": 4}
 
         assert fs.isfile("s3://bucket/d")
@@ -286,7 +348,7 @@ class TestS3FileSystem:
         # the listing afterwards.
         fs = self._make_fs()
         fs.version_aware = version_aware
-        fs.dircache[("bucket/d", "/")] = [self._file_object("d/key")]
+        fs._listing_cache.put_listing("bucket/d", "/", [self._file_object("d/key")])
 
         def call(method, **kwargs):
             if method == fs._client.head_object:
@@ -296,14 +358,14 @@ class TestS3FileSystem:
         fs._call.side_effect = call
 
         lookup(fs)
-        assert ("bucket/d", "/") not in fs.dircache
+        assert fs._listing_cache.get_listing("bucket/d", "/") is None
         assert not fs.exists("s3://bucket/d/key")
 
     def test_refreshed_prefix_drops_cached_parent_listing(self):
         # A key prefix created after the parent was listed is not reported
         # missing by the listing after a refreshed lookup finds it.
         fs = self._make_fs()
-        fs.dircache[("bucket/d", "/")] = [self._file_object("d/key")]
+        fs._listing_cache.put_listing("bucket/d", "/", [self._file_object("d/key")])
 
         def call(method, **kwargs):
             if method == fs._client.head_object:
@@ -320,7 +382,7 @@ class TestS3FileSystem:
 
     def test_missing_object_keeps_cached_parent_listing_without_it(self):
         fs = self._make_fs()
-        fs.dircache[("bucket/d", "/")] = [self._file_object("d/key")]
+        fs._listing_cache.put_listing("bucket/d", "/", [self._file_object("d/key")])
         fs._call.side_effect = FileNotFoundError
 
         assert not fs.exists("s3://bucket/d/other", refresh=True)
@@ -336,7 +398,7 @@ class TestS3FileSystem:
         # no version to pin.
         fs = self._make_fs()
         fs.version_aware = version_aware
-        fs.dircache[("bucket/d", "/")] = [self._file_object("d/direct")]
+        fs._listing_cache.put_listing("bucket/d", "/", [self._file_object("d/direct")])
         fs._call.return_value = {"ContentLength": 4, "VersionId": "v1"}
         expected = "v1" if version_aware else None
 
@@ -351,7 +413,7 @@ class TestS3FileSystem:
         # The listing describes the current versions, so a version missing
         # from it is looked up with HeadObject.
         fs = self._make_fs()
-        fs.dircache[("bucket/d", "/")] = [self._file_object("d/other")]
+        fs._listing_cache.put_listing("bucket/d", "/", [self._file_object("d/other")])
         fs._call.return_value = {"ContentLength": 4}
 
         assert fs.exists("s3://bucket/d/direct?versionId=v1")
@@ -362,7 +424,7 @@ class TestS3FileSystem:
     def test_info_bucket_missing_from_bucket_listing(self):
         # GH-980: the bucket listing holds only the buckets of the caller.
         fs = self._make_fs()
-        fs.dircache[""] = [fs._directory_object("mine", None)]
+        fs._listing_cache.put_buckets([fs._directory_object("mine", None)])
         fs._call.return_value = {}
 
         info = fs.info("s3://other-account-bucket")
@@ -387,11 +449,11 @@ class TestS3FileSystem:
     @pytest.mark.parametrize("path", ["", "/", "s3://"])
     def test_invalidate_cache_root_drops_bucket_listing(self, path):
         fs = self._make_fs()
-        fs.dircache[""] = [fs._directory_object("bucket", None)]
-        fs.dircache["bucket"] = fs._directory_object("bucket", None)
+        entries = [("buckets",), ("lookup", S3Path("bucket"))]
+        self._cache(fs, *entries)
 
         fs.invalidate_cache(path)
-        assert list(fs.dircache) == ["bucket"]
+        assert self._cached(fs, entries) == [("lookup", S3Path("bucket"))]
 
     def test_exists_bucket_access_denied(self):
         # GH-980: HeadBucket answers 403 for a bucket that exists but that
@@ -412,58 +474,60 @@ class TestS3FileSystem:
     def test_invalidate_cache_drops_listings_of_path_and_parents(self):
         fs = self._make_fs()
         invalidated = [
-            "bucket/a/b/c.txt",
-            ("bucket/a/b", "/"),
-            ("bucket/a/b", ""),
-            ("bucket/a", "/"),
-            ("bucket/a", ""),
-            ("bucket", "/"),
-            ("bucket", ""),
+            ("lookup", S3Path("bucket", "a/b/c.txt")),
+            ("listing", "bucket/a/b", "/"),
+            ("listing", "bucket/a/b", ""),
+            ("listing", "bucket/a", "/"),
+            ("listing", "bucket/a", ""),
+            ("listing", "bucket", "/"),
+            ("listing", "bucket", ""),
         ]
-        kept = ["", ("bucket/a/x", "/")]
-        for cache_key in invalidated + kept:
-            fs.dircache[cache_key] = []
+        kept = [("buckets",), ("listing", "bucket/a/x", "/")]
+        self._cache(fs, *invalidated, *kept)
 
         fs.invalidate_cache("s3://bucket/a/b/c.txt")
-        assert list(fs.dircache) == kept
+        assert self._cached(fs, invalidated + kept) == kept
 
     @pytest.mark.parametrize(
         ("path", "cache_key"),
         [
-            # A lookup of a version is cached under its name and version ID,
-            # whatever spelling of the query named it.
-            ("s3://bucket/a/c.txt?versionId=v1", ("bucket/a/c.txt", "versionId", "v1")),
-            (Path("bucket/a/c.txt?versionId=v1"), ("bucket/a/c.txt", "versionId", "v1")),
-            ("s3://bucket/a/c.txt?version_id=v1", ("bucket/a/c.txt", "versionId", "v1")),
+            # The lookup of a version is invalidated whatever spelling of the
+            # query named it.
+            ("s3://bucket/a/c.txt?versionId=v1", S3Path("bucket", "a/c.txt", "v1")),
+            (Path("bucket/a/c.txt?versionId=v1"), S3Path("bucket", "a/c.txt", "v1")),
+            ("s3://bucket/a/c.txt?version_id=v1", S3Path("bucket", "a/c.txt", "v1")),
             # A directory marker object keeps the trailing slash before the query.
-            ("s3://bucket/a/c.txt/?versionId=v1", ("bucket/a/c.txt/", "versionId", "v1")),
+            ("s3://bucket/a/c.txt/?versionId=v1", S3Path("bucket", "a/c.txt/", "v1")),
             # info() strips a slash after the version ID of a path, but not
             # of the version_id argument.
-            ("s3://bucket/a/c.txt?versionId=v1/", ("bucket/a/c.txt", "versionId", "v1")),
-            ("s3://bucket/a/c.txt?versionId=v1/", ("bucket/a/c.txt", "versionId", "v1/")),
+            ("s3://bucket/a/c.txt?versionId=v1/", S3Path("bucket", "a/c.txt", "v1")),
+            ("s3://bucket/a/c.txt?versionId=v1/", S3Path("bucket", "a/c.txt", "v1/")),
             # Without a version ID after it, the query is part of the key.
-            ("s3://bucket/a/c.txt?versionId=/", "bucket/a/c.txt?versionId="),
+            pytest.param(
+                "s3://bucket/a/c.txt?versionId=/",
+                S3Path("bucket", "a/c.txt?versionId="),
+                id="s3://bucket/a/c.txt?versionId=/-bucket/a/c.txt?versionId=",
+            ),
         ],
     )
     def test_invalidate_cache_version_drops_object_path(self, path, cache_key):
         fs = self._make_fs()
         invalidated = [
-            cache_key,
-            (cache_key, "lookups"),
-            "bucket/a/c.txt",
-            ("bucket/a", "/"),
-            ("bucket", "/"),
+            ("lookup", cache_key),
+            ("lookups", cache_key),
+            ("lookup", S3Path("bucket", "a/c.txt")),
+            ("listing", "bucket/a", "/"),
+            ("listing", "bucket", "/"),
         ]
         # Other versions of the object do not change.
-        kept = [("bucket/a/c.txt", "versionId", "v2")]
-        for key in invalidated + kept:
-            fs.dircache[key] = []
+        kept = [("lookup", S3Path("bucket", "a/c.txt", "v2"))]
+        self._cache(fs, *invalidated, *kept)
         fs.invalidate_cache(path)
-        assert list(fs.dircache) == kept
+        assert self._cached(fs, invalidated + kept) == kept
 
     def test_rm_file_version_invalidates_object_path(self):
         fs = self._make_fs()
-        fs.dircache["bucket/a/c.txt"] = self._file_object("a/c.txt")
+        fs._listing_cache.put_lookup(S3Path("bucket", "a/c.txt"), {}, self._file_object("a/c.txt"))
 
         fs.rm_file("s3://bucket/a/c.txt?versionId=v1")
         fs._call.assert_called_once_with(
@@ -513,13 +577,13 @@ class TestS3FileSystem:
         # GH-971: expand_path treated "?" in the version query as a wildcard.
         fs = self._make_fs()
         fs._call.return_value = {}
-        fs.dircache["bucket/a.csv"] = self._file_object("a.csv")
+        fs._listing_cache.put_lookup(S3Path("bucket", "a.csv"), {}, self._file_object("a.csv"))
 
         fs.rm("s3://bucket/a.csv?versionId=v1", recursive=True)
         assert self._sent_delete_objects(fs) == [
             ("bucket", [{"Key": "a.csv", "VersionId": "v1"}]),
         ]
-        assert "bucket/a.csv" not in fs.dircache
+        assert fs._listing_cache.get_lookup(S3Path("bucket", "a.csv"), {}) is None
 
         fs._call.reset_mock()
         fs.rm(["s3://bucket/a.csv?versionId=v1", "s3://bucket/b.csv"])
@@ -562,7 +626,7 @@ class TestS3FileSystem:
                 {"Key": "a", "VersionId": "v1", "Code": "InternalError", "Message": "Error"},
             ]
         }
-        fs.dircache["bucket/b"] = self._file_object("b")
+        fs._listing_cache.put_lookup(S3Path("bucket", "b"), {}, self._file_object("b"))
 
         with pytest.raises(OSError, match="Failed to delete objects: ") as exc_info:
             fs.rm(["s3://bucket/locked", "s3://bucket/a?versionId=v1", "s3://bucket/b"])
@@ -572,7 +636,7 @@ class TestS3FileSystem:
             "bucket/locked (AccessDenied: Access Denied)"
         )
         # The deleted object is not left in the cache.
-        assert "bucket/b" not in fs.dircache
+        assert fs._listing_cache.get_lookup(S3Path("bucket", "b"), {}) is None
 
     @pytest.mark.parametrize("name", ["Bucket", "Delete"])
     def test_rm_request_target_kwargs(self, name):
@@ -682,45 +746,56 @@ class TestS3FileSystem:
         # raised KeyError when both threads had read the entry.
         fs = self._make_fs()
         fs._call.return_value = {}
-        fs.dircache = self._barrier_dircache("bucket/dir")
-        fs.dircache["bucket/dir"] = []
+        fs.dircache = self._barrier_dircache()
+        entry = ("lookup", S3Path("bucket", "dir"))
+        self._cache(fs, entry)
 
         with mock.patch.object(S3DeleteBatch, "MAX_KEYS", 1):
             fs.rm(["s3://bucket/dir/a", "s3://bucket/dir/b"])
         assert fs._call.call_count == 2
-        assert "bucket/dir" not in fs.dircache._cache
+        assert self._cached(fs, [entry]) == []
 
     @pytest.mark.parametrize(
-        ("key", "listing", "read"),
+        ("entry", "read"),
         [
-            ("bucket", False, lambda fs: fs.info("s3://bucket")),
-            ("bucket/key", False, lambda fs: fs.info("s3://bucket/key")),
+            (("lookup", S3Path("bucket")), lambda fs: fs.info("s3://bucket")),
+            (("lookup", S3Path("bucket", "key")), lambda fs: fs.info("s3://bucket/key")),
             # The object is looked up after an empty listing of the path.
-            ("bucket/key", False, lambda fs: fs.ls("s3://bucket/key", detail=True)[0]),
-            ("", True, lambda fs: fs.ls("s3://", detail=True)),
-            (("bucket/dir", "/"), True, lambda fs: fs.ls("s3://bucket/dir", detail=True)),
+            (
+                ("lookup", S3Path("bucket", "key")),
+                lambda fs: fs.ls("s3://bucket/key", detail=True)[0],
+            ),
+            (("buckets",), lambda fs: fs.ls("s3://", detail=True)),
+            (("listing", "bucket/dir", "/"), lambda fs: fs.ls("s3://bucket/dir", detail=True)),
         ],
         ids=["info-bucket", "info-object", "ls-object", "ls-buckets", "ls-dir"],
     )
-    def test_cache_read_with_concurrent_invalidation(self, key, listing, read):
+    def test_cache_read_with_concurrent_invalidation(self, entry, read):
         # Another thread invalidates the entry right after this thread looks
         # it up. Checking the key and then reading it raised KeyError.
         class InvalidatingDirCache(DirCache):
+            cached = None
+
+            def __setitem__(self, key, value):
+                self.cached = key
+                super().__setitem__(key, value)
+
             def __getitem__(self, item):
                 value = super().__getitem__(item)
-                if item == key:
+                if item == self.cached:
                     self._cache.pop(item, None)
                 return value
 
         fs = self._make_fs()
         fs.dircache = InvalidatingDirCache()
-        if listing:
+        kind, *args = entry
+        if kind in ("buckets", "listing"):
             cached = [self._file_object("dir/a")]
-        elif key == "bucket":
+        elif args[0].key is None:
             cached = fs._directory_object("bucket", None)
         else:
             cached = self._file_object("key")
-        fs.dircache[key] = cached
+        self._cache(fs, entry, value=cached)
         fs._call.return_value = {}
 
         assert read(fs) == cached
@@ -731,18 +806,20 @@ class TestS3FileSystem:
     @pytest.mark.parametrize(
         ("key", "call", "evict"),
         [
-            (
-                "bucket",
+            pytest.param(
+                ("lookup", S3Path("bucket")),
                 {"side_effect": FileNotFoundError("bucket")},
                 lambda fs: fs.exists("s3://bucket", refresh=True),
+                id="bucket-call0-<lambda>",
             ),
-            (
-                "bucket/key",
+            pytest.param(
+                ("lookup", S3Path("bucket", "key")),
                 {"side_effect": FileNotFoundError("bucket/key")},
                 lambda fs: fs.exists("s3://bucket/key", refresh=True),
+                id="bucket/key-call1-<lambda>",
             ),
             (
-                ("bucket/dir", "/"),
+                ("listing", "bucket/dir", "/"),
                 {"return_value": {}},
                 lambda fs: fs.ls("s3://bucket/dir", refresh=True),
             ),
@@ -754,27 +831,27 @@ class TestS3FileSystem:
         # threads had read the entry.
         fs = self._make_fs()
         fs._call.configure_mock(**call)
-        fs.dircache = self._barrier_dircache(key)
-        fs.dircache[key] = []
+        fs.dircache = self._barrier_dircache()
+        self._cache(fs, key)
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(evict, fs) for _ in range(2)]
             for future in futures:
                 future.result()
-        assert key not in fs.dircache._cache
+        assert self._cached(fs, [key]) == []
 
     def test_rm_request_error_invalidates_cache(self):
         fs = self._make_fs()
         fs._call.side_effect = PermissionError("Access Denied")
-        fs.dircache["bucket/a"] = self._file_object("a")
+        fs._listing_cache.put_lookup(S3Path("bucket", "a"), {}, self._file_object("a"))
 
         with pytest.raises(PermissionError, match="Access Denied"):
             fs.rm("s3://bucket/a")
-        assert "bucket/a" not in fs.dircache
+        assert fs._listing_cache.get_lookup(S3Path("bucket", "a"), {}) is None
 
     def test_find_prefix_bypasses_cached_listing(self):
         fs = self._make_fs()
-        fs.dircache[("bucket/dir", "")] = [self._file_object("dir/cached")]
+        fs._listing_cache.put_listing("bucket/dir", "", [self._file_object("dir/cached")])
         fs._call.return_value = {"Contents": [{"Key": "dir/test_1"}]}
 
         assert fs.find("s3://bucket/dir", prefix="test_") == ["bucket/dir/test_1"]
@@ -785,7 +862,7 @@ class TestS3FileSystem:
 
     def test_ls_empty_refresh_evicts_cached_listing(self):
         fs = self._make_fs()
-        fs.dircache[("bucket/dir", "/")] = [self._file_object("dir/deleted")]
+        fs._listing_cache.put_listing("bucket/dir", "/", [self._file_object("dir/deleted")])
 
         self._serve_keys(fs, ())
 
@@ -819,7 +896,7 @@ class TestS3FileSystem:
         # GH-1351: a refreshed listing that finds the bucket deleted evicts
         # the listing cached before.
         fs = self._make_fs()
-        fs.dircache[cache_key] = [self._file_object("dir/deleted")]
+        fs._listing_cache.put_listing(*cache_key, [self._file_object("dir/deleted")])
         fs._call.side_effect = FileNotFoundError("NoSuchBucket")
 
         with pytest.raises(FileNotFoundError):
@@ -865,7 +942,8 @@ class TestS3FileSystem:
         assert actual == ["bucket/key?versionId=v2"]
         assert [c.args[0] for c in fs._call.call_args_list] == [fs._client.head_object]
         # Nothing is cached as a listing of the version-qualified path.
-        assert list(fs.dircache) == [("bucket/key", "versionId", "v2")]
+        assert len(fs.dircache) == 1
+        assert fs._listing_cache.get_lookup(S3Path("bucket", "key", "v2"), {}) is not None
 
     def test_listing_of_missing_version_path(self):
         # GH-1351: the keys under the key prefix do not make a missing
@@ -916,17 +994,20 @@ class TestS3FileSystem:
         # GH-1335: the parent of "bucket/dir//x" and of the object "dir//" is
         # the directory "bucket/dir/", whose parent is "bucket/dir".
         fs = self._make_fs()
-        invalidated = [("bucket/dir/", "/"), ("bucket/dir", "/"), ("bucket", "/")]
-        kept = [("bucket/dir/y", "/")]
-        for cache_key in invalidated + kept:
-            fs.dircache[cache_key] = []
+        invalidated = [
+            ("listing", "bucket/dir/", "/"),
+            ("listing", "bucket/dir", "/"),
+            ("listing", "bucket", "/"),
+        ]
+        kept = [("listing", "bucket/dir/y", "/")]
+        self._cache(fs, *invalidated, *kept)
 
         fs.invalidate_cache(path)
-        assert list(fs.dircache) == kept
+        assert self._cached(fs, invalidated + kept) == kept
 
     def test_find_withdirs_does_not_modify_cached_listing(self):
         fs = self._make_fs()
-        fs.dircache[("bucket/dir", "")] = [self._file_object("dir/sub/file")]
+        fs._listing_cache.put_listing("bucket/dir", "", [self._file_object("dir/sub/file")])
 
         expected = ["bucket/dir", "bucket/dir/sub", "bucket/dir/sub/file"]
         assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
@@ -941,9 +1022,11 @@ class TestS3FileSystem:
         fs = self._make_fs()
         file = self._file_object("dir/a")
         file["metadata"] = {"k": "v"}
-        fs.dircache[("bucket/dir", "/")] = [file, fs._directory_object("bucket", "dir/sub")]
-        fs.dircache[("bucket/dir", "")] = [file]
-        fs.dircache[("bucket/dir/sub", "/")] = [self._file_object("dir/sub/b")]
+        fs._listing_cache.put_listing(
+            "bucket/dir", "/", [file, fs._directory_object("bucket", "dir/sub")]
+        )
+        fs._listing_cache.put_listing("bucket/dir", "", [file])
+        fs._listing_cache.put_listing("bucket/dir/sub", "/", [self._file_object("dir/sub/b")])
         expected = copy.deepcopy(file)
 
         def entries():
@@ -978,8 +1061,10 @@ class TestS3FileSystem:
         fs = self._make_fs()
         # A listing of another prefix fails, which the walk skips.
         fs._call.side_effect = FileNotFoundError
-        fs.dircache[("bucket/dir", "/")] = [fs._directory_object("bucket", "dir/sub")]
-        fs.dircache[("bucket/dir/sub", "/")] = [self._file_object("dir/sub/b")]
+        fs._listing_cache.put_listing(
+            "bucket/dir", "/", [fs._directory_object("bucket", "dir/sub")]
+        )
+        fs._listing_cache.put_listing("bucket/dir/sub", "/", [self._file_object("dir/sub/b")])
 
         walked = []
         for root, dirs, files in fs.walk("bucket/dir", detail=True):
@@ -991,9 +1076,9 @@ class TestS3FileSystem:
 
     def test_find_refresh_bypasses_cached_listings(self):
         fs = self._make_fs()
-        fs.dircache[("bucket/dir", "")] = [self._file_object("dir/old")]
-        fs.dircache[("bucket/dir", "/")] = [self._file_object("dir/old")]
-        fs.dircache[("bucket/dir/sub", "/")] = [self._file_object("dir/sub/old")]
+        fs._listing_cache.put_listing("bucket/dir", "", [self._file_object("dir/old")])
+        fs._listing_cache.put_listing("bucket/dir", "/", [self._file_object("dir/old")])
+        fs._listing_cache.put_listing("bucket/dir/sub", "/", [self._file_object("dir/sub/old")])
         responses = {
             ("dir/", ""): {"Contents": [{"Key": "dir/sub/new"}]},
             ("dir/", "/"): {"CommonPrefixes": [{"Prefix": "dir/sub/"}]},
@@ -1564,21 +1649,29 @@ class TestS3FileSystem:
         ("path", "cache_key"),
         [
             # The key that ends in the query of a version path.
-            ("s3://bucket/a/x?versionId=v1", "bucket/a/x?versionId=v1"),
-            ("s3://bucket/?versionId=v1", "bucket/?versionId=v1"),
+            pytest.param(
+                "s3://bucket/a/x?versionId=v1",
+                ("lookup", S3Path("bucket", "a/x?versionId=v1")),
+                id="s3://bucket/a/x?versionId=v1-bucket/a/x?versionId=v1",
+            ),
+            pytest.param(
+                "s3://bucket/?versionId=v1",
+                ("lookup", S3Path("bucket", "?versionId=v1")),
+                id="s3://bucket/?versionId=v1-bucket/?versionId=v1",
+            ),
             # The directory named by another spelling of the same query.
-            ("s3://bucket/a/dir?versionId=v1", ("bucket/a/dir?versionID=v1", "/")),
+            ("s3://bucket/a/dir?versionId=v1", ("listing", "bucket/a/dir?versionID=v1", "/")),
             # The directory of the common prefix "/" (keys such as "/x").
-            ("s3://bucket/", ("bucket/", "/")),
+            ("s3://bucket/", ("listing", "bucket/", "/")),
         ],
     )
     def test_invalidate_cache_evicts_the_name_as_given(self, path, cache_key):
         # GH-1402: a path string invalidates the entries named as it is
         # spelled, besides the version that it may name.
         fs = self._make_fs()
-        fs.dircache[cache_key] = []
+        self._cache(fs, cache_key)
         fs.invalidate_cache(path)
-        assert cache_key not in fs.dircache
+        assert self._cached(fs, [cache_key]) == []
 
     def test_lookups_keep_versions_apart_from_listed_keys(self):
         # GH-1402: the lookup of a version is cached apart from that of a key
@@ -1685,9 +1778,9 @@ class TestS3FileSystem:
 
     def test_refresh_evicts_cached_object_and_bucket_not_found(self):
         fs = self._make_fs()
-        fs.dircache["bucket/key"] = self._file_object("key")
-        fs.dircache["bucket"] = fs._directory_object("bucket", None)
-        fs.dircache[""] = [fs._directory_object("bucket", None)]
+        fs._listing_cache.put_lookup(S3Path("bucket", "key"), {}, self._file_object("key"))
+        self._cache(fs, ("lookup", S3Path("bucket")))
+        fs._listing_cache.put_buckets([fs._directory_object("bucket", None)])
 
         def call(method, **kwargs):
             if method in (fs._client.head_object, fs._client.head_bucket):
@@ -1708,9 +1801,9 @@ class TestS3FileSystem:
 
     def test_exists_refresh_bypasses_cache(self):
         fs = self._make_fs()
-        fs.dircache["bucket/key"] = self._file_object("key")
-        fs.dircache["bucket"] = fs._directory_object("bucket", None)
-        fs.dircache[""] = [fs._directory_object("bucket", None)]
+        fs._listing_cache.put_lookup(S3Path("bucket", "key"), {}, self._file_object("key"))
+        self._cache(fs, ("lookup", S3Path("bucket")))
+        fs._listing_cache.put_buckets([fs._directory_object("bucket", None)])
 
         def call(method, **kwargs):
             if method in (fs._client.head_object, fs._client.head_bucket):
@@ -1728,7 +1821,7 @@ class TestS3FileSystem:
 
     def test_missing_bucket_keeps_bucket_listing_without_it(self):
         fs = self._make_fs()
-        fs.dircache[""] = [fs._directory_object("bucket", None)]
+        fs._listing_cache.put_buckets([fs._directory_object("bucket", None)])
         fs._call.side_effect = FileNotFoundError
 
         assert not fs.exists("s3://missing")
@@ -1774,12 +1867,12 @@ class TestS3FileSystem:
         fs.allow_bucket_creation = True
         fs.exists = mock.MagicMock(return_value=False)
         fs._client.meta.region_name = client_region
-        fs.dircache[""] = ["stale-bucket-listing"]
+        fs._listing_cache.put_buckets(["stale-bucket-listing"])
 
         fs.mkdir("s3://new-bucket", **kwargs)
         fs._call.assert_called_once_with(fs._client.create_bucket, **expected)
         # The cached bucket listing must be evicted.
-        assert "" not in fs.dircache
+        assert fs._listing_cache.get_buckets() is None
 
     def test_mkdir_rejects_invalid_acl(self):
         fs = self._make_fs()
@@ -1796,12 +1889,12 @@ class TestS3FileSystem:
         fs.exists = mock.MagicMock(return_value=False)
         fs._client.meta.region_name = "us-east-1"
         fs._call.side_effect = ValueError("Parameter validation failed")
-        fs.dircache[""] = ["stale-bucket-listing"]
+        fs._listing_cache.put_buckets(["stale-bucket-listing"])
 
         with pytest.raises(ValueError, match="Parameter validation failed"):
             fs.mkdir("s3://new-bucket")
         # Nothing was created, so the cached bucket listing is kept.
-        assert "" in fs.dircache
+        assert fs._listing_cache.get_buckets() is not None
 
     def test_mkdir_bucket_creation_disabled(self):
         # Bucket creation is disabled by default.
@@ -1815,12 +1908,12 @@ class TestS3FileSystem:
     def test_rmdir_deletes_bucket(self):
         fs = self._make_fs()
         fs.allow_bucket_deletion = True
-        fs.dircache[""] = ["stale-bucket-listing"]
+        fs._listing_cache.put_buckets(["stale-bucket-listing"])
 
         fs.rmdir("s3://bucket")
         fs._call.assert_called_once_with(fs._client.delete_bucket, Bucket="bucket")
         # The cached bucket listing must be evicted.
-        assert "" not in fs.dircache
+        assert fs._listing_cache.get_buckets() is None
 
     def test_rmdir_bucket_deletion_disabled(self):
         # Bucket deletion is disabled by default.
@@ -2824,11 +2917,16 @@ class TestS3FileSystem:
         # A "?" that does not start a trailing version ID query is part of
         # the key, whose parents are invalidated.
         fs = self._make_fs()
-        for key in ("bucket/dir/what?.txt", ("bucket/dir", "/"), "bucket/dir/what"):
-            fs.dircache[key] = []
+        kept = ("lookup", S3Path("bucket", "dir/what"))
+        entries = [
+            ("lookup", S3Path("bucket", "dir/what?.txt")),
+            ("listing", "bucket/dir", "/"),
+            kept,
+        ]
+        self._cache(fs, *entries)
 
         fs.invalidate_cache("s3://bucket/dir/what?.txt")
-        assert list(fs.dircache) == ["bucket/dir/what"]
+        assert self._cached(fs, entries) == [kept]
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -3885,11 +3983,11 @@ class TestS3FileSystem:
         fs._info_entry = mock.MagicMock(return_value=self._file_object("src"))
         fs._info_entry.return_value.size = S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE + 1
         fs._copy_object_with_multipart_upload = mock.MagicMock(side_effect=PermissionError)
-        fs.dircache["bucket/dst"] = [self._file_object("dst")]
+        fs._listing_cache.put_lookup(S3Path("bucket", "dst"), {}, self._file_object("dst"))
 
         with pytest.raises(PermissionError):
             fs.cp_file("s3://bucket/src", "s3://bucket/dst")
-        assert "bucket/dst" not in fs.dircache
+        assert fs._listing_cache.get_lookup(S3Path("bucket", "dst"), {}) is None
 
     @pytest.mark.parametrize("size", [0, 10])
     def test_copy_object_with_multipart_upload_small_head_object_size(self, size):
@@ -4939,7 +5037,7 @@ class TestS3FileSystem:
         # keeps, so the append looks up the object.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs.dircache[("bucket", "/")] = [self._file_object("key")]
+        fs._listing_cache.put_listing("bucket", "/", [self._file_object("key")])
         fs._call.return_value = {
             "ContentLength": 2,
             "ContentType": "text/plain",
@@ -5108,12 +5206,12 @@ class TestS3FileSystem:
 
             def get(self, key, default=None):
                 value = super().get(key, default)
-                if isinstance(key, tuple) and key[0] == "bucket/key":
-                    self.reads += 1
-                    if self.reads == 2:
-                        # Another thread refreshes the lookup between the
-                        # read and the write of the cached lookups.
-                        fs.info(path, refresh=True, **lookup_kwargs)
+                self.reads += 1
+                if self.reads == 2:
+                    # Another thread refreshes the lookup between the read
+                    # and the write of the cached lookups, the second read,
+                    # after that of the lookup.
+                    fs.info(path, refresh=True, **lookup_kwargs)
                 return value
 
         cache = InterleavedDirCache()
@@ -5158,7 +5256,7 @@ class TestS3FileSystem:
         # parameters, on which the authorization of the requests depends.
         fs = self._make_fs()
         fs._call.return_value = {"ContentLength": 2, "ETag": '"e"'}
-        fs.dircache[("bucket", "/")] = [self._file_object("key")]
+        fs._listing_cache.put_listing("bucket", "/", [self._file_object("key")])
         path = "s3://bucket/key"
         other_key = {**self.LOOKUP_KWARGS, "SSECustomerKey": "j" * 32}
 
@@ -5212,7 +5310,7 @@ class TestS3FileSystem:
         # bucket listing nor the result of a lookup without them.
         fs = self._make_fs()
         fs._call.return_value = {}
-        fs.dircache[""] = [fs._directory_object("bucket", None)]
+        fs._listing_cache.put_buckets([fs._directory_object("bucket", None)])
 
         for _ in range(2):
             assert fs.exists("s3://bucket")
