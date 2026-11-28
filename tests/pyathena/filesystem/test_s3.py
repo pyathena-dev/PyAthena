@@ -5441,6 +5441,68 @@ class TestS3FileSystem:
         assert fs.info(path, **other_key).etag == '"other"'
         fs.core.call.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "interruption",
+        ["invalidate_path", "invalidate_all", "replace_dircache", "evict_then_invalidate"],
+    )
+    def test_cache_lookup_invalidated_during_lookup(self, interruption):
+        # GH-1459: a lookup with other parameters that stores the cached
+        # lookups after an invalidation does not make the results cached
+        # before the invalidation usable again.
+        fs = self._make_fs()
+        etags = iter(['"old"', '"other"', '"new"'])
+        fs.core.call.side_effect = lambda method, **request: {
+            "ContentLength": 2,
+            "ETag": next(etags),
+        }
+        path = "s3://bucket/key"
+        other_key = {**self.LOOKUP_KWARGS, "SSECustomerKey": "j" * 32}
+        fs.info(path, **self.LOOKUP_KWARGS)
+
+        class InterruptedDirCache(DirCache):
+            armed = False
+            first = None
+
+            def get(self, key, default=None):
+                value = super().get(key, default)
+                if self.armed and interruption == "replace_dircache":
+                    if self.first is None:
+                        # The read of the cached lookups by the lookup.
+                        self.first = key
+                    elif key == self.first:
+                        # The dircache is replaced between the read and the
+                        # write of the cached lookups.
+                        self.armed = False
+                        fs.dircache = DirCache()
+                return value
+
+            def __setitem__(self, key, value):
+                if self.armed:
+                    # A write invalidates the object just before the lookup
+                    # with other parameters stores the cached lookups, its
+                    # only write to the cache.
+                    self.armed = False
+                    if interruption == "invalidate_path":
+                        fs.invalidate_cache(path)
+                    elif interruption == "invalidate_all":
+                        fs.invalidate_cache()
+                    else:
+                        # The DirCache drops the entry, as on expiry or
+                        # eviction, before the invalidation.
+                        del self[key]
+                        fs.invalidate_cache(path)
+                super().__setitem__(key, value)
+
+        cache = InterruptedDirCache()
+        cache.update(fs.dircache)
+        fs.dircache = cache
+        cache.armed = True
+        fs.info(path, **other_key)
+
+        fs.core.call.reset_mock()
+        assert fs.info(path, **self.LOOKUP_KWARGS).etag == '"new"'
+        fs.core.call.assert_called_once()
+
     def test_cache_lookup_expiry(self, monkeypatch):
         # GH-1004: the cached lookups with parameters expire after the
         # listings_expiry_time of the dircache, each on its own.
