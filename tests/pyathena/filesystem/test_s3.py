@@ -3353,7 +3353,7 @@ class TestS3FileSystem:
 
     def test_get_path_like_stream_destination(self, tmp_path):
         # GH-1425: one destination that is os.PathLike is a path, also when
-        # it is file-like, as in fsspec's get(); in a list, such an object
+        # it is file-like, as in fsspec's _get(); in a list, such an object
         # is written into.
         class PathLikeStream(io.BytesIO):
             def __fspath__(self):

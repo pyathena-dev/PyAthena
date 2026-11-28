@@ -3236,7 +3236,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Destinations are compared by the file for existing paths, such as
         hard links to one file, and for the regular files that ``open()``
-        returns, also read-only; by the object for other file-like objects;
+        returns in binary mode, also read-only; by the object for other
+        file-like objects, such as subclasses of those or text files;
         and by the resolved path otherwise. A source that ``get_file()``
         creates as a local directory writes no file, so several of them may
         share a local path; the sources are looked up only when their local
@@ -3261,7 +3262,7 @@ class S3FileSystem(AbstractFileSystem):
                 # some create, such as a spooled temporary file.
                 raw = (
                     getattr(destination, "raw", None)
-                    if isinstance(destination, (BufferedRandom, BufferedReader, BufferedWriter))
+                    if type(destination) in (BufferedRandom, BufferedReader, BufferedWriter)
                     else destination
                 )
                 key = ("object", id(destination))
