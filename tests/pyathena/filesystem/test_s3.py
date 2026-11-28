@@ -459,6 +459,7 @@ class TestS3FileSystem:
 
         info = fs.info(path)
         assert (info.name, info.type, info.size) == ("", S3ObjectType.S3_OBJECT_TYPE_DIRECTORY, 0)
+        assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_BUCKET
         assert fs.isdir(path)
         assert not fs.isfile(path)
         assert fs.size(path) == 0

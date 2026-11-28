@@ -246,9 +246,11 @@ class S3Object(dict[str, Any]):
         """Return the path of the bucket and key of the entry, without a version.
 
         The bucket and the key are taken as they are, never parsed from the
-        name of the entry. A version ID that the entry records, such as that
-        of a version entry or of a ``version_aware`` lookup, is not part of
-        the path.
+        name of the entry, except that an empty key, such as that of the
+        directory ``bucket/`` of the key ``/x``, names the bucket, as in
+        :class:`S3Path`. The entry of the root gives ``S3Path("")``. A version
+        ID that the entry records, such as that of a version entry or of a
+        ``version_aware`` lookup, is not part of the path.
 
         Returns:
             The path of the bucket, the directory or the object.
@@ -262,15 +264,14 @@ class S3Object(dict[str, Any]):
         delimiter, which may leave the name with a version ID query or with
         trailing slashes. The prefix is taken from its key as it is, so that
         the directory is listed as it was listed: ``a//`` for the key ``a/``.
-        For a parsed path, whose trailing slashes do not name a key, see
-        :attr:`S3Path.subtree_prefix`.
+        For the keys under a parsed path, regardless of its trailing slashes,
+        see :attr:`S3Path.subtree_prefix`.
 
         Returns:
             The key prefix: ``""`` for a bucket, and otherwise the key of the
             directory followed by ``/``.
         """
-        key = self.get("key")
-        return "" if key is None else f"{key}/"
+        return "" if self.key is None else f"{self.key}/"
 
     def to_dict(self) -> dict[str, Any]:
         """Convert S3Object to dictionary representation.

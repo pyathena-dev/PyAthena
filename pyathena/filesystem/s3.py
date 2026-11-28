@@ -2007,8 +2007,10 @@ class S3FileSystem(AbstractFileSystem):
             the protocol.
         """
         return S3Path.partition_by_version(
-            self._strip_protocol(p)
-            for p in ([path] if isinstance(path, (str, os.PathLike)) else path)
+            [
+                self._strip_protocol(p)
+                for p in ([path] if isinstance(path, (str, os.PathLike)) else path)
+            ]
         )
 
     def exists(self, path: str | os.PathLike[str], **kwargs) -> bool:

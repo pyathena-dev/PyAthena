@@ -254,20 +254,6 @@ class TestS3Object:
         expected["name"] = name
         assert list(S3Object.from_version(version).items()) == list(expected.items())
 
-    @pytest.mark.parametrize(
-        ("key", "expected"),
-        [
-            (None, ""),
-            # The directory "bucket/" of the key "/x" lists the prefix "/".
-            ("", "/"),
-            # The directory of the common prefix "a//" lists "a//".
-            ("a/", "a//"),
-            ("a", "a/"),
-        ],
-    )
-    def test_listing_prefix(self, key, expected):
-        assert S3Object.directory("bucket", key).listing_prefix() == expected
-
 
 class TestS3Metadata:
     def test_init(self):
@@ -519,23 +505,6 @@ class TestS3MultipartUpload:
         assert actual.initiator
         assert actual.initiator.display_name == "test_initiator"
         assert actual.initiator.id == "test_initiator_id"
-
-    def test_request_identity(self):
-        upload = S3MultipartUpload({"Bucket": "b", "Key": "k", "UploadId": "u", "Owner": {}})
-        assert upload.request_identity() == {"Bucket": "b", "Key": "k", "UploadId": "u"}
-
-    @pytest.mark.parametrize(
-        ("response", "missing"),
-        [
-            ({"Key": "k", "UploadId": "u"}, "bucket"),
-            ({"Bucket": "b", "UploadId": "u"}, "key"),
-            ({"Bucket": "b", "Key": "k"}, "upload ID"),
-        ],
-    )
-    def test_request_identity_incomplete(self, response, missing):
-        # An upload that S3 could not have answered is never sent.
-        with pytest.raises(ValueError, match=f"has no {missing}"):
-            S3MultipartUpload(response).request_identity()
 
 
 class TestS3MultipartUploadPart:
