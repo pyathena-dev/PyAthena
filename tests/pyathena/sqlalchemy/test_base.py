@@ -413,6 +413,64 @@ class TestAthenaDialect:
         dialect.get_columns(connection, "Events", schema="other", info_cache=info_cache)
         assert [request["schema_name"] for request in requests] == ["analytics", "other"]
 
+    @pytest.mark.parametrize(
+        ("schema_name", "cursor_kwargs"),
+        [("shared", {"schema_name": None}), ("shared", {"schema_name": ""}), (None, {})],
+        ids=["cursor_kwargs_none", "cursor_kwargs_empty", "connection_none"],
+    )
+    def test_reflection_reads_default_database_without_cursor_schema(
+        self, schema_name, cursor_kwargs
+    ):
+        # A cursor without a schema runs statements in Athena's default database,
+        # so reflection reads that database instead of sending no database name.
+        conn = Connection(
+            region_name="us-west-2",
+            s3_staging_dir="s3://bucket/path/",
+            aws_access_key_id="access_key",
+            aws_secret_access_key="secret_key",
+            schema_name=schema_name,
+            cursor_kwargs=cursor_kwargs,
+        )
+        databases = []
+        for operation in ("GetTableMetadata", "ListTableMetadata"):
+            conn.client.meta.events.register(
+                f"provide-client-params.athena.{operation}",
+                lambda params, operation=operation, **kwargs: databases.append(
+                    (operation, params["DatabaseName"])
+                ),
+            )
+        engine = create_engine("awsathena+rest://", creator=lambda: conn)
+        try:
+            with Stubber(conn.client) as stubber:
+                stubber.add_response(
+                    "get_table_metadata",
+                    {
+                        "TableMetadata": {
+                            "Name": "events",
+                            "Columns": [{"Name": "id", "Type": "int"}],
+                        }
+                    },
+                )
+                stubber.add_response("list_table_metadata", {"TableMetadataList": []})
+                insp = sqlalchemy.inspect(engine)
+                assert insp.has_table("events")
+                assert insp.get_table_names() == []
+        finally:
+            engine.dispose()
+        assert databases == [("GetTableMetadata", "default"), ("ListTableMetadata", "default")]
+
+    def test_get_view_definition_reads_default_database_without_cursor_schema(self):
+        executed = []
+
+        def execute(operation, **kwargs):
+            executed.append(operation)
+
+        connection = self._view_connection(execute)
+        connection.connection.schema_name = "shared"
+        connection.connection.cursor_kwargs = {"schema_name": None}
+        AthenaDialect().get_view_definition(connection, "v")
+        assert executed == ['SHOW CREATE VIEW "default"."v";']
+
     def test_empty_information_schema_result_is_a_missing_table(self):
         # A throttled lookup that finds no columns means the table is absent, so
         # has_table() can report False instead of propagating the throttling.
