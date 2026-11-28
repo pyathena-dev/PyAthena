@@ -14,7 +14,6 @@ import contextlib
 import contextvars
 import functools
 import logging
-import mimetypes
 import os
 import threading
 import warnings
@@ -26,17 +25,16 @@ from typing import IO, TYPE_CHECKING, Any, ClassVar, cast
 from fsspec.asyn import (
     AbstractAsyncStreamedFile,
     AsyncFileSystem,
+    _get_batch_size,
     _run_coros_in_chunks,
     is_exception,
     sync,
 )
 from fsspec.callbacks import _DEFAULT_CALLBACK
-from fsspec.core import get_compression
 from fsspec.utils import isfilelike, stringify_path
 
 from pyathena.filesystem.s3 import (
     _UNPICKLABLE_CLIENT_MESSAGE,
-    CompressedBuffer,
     S3File,
     S3FileSystem,
     S3FileTarget,
@@ -268,7 +266,7 @@ class AioS3FileSystem(AsyncFileSystem):
     coroutines run the blocking boto3 calls in an ``S3ThreadPool`` with
     ``max_workers`` threads that the filesystem owns, instead of the default
     executor of the event loop, and run parallel per-object calls, such as
-    the copies of ``_mv()``, with ``asyncio.gather``. The single requests
+    the copies of ``_mv()``, ``batch_size`` at a time as tasks. The single requests
     that these calls run in parallel, such as the parts of a file or a copy,
     and the DeleteObjects batches of ``_rm()``, run in the request pool of
     the wrapped ``S3FileSystem``, which its files share, through
@@ -477,7 +475,7 @@ class AioS3FileSystem(AsyncFileSystem):
             # The transaction belongs to this filesystem, not to the internal
             # S3FileSystem, so write through open() to defer the commit to it.
             await self._write_in_transaction(
-                functools.partial(self._pipe_file_in_transaction, path, value, mode, **kwargs)
+                functools.partial(self._sync_fs._pipe_file_with_opener, path, value, mode, **kwargs)
             )
             return
         await self._thread_pool.run(self._sync_fs.pipe_file, path, value, mode=mode, **kwargs)
@@ -505,43 +503,6 @@ class AioS3FileSystem(AsyncFileSystem):
                 self._thread_pool.submit(transaction_write.discard)
             raise
 
-    def _pipe_file_in_transaction(
-        self,
-        path: str | os.PathLike[str],
-        value: bytes | bytearray | memoryview,
-        mode: str,
-        open_file: Callable[..., S3File],
-        **kwargs,
-    ) -> None:
-        """Write bytes into the path as a file of this filesystem's transaction.
-
-        Args:
-            path: S3 path (s3://bucket/key) to write to.
-            value: The bytes to write.
-            mode: "overwrite" or "create". With "create", the file is
-                opened in ``xb`` mode: raise FileExistsError when the object
-                already exists, including one created before the
-                transaction is committed, which is not replaced.
-            open_file: Opens the file, with the arguments of ``open()``.
-            **kwargs: Additional parameters passed to ``open()``, except
-                ``compression``, with which the value is compressed before
-                it is written, as in :meth:`S3FileSystem.pipe_file`.
-
-        Raises:
-            FileExistsError: If the mode is "create" and the path already
-                exists.
-            ValueError: If the compression is not supported, or if the data
-                takes more than ``S3Core.MULTIPART_UPLOAD_MAX_PARTS`` blocks.
-        """
-        # See S3FileSystem.pipe_file.
-        compression = get_compression(self._strip_protocol(path), kwargs.pop("compression", None))
-        if compression is not None:
-            value = CompressedBuffer.compress(value, compression)
-        block_size = kwargs.get("block_size") or self._sync_fs.default_block_size
-        # The size in bytes; the length of a memoryview counts its items.
-        self.core.check_multipart_upload_size(memoryview(value).nbytes, block_size)
-        open_file(path, "xb" if mode == "create" else "wb", **kwargs)._write_and_close(value)
-
     async def _put_file(
         self,
         lpath: str | os.PathLike[str],
@@ -551,81 +512,17 @@ class AioS3FileSystem(AsyncFileSystem):
         **kwargs,
     ) -> None:
         _S3BatchTasks.track()
-        target: str | S3Path = rpath if isinstance(rpath, S3Path) else stringify_path(rpath)
         if self._intrans:
             # See _pipe_file.
             await self._write_in_transaction(
                 functools.partial(
-                    self._put_file_in_transaction, lpath, target, callback, mode, **kwargs
+                    self._sync_fs._put_file_with_opener, lpath, rpath, callback, mode, **kwargs
                 )
             )
             return
         await self._thread_pool.run(
-            self._sync_fs.put_file, lpath, target, callback=callback, mode=mode, **kwargs
+            self._sync_fs.put_file, lpath, rpath, callback=callback, mode=mode, **kwargs
         )
-
-    def _put_file_in_transaction(
-        self,
-        lpath: str | os.PathLike[str],
-        rpath: str | S3Path,
-        callback,
-        mode: str,
-        open_file: Callable[..., S3File],
-        **kwargs,
-    ) -> None:
-        """Upload a local file as a file of this filesystem's transaction.
-
-        Mirrors :meth:`S3FileSystem.put_file`, but writes through ``open()``
-        of this filesystem.
-
-        Args:
-            lpath: Local file path to upload.
-            rpath: S3 destination path (s3://bucket/key), or an ``S3Path``,
-                whose bucket and key are written as they are.
-            callback: Progress callback for tracking upload progress.
-            mode: "overwrite" or "create". With "create", the file is
-                opened in ``xb`` mode: raise FileExistsError when the object
-                already exists, including one created before the
-                transaction is committed, which is not replaced.
-            open_file: Opens the file, with the arguments of ``open()``.
-            **kwargs: Additional S3 parameters (e.g., ContentType, StorageClass).
-                The ``block_size``, ``max_workers``, and ``s3_additional_kwargs``
-                parameters of ``open()`` are also accepted.
-
-        Raises:
-            FileExistsError: If the mode is "create" and the path already
-                exists.
-            ValueError: If the file takes more than
-                ``S3Core.MULTIPART_UPLOAD_MAX_PARTS`` blocks.
-        """
-        if os.path.isdir(lpath):
-            return
-        s3_path = S3Path.of(rpath)
-        if not s3_path.key:
-            return
-
-        size = os.path.getsize(lpath)
-        block_size = kwargs.pop("block_size", None) or self._sync_fs.default_block_size
-        max_workers = kwargs.pop("max_workers", self._sync_fs.max_workers)
-        # The other parameters are S3 request parameters, as in pipe_file().
-        s3_additional_kwargs = {**kwargs.pop("s3_additional_kwargs", {}), **kwargs}
-        self.core.check_multipart_upload_size(size, block_size)
-        callback.set_size(size)
-        if "ContentType" not in {**self._sync_fs.s3_additional_kwargs, **s3_additional_kwargs}:
-            content_type, _ = mimetypes.guess_type(lpath)
-            if content_type is not None:
-                s3_additional_kwargs["ContentType"] = content_type
-
-        # See S3FileSystem.put_file.
-        with open(lpath, "rb") as local:
-            open_file(
-                rpath,
-                "xb" if mode == "create" else "wb",
-                block_size=block_size,
-                max_workers=max_workers,
-                s3_additional_kwargs=s3_additional_kwargs,
-            )._write_file_and_close(local, callback)
-        self._invalidate(s3_path)
 
     async def _get_file(
         self,
@@ -764,12 +661,15 @@ class AioS3FileSystem(AsyncFileSystem):
         finally:
             executor.shutdown(wait=False)
 
-    async def _mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
+    async def _mv(
+        self, path1, path2, recursive=False, maxdepth=None, batch_size=None, **kwargs
+    ) -> None:
         """Move files from one S3 location to another.
 
-        See :meth:`S3FileSystem.mv`. The copies run in parallel with
-        ``asyncio.gather``, whose cancellation cancels them and waits for
-        them, and the deletions in the request pool.
+        See :meth:`S3FileSystem.mv`. The copies run as in :meth:`_copy`,
+        ``batch_size`` of them at once as tasks, which a cancellation cancels
+        and waits for, and the deletions in the request pool. Each multipart
+        copy gets its share of ``max_workers`` (see :meth:`_transfer_kwargs`).
 
         Args:
             path1: Source S3 path, glob pattern, or list of paths.
@@ -777,6 +677,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 list.
             recursive: Whether to move the directories with their contents.
             maxdepth: Maximum depth of a recursive move.
+            batch_size: Number of copies to run at the same time.
             **kwargs: Additional S3 copy parameters, as for ``_cp_file()``.
 
         Raises:
@@ -801,10 +702,33 @@ class AioS3FileSystem(AsyncFileSystem):
             maxdepth=maxdepth,
             source_params=source_params,
         )
+        # As fsspec's _copy() resolves the batch size.
+        batch_size = batch_size or self.batch_size
+        batch_size, copy_kwargs = self._transfer_kwargs(
+            len(pairs), batch_size, kwargs, nofiles=True
+        )
+
+        async def copy_pair(pair: tuple[str | S3Path, str | S3Path]) -> bool:
+            """Copy a pair of the move as a task of the batch.
+
+            Args:
+                pair: The source and its destination.
+
+            Returns:
+                Whether the source was copied, as ``_copy_file()`` returns it.
+            """
+            _S3BatchTasks.track()
+            return await self._copy_file(*pair, **copy_kwargs)
+
         # Every copy finishes before a failure is raised, as in fsspec's
         # _copy(), and nothing is deleted after a failure.
-        results = await asyncio.gather(
-            *[self._copy_file(p1, p2, **kwargs) for p1, p2 in pairs], return_exceptions=True
+        results = await _S3BatchTasks().run(
+            _run_coros_in_chunks(
+                [copy_pair(pair) for pair in pairs],
+                batch_size=batch_size,
+                return_exceptions=True,
+                nofiles=True,
+            )
         )
         for result in results:
             if isinstance(result, BaseException):
@@ -814,7 +738,7 @@ class AioS3FileSystem(AsyncFileSystem):
             **self.core.operation_params("delete_objects", source_params),
         )
 
-    def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
+    def mv(self, path1, path2, recursive=False, maxdepth=None, batch_size=None, **kwargs) -> None:
         """Move files from one S3 location to another.
 
         Runs :meth:`_mv`; fsspec does not provide the synchronous wrapper of
@@ -826,13 +750,23 @@ class AioS3FileSystem(AsyncFileSystem):
                 list.
             recursive: Whether to move the directories with their contents.
             maxdepth: Maximum depth of a recursive move.
+            batch_size: Number of copies to run at the same time.
             **kwargs: Additional S3 copy parameters.
 
         Raises:
             ValueError: If the move has conflicting paths.
             OSError: If bucket versioning cannot be read.
         """
-        sync(self.loop, self._mv, path1, path2, recursive=recursive, maxdepth=maxdepth, **kwargs)
+        sync(
+            self.loop,
+            self._mv,
+            path1,
+            path2,
+            recursive=recursive,
+            maxdepth=maxdepth,
+            batch_size=batch_size,
+            **kwargs,
+        )
 
     async def _copy(
         self,
@@ -851,7 +785,8 @@ class AioS3FileSystem(AsyncFileSystem):
         ``_copy()``, ``batch_size`` of them at once as tasks. A cancellation
         cancels the copies and waits for them; a copy that is already being
         cancelled, such as by the shutdown of the event loop, is not
-        cancelled again.
+        cancelled again. Each multipart copy gets its share of
+        ``max_workers`` (see :meth:`_transfer_kwargs`).
 
         Args:
             path1: Source S3 path, glob pattern, or list of them.
@@ -882,13 +817,18 @@ class AioS3FileSystem(AsyncFileSystem):
         )
         if not pairs:
             return
+        # As fsspec's _copy() resolves the batch size.
+        batch_size = batch_size or self.batch_size
+        batch_size, copy_kwargs = self._transfer_kwargs(
+            len(pairs), batch_size, kwargs, nofiles=True
+        )
         await _S3BatchTasks().run(
             super()._copy(
                 [p1 for p1, _ in pairs],
                 [p2 for _, p2 in pairs],
                 on_error=on_error,
                 batch_size=batch_size,
-                **kwargs,
+                **copy_kwargs,
             )
         )
 
@@ -903,8 +843,8 @@ class AioS3FileSystem(AsyncFileSystem):
         as in :meth:`_copy`. As in :meth:`S3FileSystem.get`, each download
         gets ``max(1, max_workers // n)`` parallel range reads, or the
         caller's smaller ``max_workers``, where ``n`` is the number of paired
-        sources, directories included, or ``batch_size`` when it is positive
-        and smaller. With ``outfile``, the files are written to it one after
+        sources, directories included, or the batch size when it is smaller
+        (see :meth:`_transfer_kwargs`). With ``outfile``, the files are written to it one after
         another, in order, and ``n`` is 1.
 
         Args:
@@ -939,14 +879,7 @@ class AioS3FileSystem(AsyncFileSystem):
             # _get_file() writes to the outfile instead of the local paths,
             # so the files are downloaded one after another, in order.
             kwargs = {**kwargs, "batch_size": 1}
-        # fsspec's default batch size, when none is given, is not counted:
-        # at most max_workers downloads run at once in the threads of the
-        # filesystem, and more than max_workers get one range each anyway.
-        concurrency = len(pairs)
-        batch_size = kwargs.get("batch_size", self.batch_size)
-        if batch_size is not None and batch_size > 0:
-            concurrency = min(concurrency, batch_size)
-        if kwargs.get("outfile") is None:
+        else:
             # As fsspec's _get() for lists of paths, before any download;
             # the local paths are absolute. _get_file() writes into a
             # file-like destination instead, as into an outfile, so no
@@ -954,11 +887,7 @@ class AioS3FileSystem(AsyncFileSystem):
             for _, lp in pairs:
                 if not isfilelike(lp):
                     os.makedirs(os.path.dirname(cast(str, lp)), exist_ok=True)
-        await _S3BatchTasks().run(
-            self._transfer_pairs(
-                self._get_file, pairs, callback, **self._sync_fs._batch_kwargs(concurrency, kwargs)
-            )
-        )
+        await _S3BatchTasks().run(self._transfer_pairs(self._get_file, pairs, callback, **kwargs))
 
     async def _put(
         self,
@@ -977,7 +906,11 @@ class AioS3FileSystem(AsyncFileSystem):
         ``_put()``; a cancellation cancels them and waits for them, as in
         :meth:`_copy`. Unlike fsspec's ``_put()``, which creates a directory
         for each local directory, it makes no other request: S3 has no
-        directories, and creating one checks or creates the bucket.
+        directories, and creating one checks or creates the bucket. As in
+        :meth:`S3FileSystem.put`, each upload sends ``max(1, max_workers //
+        n)`` parts at once, or the caller's smaller ``max_workers``, where
+        ``n`` is the number of local files, or the batch size when it is
+        smaller (see :meth:`_transfer_kwargs`).
 
         Args:
             lpath: Local source path, glob pattern, or list of them, as
@@ -999,15 +932,62 @@ class AioS3FileSystem(AsyncFileSystem):
                 ``rpath`` names one and the file is named below it.
         """
         lpath, rpath = self._sync_fs._stringify_paths(lpath), self._sync_fs._stringify_paths(rpath)
-        pairs = await self._thread_pool.run(
+        # The local directories, which upload nothing, are left out in the
+        # thread, as fsspec's _put() leaves them out.
+        _, files = await self._thread_pool.run(
             self._sync_fs._put_pairs, lpath, rpath, recursive=recursive, maxdepth=maxdepth, **kwargs
         )
-        files = [(lp, rp) for lp, rp in pairs if not os.path.isdir(lp)]
         return await _S3BatchTasks().run(
+            # As fsspec's _put() resolves the batch size.
             self._transfer_pairs(
                 self._put_file, files, callback, batch_size=batch_size or self.batch_size, **kwargs
             )
         )
+
+    def _transfer_kwargs(
+        self,
+        count: int,
+        batch_size: int | None,
+        kwargs: dict[str, Any],
+        nofiles: bool = False,
+    ) -> tuple[int, dict[str, Any]]:
+        """Return the batch size of a batch and the arguments of its per-object calls.
+
+        As in the batch operations of ``S3FileSystem``, each call gets
+        ``max(1, max_workers // n)`` parallel requests, or the caller's
+        smaller ``max_workers`` (see :meth:`S3FileSystem._batch_kwargs`).
+        ``n`` is the number of calls that fsspec's ``_run_coros_in_chunks()``
+        runs at once: the number of calls, or the batch size when it is
+        positive and smaller, fsspec's default batch size when it is None;
+        -1 runs every call at once.
+
+        Args:
+            count: The number of calls.
+            batch_size: The batch size that the operation passes to
+                ``_run_coros_in_chunks()``.
+            kwargs: The arguments that the caller gave the operation.
+            nofiles: The ``nofiles`` argument of ``_run_coros_in_chunks()``,
+                which selects its default batch size.
+
+        Returns:
+            The batch size, resolved once, which the operation passes to
+            ``_run_coros_in_chunks()`` instead of the given one, and the
+            arguments of each call.
+
+        Raises:
+            ValueError: If the batch size is neither positive, -1, nor None,
+                which ``_run_coros_in_chunks()`` rejects, before any call is
+                created.
+        """
+        if batch_size is None:
+            batch_size = _get_batch_size(nofiles=nofiles)
+        if batch_size == -1:
+            concurrency = count
+        elif batch_size > 0:
+            concurrency = min(count, batch_size)
+        else:
+            raise ValueError("batch_size must be positive, -1, or None.")
+        return batch_size, self._sync_fs._batch_kwargs(concurrency, kwargs)
 
     async def _transfer_pairs(
         self,
@@ -1022,7 +1002,8 @@ class AioS3FileSystem(AsyncFileSystem):
         a destination named after a local file is transferred by its bucket
         and key, and runs through the callback's ``branch_coro()``, as in
         fsspec, with the paths as the names of its branch, an ``S3Path`` as
-        its string.
+        its string. Each transfer gets its share of ``max_workers`` (see
+        :meth:`_transfer_kwargs`).
 
         Args:
             transfer: ``_get_file()`` or ``_put_file()``.
@@ -1034,7 +1015,9 @@ class AioS3FileSystem(AsyncFileSystem):
         Returns:
             The results of the transfers, as fsspec's ``_put()`` returns them.
         """
+        # As fsspec's _get() resolves the batch size.
         batch_size = kwargs.pop("batch_size", self.batch_size)
+        batch_size, kwargs = self._transfer_kwargs(len(pairs), batch_size, kwargs)
         callback.set_size(len(pairs))
 
         def run(path1: Any, path2: Any) -> Awaitable[Any]:
@@ -1098,7 +1081,8 @@ class AioS3FileSystem(AsyncFileSystem):
         See :meth:`S3FileSystem.pipe`. The paths of a dictionary are checked
         as there before anything is written, and the writes run as in
         fsspec's ``_pipe()``; a cancellation cancels them and waits for them,
-        as in :meth:`_copy`.
+        as in :meth:`_copy`. Each multipart write gets its share of
+        ``max_workers`` (see :meth:`_transfer_kwargs`).
 
         Args:
             path: S3 path, or a dictionary of paths and their bytes.
@@ -1112,12 +1096,19 @@ class AioS3FileSystem(AsyncFileSystem):
         Raises:
             ValueError: If two paths of a dictionary name the same object.
         """
-        if isinstance(path, dict):
+        if not isinstance(path, str) and callable(getattr(path, "items", None)):
+            # Any other object with items(), such as a mapping, whose items
+            # fsspec writes.
             path = dict(self._sync_fs._pipe_items(path))
+            count = len(path)
         else:
             path = stringify_path(path)
+            count = 1
+        # As fsspec's _pipe() resolves the batch size.
+        batch_size = batch_size or self.batch_size
+        batch_size, pipe_kwargs = self._transfer_kwargs(count, batch_size, kwargs, nofiles=True)
         return await _S3BatchTasks().run(
-            super()._pipe(path, value, batch_size=batch_size, **kwargs)
+            super()._pipe(path, value, batch_size=batch_size, **pipe_kwargs)
         )
 
     async def _cat(self, path, recursive=False, on_error="raise", batch_size=None, **kwargs):

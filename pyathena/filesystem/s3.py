@@ -2443,7 +2443,8 @@ class S3FileSystem(AbstractFileSystem):
         With several calls at once, each object gets ``max_workers //
         concurrency`` parallel requests, at least one, so that a batch keeps
         about ``max_workers`` requests in the request pool. A ``max_workers``
-        of the caller is capped at that; None or 0 takes it.
+        of the caller is capped at that; None or 0 takes it, also for a
+        single call, which then gets the ``max_workers`` of the filesystem.
 
         Args:
             concurrency: The number of calls that run at once.
@@ -2452,10 +2453,12 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The arguments of each call.
         """
+        given = kwargs.get("max_workers")
         if concurrency <= 1:
+            if "max_workers" in kwargs and not given:
+                return {k: v for k, v in kwargs.items() if k != "max_workers"}
             return kwargs
         window = max(1, self.max_workers // concurrency)
-        given = kwargs.get("max_workers")
         return {**kwargs, "max_workers": min(given, window) if given else window}
 
     def _run_batch(
@@ -3625,6 +3628,42 @@ class S3FileSystem(AbstractFileSystem):
                 version, if the compression is not supported, or if the data
                 takes more than ``S3Core.MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
+        # In a transaction, through the buffered open() path, which keeps the
+        # deferred-commit semantics of fsspec transactions.
+        self._pipe_file_with_opener(
+            path, value, mode, self._open_path if self._intrans else None, **kwargs
+        )
+
+    def _pipe_file_with_opener(
+        self,
+        path: str | os.PathLike[str],
+        value: bytes | bytearray | memoryview,
+        mode: str,
+        open_file: Callable[..., S3File] | None,
+        **kwargs,
+    ) -> None:
+        """Write bytes into the path as :meth:`pipe_file` does, or through an opener.
+
+        The body of :meth:`pipe_file`, which ``AioS3FileSystem`` also runs
+        for a write of its transaction, whose file it opens with the
+        opener of the write.
+
+        Args:
+            path: S3 path (s3://bucket/key) to write to.
+            value: The bytes to write.
+            mode: "overwrite" or "create", as in :meth:`pipe_file`.
+            open_file: Opens the file, with the arguments of ``open()``,
+                and then takes the write whatever its size. None writes
+                with a single PutObject request when the data, compressed
+                if a compression is given, takes no more than the block
+                size and ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE``, and with
+                ``open()`` otherwise.
+            **kwargs: As in :meth:`pipe_file`.
+
+        Raises:
+            FileExistsError: As in :meth:`pipe_file`.
+            ValueError: As in :meth:`pipe_file`.
+        """
         # Normalized as open() normalizes it, so that the key written, and
         # the codec that "infer" takes from its extension, do not depend on
         # the path that the size of the value selects.
@@ -3638,11 +3677,15 @@ class S3FileSystem(AbstractFileSystem):
         # The size in bytes; the length of a memoryview counts its items.
         size = memoryview(value).nbytes
         self.core.check_multipart_upload_size(size, block_size)
-        if self._intrans or size > min(block_size, self.core.MULTIPART_UPLOAD_MAX_PART_SIZE):
-            # Defer to the buffered open() path, which keeps the
-            # deferred-commit semantics of fsspec transactions and uploads
-            # large data as a parallel multipart upload.
-            self.open(path, "xb" if mode == "create" else "wb", **kwargs)._write_and_close(value)
+        if open_file is not None or size > min(
+            block_size, self.core.MULTIPART_UPLOAD_MAX_PART_SIZE
+        ):
+            # Through the opener, or through open() for large data, which it
+            # uploads as a parallel multipart upload.
+            file = (open_file or self._open_path)(
+                path, "xb" if mode == "create" else "wb", **kwargs
+            )
+            file._write_and_close(value)
             return
         s3_path = S3Path.parse(path)
         if s3_path.version_id:
@@ -3948,7 +3991,11 @@ class S3FileSystem(AbstractFileSystem):
         As fsspec's ``put()``, except that the files are uploaded in parallel
         with ``put_file()``, as ``copy()`` copies its files. A failed upload
         starts no further one, the running ones send no further part and do
-        not commit, and the error is raised once they have ended.
+        not commit, and the error is raised once they have ended. Each upload
+        sends ``max(1, max_workers // n)`` parts at once, or the caller's
+        smaller ``max_workers``, where ``n`` is the number of local files, or
+        ``batch_size`` when it is smaller; the local directories upload
+        nothing and are not counted.
 
         Args:
             lpath: Local source path, glob pattern, or list of them.
@@ -3970,10 +4017,14 @@ class S3FileSystem(AbstractFileSystem):
         """
         lpath, rpath = self._stringify_paths(lpath), self._stringify_paths(rpath)
         limit = self._batch_limit(batch_size)
-        pairs = self._put_pairs(lpath, rpath, recursive=recursive, maxdepth=maxdepth, **kwargs)
+        pairs, files = self._put_pairs(
+            lpath, rpath, recursive=recursive, maxdepth=maxdepth, **kwargs
+        )
         if not pairs:
             return
-        concurrency = min(limit, len(pairs))
+        # The local directories, which upload nothing, take no share of the
+        # requests of the uploads.
+        concurrency = min(limit, max(1, len(files)))
         call_kwargs = self._batch_kwargs(concurrency, kwargs)
         locked = _S3LockedCallback(callback, threading.Lock())
 
@@ -3994,7 +4045,7 @@ class S3FileSystem(AbstractFileSystem):
 
     def _put_pairs(
         self, lpath, rpath, recursive=False, maxdepth=None, **kwargs
-    ) -> list[tuple[str, str | S3Path]]:
+    ) -> tuple[list[tuple[str, str | S3Path]], list[tuple[str, str | S3Path]]]:
         """Pair the local sources of ``put()`` with their S3 destinations as fsspec does.
 
         The files are uploaded in parallel, so no two files may have the
@@ -4019,7 +4070,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Returns:
             The local paths, including the directories of a recursive copy,
-            with their destinations without the protocol.
+            with their destinations without the protocol, and those of the
+            local files among them, which ``put_file()`` uploads.
 
         Raises:
             ValueError: If two files have the same destination, or ``rpath``
@@ -4029,6 +4081,7 @@ class S3FileSystem(AbstractFileSystem):
             pairs: list[tuple[str, str | S3Path]] = [
                 (lp, self._strip_protocol(rp)) for lp, rp in zip(lpath, rpath, strict=False)
             ]
+            directories = [os.path.isdir(lp) for lp, _ in pairs]
         else:
             source_is_str = isinstance(lpath, str)
             if source_is_str:
@@ -4039,7 +4092,7 @@ class S3FileSystem(AbstractFileSystem):
                 # A string source without recursion does not copy directories.
                 lpaths = [p for p in lpaths if not (trailing_sep(p) or local.isdir(p))]
                 if not lpaths:
-                    return []
+                    return [], []
             dest_is_dir = isinstance(rpath, str) and (trailing_sep(rpath) or self.isdir(rpath))
             # A list of destinations or one path, also path-like, as in fsspec.
             rpath = self._strip_protocol(rpath)
@@ -4050,10 +4103,11 @@ class S3FileSystem(AbstractFileSystem):
             rpaths: list[str | S3Path] = other_paths(
                 lpaths, rpath, exists=exists, flatten=not source_is_str
             )
+            directories = [os.path.isdir(lp) for lp in lpaths]
             # The files named after their local names below rpath; a local
             # directory, which put_file() skips, keeps its string.
             named = [
-                rp != rpath and not os.path.isdir(lp) for lp, rp in zip(lpaths, rpaths, strict=True)
+                rp != rpath and not is_dir for rp, is_dir in zip(rpaths, directories, strict=True)
             ]
             if isinstance(rpath, str) and any(named):
                 root = S3Path.parse(rpath)
@@ -4067,10 +4121,10 @@ class S3FileSystem(AbstractFileSystem):
                 ]
             pairs = list(zip(lpaths, rpaths, strict=True))
         # put_file() uploads nothing for a local directory.
-        files = [rp for lp, rp in pairs if not os.path.isdir(lp)]
-        if len(set(files)) != len(files):
+        files = [pair for pair, is_dir in zip(pairs, directories, strict=True) if not is_dir]
+        if len({rp for _, rp in files}) != len(files):
             raise ValueError("Cannot put several paths to the same destination.")
-        return pairs
+        return pairs, files
 
     def put_file(
         self,
@@ -4113,6 +4167,38 @@ class S3FileSystem(AbstractFileSystem):
             the method returns without performing any operation. Bucket-only
             destinations (without key) are also not supported.
         """
+        self._put_file_with_opener(lpath, rpath, callback, mode, self._open_path, **kwargs)
+
+    def _put_file_with_opener(
+        self,
+        lpath: str | os.PathLike[str],
+        rpath: str | os.PathLike[str] | S3Path,
+        callback: Callback,
+        mode: str,
+        open_file: Callable[..., S3File],
+        **kwargs,
+    ) -> None:
+        """Upload a local file as :meth:`put_file` does, through an opener.
+
+        The body of :meth:`put_file`, which opens the file with
+        :meth:`_open_path`, and which ``AioS3FileSystem`` also runs for a
+        write of its transaction, whose file it opens with the opener of the
+        write.
+
+        Args:
+            lpath: Local file path to upload.
+            rpath: S3 destination path (s3://bucket/key), or an ``S3Path``,
+                whose bucket and key are written as they are.
+            callback: Progress callback for tracking upload progress.
+            mode: "overwrite" or "create", as in :meth:`put_file`.
+            open_file: Opens the file, with the arguments of ``open()``, for
+                a path string or an ``S3Path``.
+            **kwargs: As in :meth:`put_file`.
+
+        Raises:
+            FileExistsError: As in :meth:`put_file`.
+            ValueError: As in :meth:`put_file`.
+        """
         target: str | S3Path = rpath if isinstance(rpath, S3Path) else stringify_path(rpath)
         if os.path.isdir(lpath):
             # No support for directory uploads.
@@ -4138,7 +4224,7 @@ class S3FileSystem(AbstractFileSystem):
         # The local file is opened first, so that an unreadable one fails
         # before the remote file is opened.
         with open(lpath, "rb") as local:
-            self._open_path(
+            open_file(
                 target,
                 "xb" if mode == "create" else "wb",
                 block_size=block_size,

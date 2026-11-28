@@ -22,7 +22,9 @@ from unittest import mock
 import boto3
 import pytest
 from botocore.stub import Stubber
+from fsspec import config as fsspec_config
 from fsspec.callbacks import Callback
+from fsspec.core import OpenFile
 
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import (
@@ -2214,8 +2216,6 @@ class TestAioS3FileSystem:
             (method, cancellation)
             for method in ["_cat", "_cat_ranges", "_pipe", "_put", "_get", "_copy", "_mv"]
             for cancellation in ["batch", "calls_first", "shutdown"]
-            # asyncio.gather() cancels the copies of _mv() again.
-            if (method, cancellation) != ("_mv", "calls_first")
         ],
     )
     def test_batch_cancelled_waits_for_calls(self, tmp_path, method, cancellation):
@@ -2656,6 +2656,52 @@ class TestAioS3FileSystem:
         assert windows == [expected] * files
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("fs_kwargs", "conf", "kwargs", "expected"),
+        [
+            # An explicit None takes fsspec's default batch size, as in
+            # fsspec's _get(), not that of the filesystem.
+            ({"batch_size": 1}, {}, {"batch_size": None}, 2),
+            # fsspec's configured default batch size is counted.
+            ({}, {"gather_batch_size": 1}, {}, None),
+            # 0 is rejected, as fsspec rejects it, before any download is
+            # created.
+            ({}, {}, {"batch_size": 0}, ValueError),
+        ],
+    )
+    async def test_get_batch_size(self, tmp_path, monkeypatch, fs_kwargs, conf, kwargs, expected):
+        # GH-1427: _get() resolves its batch size as fsspec's _get() does, and
+        # the window of each download counts the batch that fsspec runs.
+        # Only the given fsspec configuration applies, also to the filesystem.
+        monkeypatch.setattr(fsspec_config, "conf", dict(conf))
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=4,
+            skip_instance_cache=True,
+            **fs_kwargs,
+        )
+        serve_s3_keys(fs._sync_fs, {"dir/0", "dir/1"})
+        windows = []
+
+        def get_file(rpath, lpath, **get_kwargs):
+            windows.append(get_kwargs.get("max_workers"))
+
+        fs._sync_fs.get_file = get_file
+        get = fs._get(
+            ["s3://bucket/dir/0", "s3://bucket/dir/1"],
+            [str(tmp_path / "0"), str(tmp_path / "1")],
+            **kwargs,
+        )
+        if expected is ValueError:
+            with pytest.raises(ValueError, match="batch_size"):
+                await get
+        else:
+            await get
+        assert windows == ([] if expected is ValueError else [expected] * 2)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("rpath", ["s3://bucket/key", ["s3://bucket/key"]])
     async def test_get_relative_destination_list(self, tmp_path, monkeypatch, rpath):
         # GH-1323: relative local paths in a list are made absolute, as
@@ -2687,6 +2733,171 @@ class TestAioS3FileSystem:
         await fs._put(f"{tmp_path}/src/", "s3://bucket/dst/", recursive=True)
         assert store == {"dst/a", "dst/sub/b"}
         assert [name for name, _ in requests] == ["put_object", "put_object"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("small_files", "kwargs", "expected"),
+        [
+            # A single upload keeps the max_workers of the filesystem.
+            (0, {}, 4),
+            # Two uploads at once get two parts each.
+            (1, {}, 2),
+            (1, {"batch_size": 1}, 4),
+            # A smaller max_workers of the caller is kept.
+            (1, {"max_workers": 1}, 1),
+        ],
+    )
+    async def test_put_window(self, tmp_path, small_files, kwargs, expected):
+        # GH-1427: as in S3FileSystem.put(), each upload sends max(1,
+        # max_workers // n) parts at once, n being the uploads that run at
+        # once, so that a batch holds about max_workers parts. Each upload
+        # used to send up to max_workers of them.
+        fs = AioS3FileSystem(client=mock_client(), max_workers=4, skip_instance_cache=True)
+        block_size = S3Core.MULTIPART_UPLOAD_MIN_PART_SIZE
+        overlap, state = overlapping_calls(expected)
+
+        def upload_part(**part_kwargs):
+            overlap()
+            return S3MultipartUploadPart(part_kwargs["part_number"], {"ETag": '"e"'})
+
+        core = fs._sync_fs.core
+        core.create_multipart_upload = mock.MagicMock(
+            return_value=S3MultipartUpload({"Bucket": "bucket", "Key": "big", "UploadId": "u"})
+        )
+        core.upload_part = mock.MagicMock(side_effect=upload_part)
+        core.complete_multipart_upload = mock.MagicMock()
+        core.put_object = mock.MagicMock()
+        # One file of four parts, and small files of a single request each.
+        big = tmp_path / "big"
+        big.write_bytes(b"a" * block_size * 4)
+        lpaths = [str(big)]
+        for i in range(small_files):
+            (tmp_path / str(i)).write_bytes(b"a")
+            lpaths.append(str(tmp_path / str(i)))
+
+        await fs._put(
+            lpaths,
+            [f"s3://bucket/{os.path.basename(p)}" for p in lpaths],
+            block_size=block_size,
+            **kwargs,
+        )
+        assert core.upload_part.call_count == 4
+        assert core.put_object.call_count == small_files
+        assert state["peak"] == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("operation", "fs_kwargs", "conf", "count", "kwargs", "expected"),
+        [
+            (operation, {}, {}, *case)
+            for operation in ("copy", "mv", "pipe")
+            for case in (
+                # A single object keeps the max_workers of the filesystem.
+                (1, {}, None),
+                (2, {}, 2),
+                # More objects than max_workers (4) get one request each.
+                (8, {}, 1),
+                # A smaller max_workers of the caller is kept.
+                (2, {"max_workers": 1}, 1),
+            )
+        ]
+        + [
+            (operation, fs_kwargs, {}, 2, kwargs, None)
+            for operation in ("copy", "mv", "pipe")
+            for fs_kwargs, kwargs in (({}, {"batch_size": 1}), ({"batch_size": 1}, {}))
+        ]
+        # fsspec's configured default batch size is counted.
+        + [
+            (operation, {}, {"nofiles_gather_batch_size": 1}, 2, {}, None)
+            for operation in ("copy", "mv", "pipe")
+        ]
+        # Any mapping of values, or other object with items(), whose items
+        # fsspec writes.
+        + [(operation, {}, {}, 2, {}, 2) for operation in ("pipe-mapping", "pipe-items")],
+    )
+    async def test_batch_window(
+        self, monkeypatch, operation, fs_kwargs, conf, count, kwargs, expected
+    ):
+        # GH-1427: as in S3FileSystem, each multipart copy or write of a batch
+        # gets max(1, max_workers // n) parallel requests, n being the objects
+        # that run at once. Each one used to get max_workers of them. Only the
+        # given fsspec configuration applies, also to the filesystem.
+        monkeypatch.setattr(fsspec_config, "conf", dict(conf))
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=4,
+            skip_instance_cache=True,
+            **fs_kwargs,
+        )
+        serve_s3_keys(fs._sync_fs, {f"src/{i}" for i in range(count)})
+        windows = []
+
+        async def copy_file(path1, path2, **copy_kwargs):
+            windows.append(copy_kwargs.get("max_workers"))
+            return True
+
+        def pipe_file(path, value, **pipe_kwargs):
+            windows.append(pipe_kwargs.get("max_workers"))
+
+        fs._copy_file = copy_file
+        fs._sync_fs.pipe_file = pipe_file
+        targets = [f"s3://bucket/dst/{i}" for i in range(count)]
+        if operation == "pipe":
+            await fs._pipe(dict.fromkeys(targets, b"x"), **kwargs)
+        elif operation == "pipe-mapping":
+            await fs._pipe(collections.UserDict(dict.fromkeys(targets, b"x")), **kwargs)
+        elif operation == "pipe-items":
+            values = dict.fromkeys(targets, b"x")
+            await fs._pipe(SimpleNamespace(items=values.items), **kwargs)
+        else:
+            sources = [f"s3://bucket/src/{i}" for i in range(count)]
+            await getattr(fs, f"_{operation}")(sources, targets, **kwargs)
+        assert windows == [expected] * count
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["path-like", "open-file"])
+    async def test_pipe_single_path_objects(self, path):
+        # GH-1427: a path-like object or an fsspec OpenFile names a single
+        # destination, as fsspec's stringify_path() reads it, while an object
+        # with items() holds several values.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = serve_s3_keys(fs._sync_fs, set())
+        target = PurePosixPath("bucket/key") if path == "path-like" else OpenFile(fs, "bucket/key")
+
+        await fs._pipe(target, b"x")
+        assert store == {"key"}
+
+    @pytest.mark.asyncio
+    async def test_put_checks_directories_in_thread(self, tmp_path):
+        # GH-1427: the local directories are left out in the thread that
+        # pairs the paths. _put() used to check each local path with
+        # os.path.isdir() on the event loop.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, _ = serve_s3_keys(fs._sync_fs, set())
+        (tmp_path / "src" / "sub").mkdir(parents=True)
+        (tmp_path / "src" / "a").write_bytes(b"a")
+        isdir = os.path.isdir
+        on_loop = []
+
+        def checked_isdir(path):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                on_loop.append(path)
+            return isdir(path)
+
+        with mock.patch("os.path.isdir", checked_isdir):
+            await fs._put(f"{tmp_path}/src/", "s3://bucket/dst/", recursive=True)
+        assert store == {"dst/a"}
+        assert on_loop == []
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -3148,8 +3359,10 @@ class TestAioS3FileSystem:
     @pytest.mark.asyncio
     async def test_mv(self):
         # GH-1008: the files are copied in parallel, the directories are
-        # skipped, and only the copied sources are deleted.
-        fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
+        # skipped, and only the copied sources are deleted. GH-1427: each
+        # copy gets max_workers // 3 parallel requests, the directory
+        # included, as in S3FileSystem.mv().
+        fs = AioS3FileSystem(client=mock_client(), max_workers=6, skip_instance_cache=True)
         started = asyncio.Event()
         copies = []
 
@@ -3172,14 +3385,42 @@ class TestAioS3FileSystem:
             RequestPayer="requester",
         )
         assert sorted(copies) == [
-            ("s3://bucket/a", "s3://bucket/x/a", {"RequestPayer": "requester"}),
-            ("s3://bucket/c", "s3://bucket/x/c", {"RequestPayer": "requester"}),
+            ("s3://bucket/a", "s3://bucket/x/a", {"RequestPayer": "requester", "max_workers": 2}),
+            ("s3://bucket/c", "s3://bucket/x/c", {"RequestPayer": "requester", "max_workers": 2}),
         ]
         fs._sync_fs._call.assert_called_once_with(
             fs._sync_fs._client.delete_objects,
             Bucket="bucket",
             Delete={"Objects": [{"Key": "a"}, {"Key": "c"}], "Quiet": True},
         )
+
+    @pytest.mark.asyncio
+    async def test_mv_batch_size(self):
+        # GH-1427: _mv() runs batch_size copies at a time, as
+        # S3FileSystem.mv() does. It used to run all of them at once and send
+        # batch_size to CopyObject.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, requests = serve_s3_keys(fs._sync_fs, {"src/0", "src/1", "src/2"})
+        # Waits briefly for a second overlapping copy, which only a batch of
+        # more than one copy runs.
+        overlap, state = overlapping_calls(1, timeout=0.5)
+        copy_object = fs._sync_fs.core.copy_object
+
+        def overlapping_copy_object(*args, **kwargs):
+            overlap()
+            return copy_object(*args, **kwargs)
+
+        fs._sync_fs.core.copy_object = overlapping_copy_object
+        await fs._mv(
+            [f"s3://bucket/src/{i}" for i in range(3)],
+            [f"s3://bucket/dst/{i}" for i in range(3)],
+            batch_size=1,
+        )
+        assert state["peak"] == 1
+        assert store == {"dst/0", "dst/1", "dst/2"}
+        assert all("batch_size" not in r for name, r in requests if name == "copy_object")
 
     @pytest.mark.asyncio
     async def test_mv_copy_failure(self):
@@ -3201,6 +3442,32 @@ class TestAioS3FileSystem:
         with pytest.raises(OSError, match="copy failed"):
             await fs._mv(["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/x/a", "s3://bucket/x/b"])
         assert finished == ["s3://bucket/b"]
+        fs._sync_fs._call.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mv_copy_failure_in_batches(self):
+        # GH-1427: with batch_size, a failed copy of one batch does not keep
+        # the later batches from running; the failure is raised once they
+        # have finished, and nothing is deleted.
+        fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
+        finished = []
+
+        async def copy_file(path1, path2, **kwargs):
+            if path1 == "s3://bucket/a":
+                raise OSError("copy failed")
+            finished.append(path1)
+            return True
+
+        fs._copy_file = copy_file
+        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
+
+        with pytest.raises(OSError, match="copy failed"):
+            await fs._mv(
+                ["s3://bucket/a", "s3://bucket/b", "s3://bucket/c"],
+                ["s3://bucket/x/a", "s3://bucket/x/b", "s3://bucket/x/c"],
+                batch_size=1,
+            )
+        assert finished == ["s3://bucket/b", "s3://bucket/c"]
         fs._sync_fs._call.assert_not_called()
 
     @pytest.mark.parametrize("size", [10, 5 * 2**30 + 1])
