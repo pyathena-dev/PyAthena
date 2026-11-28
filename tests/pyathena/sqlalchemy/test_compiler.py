@@ -758,8 +758,8 @@ class TestAthenaDDLCompiler:
         [
             ("logical", {"logical": "tenant"}, "tenant.events", "tenant"),
             (None, {None: "tenant"}, "tenant.events", "tenant"),
-            # The translated name keeps the DDL quoting rules.
-            ("logical", {"logical": "select"}, "`select`.events", "select"),
+            # The translated name keeps the DDL quoting rules and reserved words.
+            ("logical", {"logical": "external"}, "`external`.events", "external"),
             ("other", {"logical": "tenant"}, "other.events", "other"),
         ],
     )
@@ -776,6 +776,15 @@ class TestAthenaDDLCompiler:
         assert f"CREATE EXTERNAL TABLE {expected_table} (" in create
         assert f"LOCATION 's3://bucket/path/{expected_location}/events/'" in create
         assert drop.strip() == f"DROP TABLE {expected_table}"
+
+    def test_create_table_location_is_escaped(self):
+        table = Table(
+            "events",
+            MetaData(),
+            Column("id", Integer),
+            awsathena_location="s3://bucket/o'brien\\x%20y/",
+        )
+        assert r"LOCATION 's3://bucket/o\'brien\\x%20y/'" in executed_sql(CreateTable(table))
 
     def test_create_table_s3tables_catalog_omits_location(self):
         table = Table(

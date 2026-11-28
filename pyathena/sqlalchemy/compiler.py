@@ -1236,15 +1236,26 @@ class AthenaDDLCompiler(DDLCompiler):
             compile_kwargs=compile_kwargs or util.immutabledict(),
         )
 
-    def _escape_comment(self, value: str) -> str:
+    def _escape_string_literal(self, value: str) -> str:
+        """Return ``value`` as a single-quoted DDL string literal.
+
+        Backslashes and single quotes are escaped with a backslash, and percent
+        signs are doubled for the ``pyformat`` parameter style, because the
+        cursor formats DDL statements with their (empty) parameters.
+
+        Args:
+            value: The string to quote.
+
+        Returns:
+            The quoted string literal.
+        """
         value = value.replace("\\", "\\\\").replace("'", r"\'")
-        # DDL statements raise a KeyError if the placeholders aren't escaped
         if self.dialect.identifier_preparer._double_percents:
             value = value.replace("%", "%%")
         return f"'{value}'"
 
     def _get_comment_specification(self, comment: str) -> str:
-        return f"COMMENT {self._escape_comment(comment)}"
+        return f"COMMENT {self._escape_string_literal(comment)}"
 
     def _get_bucket_count(
         self, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
@@ -1498,7 +1509,7 @@ class AthenaDDLCompiler(DDLCompiler):
         location = self._get_table_location(table, dialect_opts, connect_opts)
         text = []
         if location:
-            text.append(f"LOCATION '{location}'")
+            text.append(f"LOCATION {self._escape_string_literal(location)}")
         else:
             if connect_opts:
                 raise exc.CompileError(
