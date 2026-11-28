@@ -616,8 +616,8 @@ with `maxdepth`, a name that ends in a slash, such as a folder marker that a glo
 names a local directory and is still left out.
 Only a
 `?versionId=` (or `?versionID=`, `?versionid=`, `?version_id=`) query at the end of a
-path is a version; any other `?` is part of the key. Slashes at the end of the query
-belong to the version ID, which may end in slashes: `s3://YOUR_S3_BUCKET/key?versionId=v1/`
+path is a version; any other `?` is part of the key. A version ID may end in
+slashes, which a path string keeps after it: `s3://YOUR_S3_BUCKET/key?versionId=v1/`
 is version `v1/` of `key`, also when a file of that version is reopened (e.g., when it is
 unpickled). In a `glob()` pattern, where `?` matches any character, a trailing
 slash after such a query still selects directories. A path with a version is not a
