@@ -254,6 +254,20 @@ class TestS3Object:
         expected["name"] = name
         assert list(S3Object.from_version(version).items()) == list(expected.items())
 
+    @pytest.mark.parametrize(
+        ("key", "expected"),
+        [
+            (None, ""),
+            # The directory "bucket/" of the key "/x" lists the prefix "/".
+            ("", "/"),
+            # The directory of the common prefix "a//" lists "a//".
+            ("a/", "a//"),
+            ("a", "a/"),
+        ],
+    )
+    def test_listing_prefix(self, key, expected):
+        assert S3Object.directory("bucket", key).listing_prefix() == expected
+
 
 class TestS3Metadata:
     def test_init(self):
