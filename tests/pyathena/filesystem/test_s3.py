@@ -7437,7 +7437,7 @@ class TestS3FileSystem:
         assert not fs.exists(path)
 
     # Smaller than the block size (5 MiB), so a single request writes the
-    # object; a larger size takes the same path.
+    # object, as for any other size below the block size.
     @pytest.mark.parametrize(("base", "exp"), [(1, 2**10)])
     def test_append(self, fs, base, exp):
         # TODO: Check the metadata is kept.
@@ -8004,7 +8004,7 @@ class TestS3FileSystem:
         assert fs.cat_file(path, start=-5) == data[-5:]
 
     # Smaller than the block size (5 MiB), so a single request writes the
-    # object; a larger size takes the same path.
+    # object, as for any other size below the block size.
     @pytest.mark.parametrize(("base", "exp"), [(1, 2**10)])
     def test_put(self, fs, base, exp):
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -8022,7 +8022,7 @@ class TestS3FileSystem:
             assert fs.cat(rpath) == tmp.read()
 
     # Smaller than the block size (5 MiB), so a single request writes the
-    # object; a larger size takes the same path.
+    # object, as for any other size below the block size.
     @pytest.mark.parametrize(("base", "exp"), [(1, 2**10)])
     def test_put_with_callback(self, fs, base, exp):
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -8043,7 +8043,7 @@ class TestS3FileSystem:
             assert callback.value == callback.size
 
     # Smaller than the block size (5 MiB), so a single request writes the
-    # object; a larger size takes the same path.
+    # object, as for any other size below the block size.
     @pytest.mark.parametrize(("base", "exp"), [(1, 2**10)])
     def test_upload_cp_file(self, fs, base, exp):
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
