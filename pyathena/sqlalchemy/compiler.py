@@ -1585,6 +1585,8 @@ class AthenaDDLCompiler(DDLCompiler):
         Without it, the location is ``<base>/<schema>/<table>/``, where the base
         is the ``location`` connection option or the S3 staging directory, and
         the schema is the table's schema after the ``schema_translate_map``.
+        A map value of ``None`` gives the dialect's default schema, which also
+        qualifies the table name.
         For a table left without a schema, it is the database of the
         statement's cursor, taken from ``cursor_kwargs`` over the connection.
         Without a database, the cursor runs in Athena's ``default`` database.
@@ -1609,7 +1611,8 @@ class AthenaDDLCompiler(DDLCompiler):
             base_location += "/" if not base_location.endswith("/") else ""
             schema = table.schema
             if self.schema_translate_map and schema in self.schema_translate_map:
-                schema = self.schema_translate_map[schema]
+                # SQLAlchemy renders a None target as the default schema name.
+                schema = self.schema_translate_map[schema] or self.dialect.default_schema_name
             schema = (
                 schema
                 or self._get_cursor_option(

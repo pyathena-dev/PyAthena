@@ -1298,7 +1298,9 @@ def decorated(impl):
     return type("Decorated", (types.TypeDecorator,), {"impl": impl, "cache_ok": True})()
 
 
-def recording_engine(rowcounts=None, query="", config=None, rows=None, **kwargs):
+def recording_engine(
+    rowcounts=None, query="", config=None, rows=None, cursor_kwargs=None, **kwargs
+):
     """Create an engine whose DB API connection records statements offline.
 
     Args:
@@ -1309,6 +1311,8 @@ def recording_engine(rowcounts=None, query="", config=None, rows=None, **kwargs)
             instead of calling ``create_engine`` directly.
         rows: Result rows that each ``execute()`` returns, as tuples of the
             values Athena returns. By default, a statement returns no rows.
+        cursor_kwargs: The connection's ``cursor_kwargs``. The connection's
+            ``schema_name`` is ``default``, the URL database.
         **kwargs: Additional keyword arguments for ``create_engine``.
 
     Returns:
@@ -1344,7 +1348,12 @@ def recording_engine(rowcounts=None, query="", config=None, rows=None, **kwargs)
             pass
 
     connection = SimpleNamespace(
-        cursor=RecordingCursor, close=lambda: None, commit=lambda: None, rollback=lambda: None
+        cursor=RecordingCursor,
+        close=lambda: None,
+        commit=lambda: None,
+        rollback=lambda: None,
+        schema_name="default",
+        cursor_kwargs=cursor_kwargs or {},
     )
     url = f"awsathena+rest://athena.us-west-2.amazonaws.com/default?{query}"
     if config is not None:

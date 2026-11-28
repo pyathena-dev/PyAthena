@@ -9,6 +9,7 @@ import pytest
 import sqlalchemy
 from botocore.stub import Stubber
 from sqlalchemy import select, text, types
+from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.sql.schema import Column, MetaData, Table
 from sqlalchemy.util.concurrency import greenlet_spawn
 
@@ -103,6 +104,19 @@ class TestAthenaAioDialect:
             conn.close()
         assert raised.value.__cause__.response["Error"]["Code"] == "InvalidRequestException"
         assert queries == ["SELECT 1"]
+
+    async def test_default_schema_name_is_cursor_database(self):
+        # The async adapter exposes the cursor options that decide the default schema.
+        engine = create_async_engine(
+            "awsathena+aiorest://access_key:secret_key@athena.us-west-2.amazonaws.com/"
+            "shared?s3_staging_dir=s3%3A%2F%2Fbucket%2Fpath%2F",
+            connect_args={"cursor_kwargs": {"schema_name": "tenant"}},
+        )
+        try:
+            async with engine.connect() as conn:
+                assert conn.dialect.default_schema_name == "tenant"
+        finally:
+            await engine.dispose()
 
 
 class TestAsyncSQLAlchemyAthena:

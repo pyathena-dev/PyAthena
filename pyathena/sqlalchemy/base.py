@@ -394,6 +394,13 @@ class AthenaDialect(DefaultDialect):
         """
         return schema or cls._cursor_option(raw_connection, "schema_name") or "default"
 
+    @override
+    def _get_default_schema_name(self, connection: Connection) -> str:
+        # SQLAlchemy calls this once per engine, on its first connection. The
+        # default schema is the database that unqualified statements run in and
+        # reflection without a schema reads; no query is needed to find it.
+        return self._reflection_schema(self._raw_connection(connection), None)
+
     @staticmethod
     def _fold_table_name(catalog: str | None, name: str) -> str:
         """Glue lowercases table names, so ``AwsDataCatalog`` lookups fold case."""
