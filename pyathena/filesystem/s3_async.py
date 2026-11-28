@@ -60,7 +60,6 @@ if TYPE_CHECKING:
     from botocore.client import BaseClient
     from fsspec.dircache import DirCache
 
-    from pyathena.filesystem.s3 import _Connection
     from pyathena.filesystem.s3_retry import RetryPolicy
 
 _logger = logging.getLogger(__name__)
@@ -313,7 +312,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
     def __init__(
         self,
-        connection: _Connection | None = None,
+        *,
         default_block_size: int | None = None,
         default_cache_type: str | None = None,
         max_workers: int | None = None,
@@ -324,18 +323,17 @@ class AioS3FileSystem(AsyncFileSystem):
         asynchronous: bool = False,
         loop: Any | None = None,
         batch_size: int | None = None,
-        *,
         client: BaseClient | None = None,
         retry_config: RetryPolicy | None = None,
         **kwargs,
     ) -> None:
         """Initialize the filesystem and its internal ``S3FileSystem``.
 
+        All arguments are keyword arguments. :func:`pyathena.fs.s3_filesystem`
+        with ``AioS3FileSystem`` creates one with the S3 client and retry
+        policy of a PyAthena connection.
+
         Args:
-            connection: Deprecated; use ``client`` and ``retry_config``, or
-                :func:`pyathena.fs.s3_filesystem` with
-                ``AioS3FileSystem``. A PyAthena connection whose S3 client and
-                retry policy the filesystem uses, with a ``DeprecationWarning``.
             default_block_size: Passed to the internal ``S3FileSystem``.
             default_cache_type: Passed to the internal ``S3FileSystem``.
             max_workers: The number of threads that run the blocking calls of
@@ -363,19 +361,16 @@ class AioS3FileSystem(AsyncFileSystem):
                 internal ``S3FileSystem``.
 
         Raises:
-            TypeError: If ``connection`` is given with ``client`` or
-                ``retry_config``, or the internal ``S3FileSystem`` rejects
-                the arguments.
+            TypeError: If ``connection`` is given, or the internal
+                ``S3FileSystem`` rejects the arguments.
         """
+        # Checked here so that the error names this class and its fsspec configuration.
+        S3FileSystem._check_injected_client(type(self), client, kwargs)
         super().__init__(
             asynchronous=asynchronous,
             loop=loop,
             batch_size=batch_size,
             **kwargs,
-        )
-        # Checked before the client of the connection is used.
-        client, retry_config = S3FileSystem._resolve_injected_client(
-            type(self), connection, client, retry_config, kwargs
         )
         self._sync_fs = S3FileSystem(
             client=client,
@@ -406,8 +401,8 @@ class AioS3FileSystem(AsyncFileSystem):
             filesystem again from its arguments.
 
         Raises:
-            TypeError: If the filesystem was built with ``client`` or
-                ``connection``, whose boto3 client cannot be pickled.
+            TypeError: If the filesystem was built with ``client``, whose
+                boto3 client cannot be pickled.
         """
         if self._sync_fs._client_injected:
             raise TypeError(_UNPICKLABLE_CLIENT_MESSAGE.format(cls=type(self).__name__))

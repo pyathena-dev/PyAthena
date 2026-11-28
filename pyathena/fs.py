@@ -52,8 +52,9 @@ def s3_filesystem(
 
     Args:
         connection: The PyAthena connection.
-        filesystem_class: ``S3FileSystem``, ``AioS3FileSystem``, or a subclass of
-            either.
+        filesystem_class: ``S3FileSystem``, ``AioS3FileSystem``, or another
+            fsspec filesystem class that takes the ``client`` and
+            ``retry_config`` arguments.
         **kwargs: The other arguments of the filesystem, except the arguments
             from which it builds a client.
 

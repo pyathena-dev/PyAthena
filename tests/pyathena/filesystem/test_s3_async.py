@@ -3924,44 +3924,29 @@ class TestAioS3FileSystem:
     def test_s3_filesystem(self):
         connection = mock.MagicMock()
         connection.s3_client = mock_client()
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", DeprecationWarning)
-            fs = s3_filesystem(connection, AioS3FileSystem, skip_instance_cache=True)
+        fs = s3_filesystem(connection, AioS3FileSystem, skip_instance_cache=True)
         assert type(fs) is AioS3FileSystem
         assert fs.core.client is connection.s3_client
         assert fs.core.retry_config is connection.retry_config
 
-    def test_connection_deprecated(self):
-        # GH-1363: one DeprecationWarning, which points at the caller.
-        connection = mock.MagicMock()
-        connection.s3_client = mock_client()
-        with pytest.warns(DeprecationWarning, match="s3_filesystem") as record:
-            fs = AioS3FileSystem(connection=connection, skip_instance_cache=True)
-        assert len(record) == 1
-        assert record[0].filename == __file__
-        assert fs.core.client is connection.s3_client
-        assert fs.core.retry_config is connection.retry_config
-
-    @pytest.mark.parametrize(
-        ("kwargs", "match"),
-        [
-            ({"client": mock_client()}, "connection cannot be combined"),
-            ({"retry_config": RetryConfig()}, "connection cannot be combined"),
-            ({"profile": "dummy"}, "profile cannot be combined"),
-        ],
-        ids=["client", "retry_config", "profile"],
-    )
-    def test_connection_conflicts_rejected(self, kwargs, match):
+    def test_connection_rejected(self):
+        # GH-1386: the error names the async filesystem, and the client of the
+        # connection is not used.
         connection = mock.MagicMock()
         s3_client = mock.PropertyMock(return_value=mock_client())
         type(connection).s3_client = s3_client
-        with (
-            pytest.warns(DeprecationWarning, match="connection argument"),
-            pytest.raises(TypeError, match=match),
-        ):
-            AioS3FileSystem(connection=connection, skip_instance_cache=True, **kwargs)
-        # Checked before the client of the connection is used.
+        with pytest.raises(TypeError, match="AioS3FileSystem no longer takes the connection"):
+            AioS3FileSystem(connection=connection, skip_instance_cache=True)
         s3_client.assert_not_called()
+
+    def test_client_building_args_rejected(self):
+        with pytest.raises(TypeError, match="profile cannot be combined"):
+            AioS3FileSystem(client=mock_client(), profile="dummy", skip_instance_cache=True)
+
+    def test_positional_args_rejected(self):
+        # GH-1386: every argument is a keyword argument.
+        with pytest.raises(TypeError, match="positional argument"):
+            AioS3FileSystem(mock.MagicMock(), client=mock_client(), skip_instance_cache=True)
 
     @pytest.mark.parametrize(("creation", "deletion"), [(True, False), (False, True)])
     def test_attributes_of_the_internal_filesystem(self, creation, deletion):

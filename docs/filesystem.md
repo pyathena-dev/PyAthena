@@ -84,11 +84,10 @@ the `FSSPEC_S3_ENDPOINT_URL` environment variable, are ignored. `requester_pays`
 and the arguments of fsspec can be combined with it. `s3_filesystem()` takes the other
 arguments of the filesystem, and `AioS3FileSystem` as its second argument.
 
-The `connection` argument of `S3FileSystem` and `AioS3FileSystem` is deprecated and
-emits a `DeprecationWarning`; it will be removed in the next major version. It is
-subject to the same restrictions as `client`. `pyathena.filesystem.s3_filesystem()` is a
-deprecated name of `pyathena.fs.s3_filesystem()` and emits a `DeprecationWarning`; it
-will be removed in the next major version.
+The arguments of `S3FileSystem` and `AioS3FileSystem` are keyword arguments. A
+`connection` argument raises `TypeError`; create the filesystem of a connection with
+`pyathena.fs.s3_filesystem(connection)`, or pass `client=connection.s3_client` and
+`retry_config=connection.retry_config`.
 
 The S3 client computes checksums of uploads and validates those of downloads by
 botocore's `request_checksum_calculation` and `response_checksum_validation` options,
@@ -215,7 +214,7 @@ are idle, and the filesystem stays usable.
 
 A filesystem created with s3fs-compatible arguments can be pickled, as for Dask, Ray, or
 `multiprocessing` workers: the unpickled filesystem builds its own client from the same
-arguments. A filesystem created with `client`, `connection`, or `s3_filesystem()`, and
+arguments. A filesystem created with `client` or `s3_filesystem()`, and
 the files that it opens for reading, raise `TypeError` when they are pickled, as a boto3
 client cannot be pickled; as in fsspec, a file opened for writing cannot be pickled. To use a filesystem in such workers, create it with s3fs-compatible
 arguments, such as `profile` or `region_name`, or create a filesystem in each worker.
