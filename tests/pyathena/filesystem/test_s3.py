@@ -1968,10 +1968,11 @@ class TestS3FileSystem:
         fs.invalidate_cache = mock.MagicMock(wraps=fs.invalidate_cache)
         key = S3Path("bucket", "dir/key")
         version = S3Path("bucket", "dir/key", "v1")
-        # No lookup of the bucket without parameters, with which mkdir() would
-        # find the bucket in the cache.
         bucket_entries = [
             ("buckets",),
+            # A lookup of the bucket without parameters would answer the
+            # exists() of mkdir(), so only rmdir() starts with one.
+            *([("lookup", S3Path("bucket"))] if method == "rmdir" else []),
             ("lookups", S3Path("bucket")),
             ("listing", "bucket", "/"),
             ("lookup", key),
