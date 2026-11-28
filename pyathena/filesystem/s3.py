@@ -2443,7 +2443,8 @@ class S3FileSystem(AbstractFileSystem):
         With several calls at once, each object gets ``max_workers //
         concurrency`` parallel requests, at least one, so that a batch keeps
         about ``max_workers`` requests in the request pool. A ``max_workers``
-        of the caller is capped at that; None or 0 takes it.
+        of the caller is capped at that; None or 0 takes it, also for a
+        single call, which then gets the ``max_workers`` of the filesystem.
 
         Args:
             concurrency: The number of calls that run at once.
@@ -2452,10 +2453,12 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             The arguments of each call.
         """
+        given = kwargs.get("max_workers")
         if concurrency <= 1:
+            if "max_workers" in kwargs and not given:
+                return {k: v for k, v in kwargs.items() if k != "max_workers"}
             return kwargs
         window = max(1, self.max_workers // concurrency)
-        given = kwargs.get("max_workers")
         return {**kwargs, "max_workers": min(given, window) if given else window}
 
     def _run_batch(
@@ -3651,8 +3654,10 @@ class S3FileSystem(AbstractFileSystem):
             mode: "overwrite" or "create", as in :meth:`pipe_file`.
             open_file: Opens the file, with the arguments of ``open()``,
                 and then takes the write whatever its size. None writes
-                with a single PutObject request when the data fits in one,
-                and with ``open()`` otherwise.
+                with a single PutObject request when the data, compressed
+                if a compression is given, takes no more than the block
+                size and ``S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE``, and with
+                ``open()`` otherwise.
             **kwargs: As in :meth:`pipe_file`.
 
         Raises:

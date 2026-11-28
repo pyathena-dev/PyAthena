@@ -17,7 +17,7 @@ import logging
 import os
 import threading
 import warnings
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from concurrent.futures import CancelledError, Future, wait
 from io import BytesIO
 from typing import IO, TYPE_CHECKING, Any, ClassVar, cast
@@ -25,6 +25,7 @@ from typing import IO, TYPE_CHECKING, Any, ClassVar, cast
 from fsspec.asyn import (
     AbstractAsyncStreamedFile,
     AsyncFileSystem,
+    _get_batch_size,
     _run_coros_in_chunks,
     is_exception,
     sync,
@@ -265,7 +266,7 @@ class AioS3FileSystem(AsyncFileSystem):
     coroutines run the blocking boto3 calls in an ``S3ThreadPool`` with
     ``max_workers`` threads that the filesystem owns, instead of the default
     executor of the event loop, and run parallel per-object calls, such as
-    the copies of ``_mv()``, with ``asyncio.gather``. The single requests
+    the copies of ``_mv()``, ``batch_size`` at a time as tasks. The single requests
     that these calls run in parallel, such as the parts of a file or a copy,
     and the DeleteObjects batches of ``_rm()``, run in the request pool of
     the wrapped ``S3FileSystem``, which its files share, through
@@ -701,7 +702,9 @@ class AioS3FileSystem(AsyncFileSystem):
             maxdepth=maxdepth,
             source_params=source_params,
         )
-        batch_size, copy_kwargs = self._transfer_kwargs(len(pairs), batch_size, kwargs)
+        # As fsspec's _copy() resolves the batch size.
+        batch_size = batch_size or self.batch_size
+        copy_kwargs = self._transfer_kwargs(len(pairs), batch_size, kwargs, nofiles=True)
 
         async def copy_pair(pair: tuple[str | S3Path, str | S3Path]) -> bool:
             """Copy a pair of the move as a task of the batch.
@@ -812,7 +815,9 @@ class AioS3FileSystem(AsyncFileSystem):
         )
         if not pairs:
             return
-        batch_size, copy_kwargs = self._transfer_kwargs(len(pairs), batch_size, kwargs)
+        # As fsspec's _copy() resolves the batch size.
+        batch_size = batch_size or self.batch_size
+        copy_kwargs = self._transfer_kwargs(len(pairs), batch_size, kwargs, nofiles=True)
         await _S3BatchTasks().run(
             super()._copy(
                 [p1 for p1, _ in pairs],
@@ -834,8 +839,8 @@ class AioS3FileSystem(AsyncFileSystem):
         as in :meth:`_copy`. As in :meth:`S3FileSystem.get`, each download
         gets ``max(1, max_workers // n)`` parallel range reads, or the
         caller's smaller ``max_workers``, where ``n`` is the number of paired
-        sources, directories included, or ``batch_size`` when it is positive
-        and smaller. With ``outfile``, the files are written to it one after
+        sources, directories included, or the batch size when it is smaller,
+        fsspec's default when none is given. With ``outfile``, the files are written to it one after
         another, in order, and ``n`` is 1.
 
         Args:
@@ -900,8 +905,8 @@ class AioS3FileSystem(AsyncFileSystem):
         directories, and creating one checks or creates the bucket. As in
         :meth:`S3FileSystem.put`, each upload sends ``max(1, max_workers //
         n)`` parts at once, or the caller's smaller ``max_workers``, where
-        ``n`` is the number of local files, or ``batch_size`` when it is
-        positive and smaller.
+        ``n`` is the number of local files, or the batch size when it is
+        smaller, fsspec's default when none is given.
 
         Args:
             lpath: Local source path, glob pattern, or list of them, as
@@ -929,41 +934,53 @@ class AioS3FileSystem(AsyncFileSystem):
             self._sync_fs._put_pairs, lpath, rpath, recursive=recursive, maxdepth=maxdepth, **kwargs
         )
         return await _S3BatchTasks().run(
-            self._transfer_pairs(self._put_file, files, callback, batch_size=batch_size, **kwargs)
+            # As fsspec's _put() resolves the batch size.
+            self._transfer_pairs(
+                self._put_file, files, callback, batch_size=batch_size or self.batch_size, **kwargs
+            )
         )
 
     def _transfer_kwargs(
-        self, count: int, batch_size: int | None, kwargs: dict[str, Any]
-    ) -> tuple[int | None, dict[str, Any]]:
-        """Return the batch size of a batch and the arguments of its per-object calls.
-
-        The batch size is resolved as fsspec's batch operations resolve
-        it: ``batch_size``, or that of the filesystem when it is None or 0.
+        self,
+        count: int,
+        batch_size: int | None,
+        kwargs: dict[str, Any],
+        nofiles: bool = False,
+    ) -> dict[str, Any]:
+        """Return the arguments of the per-object calls of a batch, with their share of requests.
 
         As in the batch operations of ``S3FileSystem``, each call gets
         ``max(1, max_workers // n)`` parallel requests, or the caller's
-        smaller ``max_workers``, where ``n`` is the number of calls, or
-        ``batch_size`` when it is positive and smaller (see
-        :meth:`S3FileSystem._batch_kwargs`). fsspec's default batch size,
-        when none is given, is not counted: at most ``max_workers`` calls
-        run at once in the threads of the filesystem, and more than
-        ``max_workers`` get one request at a time each anyway.
+        smaller ``max_workers`` (see :meth:`S3FileSystem._batch_kwargs`).
+        ``n`` is the number of calls that fsspec's ``_run_coros_in_chunks()``
+        runs at once: the number of calls, or the batch size when it is
+        positive and smaller, fsspec's default batch size when it is None.
 
         Args:
             count: The number of calls.
-            batch_size: The ``batch_size`` that the caller gave the
-                operation.
+            batch_size: The batch size that the operation passes to
+                ``_run_coros_in_chunks()``.
             kwargs: The arguments that the caller gave the operation.
+            nofiles: The ``nofiles`` argument of ``_run_coros_in_chunks()``,
+                which selects its default batch size.
 
         Returns:
-            The batch size, which fsspec's ``_run_coros_in_chunks()`` takes,
-            and the arguments of each call.
+            The arguments of each call.
+
+        Raises:
+            ValueError: If the batch size is neither positive, -1, nor None,
+                which ``_run_coros_in_chunks()`` rejects, before any call is
+                created.
         """
-        batch_size = batch_size or self.batch_size
-        concurrency = count
-        if batch_size is not None and batch_size > 0:
-            concurrency = min(concurrency, batch_size)
-        return batch_size, self._sync_fs._batch_kwargs(concurrency, kwargs)
+        if batch_size is None:
+            batch_size = _get_batch_size(nofiles=nofiles)
+        if batch_size == -1:
+            concurrency = count
+        elif batch_size > 0:
+            concurrency = min(count, batch_size)
+        else:
+            raise ValueError("batch_size must be positive, -1, or None.")
+        return self._sync_fs._batch_kwargs(concurrency, kwargs)
 
     async def _transfer_pairs(
         self,
@@ -991,9 +1008,9 @@ class AioS3FileSystem(AsyncFileSystem):
         Returns:
             The results of the transfers, as fsspec's ``_put()`` returns them.
         """
-        batch_size, kwargs = self._transfer_kwargs(
-            len(pairs), kwargs.pop("batch_size", None), kwargs
-        )
+        # As fsspec's _get() resolves the batch size.
+        batch_size = kwargs.pop("batch_size", self.batch_size)
+        kwargs = self._transfer_kwargs(len(pairs), batch_size, kwargs)
         callback.set_size(len(pairs))
 
         def run(path1: Any, path2: Any) -> Awaitable[Any]:
@@ -1072,13 +1089,16 @@ class AioS3FileSystem(AsyncFileSystem):
         Raises:
             ValueError: If two paths of a dictionary name the same object.
         """
-        if isinstance(path, dict):
+        if isinstance(path, Mapping):
+            # Any mapping, as fsspec takes its items.
             path = dict(self._sync_fs._pipe_items(path))
             count = len(path)
         else:
             path = stringify_path(path)
             count = 1
-        batch_size, pipe_kwargs = self._transfer_kwargs(count, batch_size, kwargs)
+        # As fsspec's _pipe() resolves the batch size.
+        batch_size = batch_size or self.batch_size
+        pipe_kwargs = self._transfer_kwargs(count, batch_size, kwargs, nofiles=True)
         return await _S3BatchTasks().run(
             super()._pipe(path, value, batch_size=batch_size, **pipe_kwargs)
         )

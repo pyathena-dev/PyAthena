@@ -22,6 +22,7 @@ from unittest import mock
 import boto3
 import pytest
 from botocore.stub import Stubber
+from fsspec import config as fsspec_config
 from fsspec.callbacks import Callback
 
 from pyathena.filesystem.s3 import S3FileSystem
@@ -2654,6 +2655,51 @@ class TestAioS3FileSystem:
         assert windows == [expected] * files
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("fs_kwargs", "conf", "kwargs", "expected"),
+        [
+            # An explicit None takes fsspec's default batch size, as in
+            # fsspec's _get(), not that of the filesystem.
+            ({"batch_size": 1}, {}, {"batch_size": None}, 2),
+            # fsspec's configured default batch size is counted.
+            ({}, {"gather_batch_size": 1}, {}, None),
+            # 0 is rejected, as fsspec rejects it, before any download is
+            # created.
+            ({}, {}, {"batch_size": 0}, ValueError),
+        ],
+    )
+    async def test_get_batch_size(self, tmp_path, fs_kwargs, conf, kwargs, expected):
+        # GH-1427: _get() resolves its batch size as fsspec's _get() does, and
+        # the window of each download counts the batch that fsspec runs.
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            max_workers=4,
+            skip_instance_cache=True,
+            **fs_kwargs,
+        )
+        serve_s3_keys(fs._sync_fs, {"dir/0", "dir/1"})
+        windows = []
+
+        def get_file(rpath, lpath, **get_kwargs):
+            windows.append(get_kwargs.get("max_workers"))
+
+        fs._sync_fs.get_file = get_file
+        get = fs._get(
+            ["s3://bucket/dir/0", "s3://bucket/dir/1"],
+            [str(tmp_path / "0"), str(tmp_path / "1")],
+            **kwargs,
+        )
+        with mock.patch.dict(fsspec_config.conf, conf):
+            if expected is ValueError:
+                with pytest.raises(ValueError, match="batch_size"):
+                    await get
+            else:
+                await get
+        assert windows == ([] if expected is ValueError else [expected] * 2)
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("rpath", ["s3://bucket/key", ["s3://bucket/key"]])
     async def test_get_relative_destination_list(self, tmp_path, monkeypatch, rpath):
         # GH-1323: relative local paths in a list are made absolute, as
@@ -2739,9 +2785,9 @@ class TestAioS3FileSystem:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("operation", "fs_kwargs", "count", "kwargs", "expected"),
+        ("operation", "fs_kwargs", "conf", "count", "kwargs", "expected"),
         [
-            (operation, {}, *case)
+            (operation, {}, {}, *case)
             for operation in ("copy", "mv", "pipe")
             for case in (
                 # A single object keeps the max_workers of the filesystem.
@@ -2754,12 +2800,19 @@ class TestAioS3FileSystem:
             )
         ]
         + [
-            (operation, fs_kwargs, 2, kwargs, None)
+            (operation, fs_kwargs, {}, 2, kwargs, None)
             for operation in ("copy", "mv", "pipe")
             for fs_kwargs, kwargs in (({}, {"batch_size": 1}), ({"batch_size": 1}, {}))
-        ],
+        ]
+        # fsspec's configured default batch size is counted.
+        + [
+            (operation, {}, {"nofiles_gather_batch_size": 1}, 2, {}, None)
+            for operation in ("copy", "mv", "pipe")
+        ]
+        # Any mapping of values, whose items fsspec writes.
+        + [("pipe-mapping", {}, {}, 2, {}, 2)],
     )
-    async def test_batch_window(self, operation, fs_kwargs, count, kwargs, expected):
+    async def test_batch_window(self, operation, fs_kwargs, conf, count, kwargs, expected):
         # GH-1427: as in S3FileSystem, each multipart copy or write of a batch
         # gets max(1, max_workers // n) parallel requests, n being the objects
         # that run at once. Each one used to get max_workers of them.
@@ -2784,11 +2837,14 @@ class TestAioS3FileSystem:
         fs._copy_file = copy_file
         fs._sync_fs.pipe_file = pipe_file
         targets = [f"s3://bucket/dst/{i}" for i in range(count)]
-        if operation == "pipe":
-            await fs._pipe(dict.fromkeys(targets, b"x"), **kwargs)
-        else:
-            sources = [f"s3://bucket/src/{i}" for i in range(count)]
-            await getattr(fs, f"_{operation}")(sources, targets, **kwargs)
+        with mock.patch.dict(fsspec_config.conf, conf):
+            if operation == "pipe":
+                await fs._pipe(dict.fromkeys(targets, b"x"), **kwargs)
+            elif operation == "pipe-mapping":
+                await fs._pipe(collections.UserDict(dict.fromkeys(targets, b"x")), **kwargs)
+            else:
+                sources = [f"s3://bucket/src/{i}" for i in range(count)]
+                await getattr(fs, f"_{operation}")(sources, targets, **kwargs)
         assert windows == [expected] * count
 
     @pytest.mark.asyncio
@@ -3362,6 +3418,32 @@ class TestAioS3FileSystem:
         with pytest.raises(OSError, match="copy failed"):
             await fs._mv(["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/x/a", "s3://bucket/x/b"])
         assert finished == ["s3://bucket/b"]
+        fs._sync_fs._call.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_mv_copy_failure_in_batches(self):
+        # GH-1427: with batch_size, a failed copy of one batch does not keep
+        # the later batches from running; the failure is raised once they
+        # have finished, and nothing is deleted.
+        fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
+        finished = []
+
+        async def copy_file(path1, path2, **kwargs):
+            if path1 == "s3://bucket/a":
+                raise OSError("copy failed")
+            finished.append(path1)
+            return True
+
+        fs._copy_file = copy_file
+        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
+
+        with pytest.raises(OSError, match="copy failed"):
+            await fs._mv(
+                ["s3://bucket/a", "s3://bucket/b", "s3://bucket/c"],
+                ["s3://bucket/x/a", "s3://bucket/x/b", "s3://bucket/x/c"],
+                batch_size=1,
+            )
+        assert finished == ["s3://bucket/b", "s3://bucket/c"]
         fs._sync_fs._call.assert_not_called()
 
     @pytest.mark.parametrize("size", [10, 5 * 2**30 + 1])

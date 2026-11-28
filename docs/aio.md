@@ -281,7 +281,7 @@ its coroutines run the blocking boto3 calls in threads that PyAthena owns, sized
 | | S3FileSystem | AioS3FileSystem |
 |---|---|---|
 | **Blocking calls** | Caller's thread | Thread pool of the filesystem |
-| **Parallelism** | Request pool of the filesystem | `asyncio.gather` on a thread pool; requests in the request pool |
+| **Parallelism** | Request pool of the filesystem | Tasks, `batch_size` at a time, on a thread pool; requests in the request pool |
 | **File handles** | `S3File` with thread pool | `AioS3File` with thread pool; `AioS3StreamedFile` from `open_async()` |
 | **Bulk delete** | Request pool, `batch_size` requests at once | Request pool, `batch_size` requests at once |
 | **Multipart copy** | Request pool, `max_workers` requests per copy | Request pool, `max_workers` requests per copy |
@@ -349,10 +349,11 @@ is raised, also when the shutdown of the event loop cancels them together with t
 coroutine.
 As with `S3FileSystem`, each download of `_get()` gets `max(1, max_workers // n)` range
 reads, and each upload of `_put()`, write of `_pipe()`, and copy of `_copy()` and
-`_mv()` as many parts or part copies. `n` is the number of paired paths, or `batch_size`
-when it is positive and smaller; for `_put()`, it counts the local files only. Pairs of
-`_get()`, `_put()`, `_copy()`, and `_pipe()` whose result would depend on the order of
-the transfers raise `ValueError` before anything is transferred, as with
+`_mv()` as many parts or part copies; a smaller `max_workers` given to the method is
+kept. `n` is the number of paired paths, or the batch size when it is smaller, fsspec's
+default when `batch_size` is not given; for `_put()`, it counts the local files only.
+Pairs of `_get()`, `_put()`, `_copy()`, and `_pipe()` whose result would depend on the
+order of the transfers raise `ValueError` before anything is transferred, as with
 `S3FileSystem` (see {ref}`filesystem`), and `_get()` with `outfile` writes the objects
 into it one after another, in order, with `n` = 1.
 A recursive `_put()` sends no request for the local directories. `_rm()` sends

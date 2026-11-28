@@ -3095,6 +3095,9 @@ class TestS3FileSystem:
             (2, {"max_workers": 1}, 1),
             # Four at once: a larger max_workers is capped at 4 // 4.
             (4, {"max_workers": 3}, 1),
+            # GH-1427: None or 0 takes the window of the filesystem also for
+            # a single object. 0 used to reach the file, which rejects it.
+            (1, {"max_workers": 0}, None),
         ],
     )
     def test_batch_window(self, count, kwargs, expected):
