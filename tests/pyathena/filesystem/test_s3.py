@@ -1902,7 +1902,7 @@ class TestS3FileSystem:
             return {"ContentLength": 2, "ETag": '"e"', "LastModified": last_modified}
 
         def list_objects_v2(request):
-            if not request["Prefix"].startswith("dir"):
+            if not "dir/x".startswith(request["Prefix"]):
                 return {"KeyCount": 0}
             # A listed child has a time of its own, which is not the
             # directory's.
@@ -6422,7 +6422,7 @@ class TestS3FileSystem:
             for record in caplog.records
         )
 
-    def test_copy_object_with_multipart_upload_interrupted_part_wait(self):
+    def test_copy_object_with_multipart_upload_interrupted_part_wait(self, caplog):
         # An interrupt while the cleanup waits for the running part copies
         # stops it, without the abort, while the part still runs, and the
         # upload ID is logged for a later abort.
@@ -6479,6 +6479,7 @@ class TestS3FileSystem:
 
         try:
             with (
+                caplog.at_level(logging.WARNING, logger="pyathena.filesystem.s3"),
                 mock.patch.object(_S3WriteSession, "__init__", init_with_interrupt),
                 pytest.raises(KeyboardInterrupt),
             ):
@@ -6493,6 +6494,7 @@ class TestS3FileSystem:
         finally:
             logger.removeHandler(handler)
             logged.set()
+            shutdown_bounded(fs._request_pool)
 
         assert interrupts == [True]
         assert logged_while_running == [True]
