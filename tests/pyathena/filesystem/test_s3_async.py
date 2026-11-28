@@ -25,6 +25,7 @@ from botocore.stub import Stubber
 from fsspec import config as fsspec_config
 from fsspec.callbacks import Callback
 from fsspec.core import OpenFile
+from fsspec.dircache import DirCache
 
 from pyathena.filesystem.s3 import S3FileSystem
 from pyathena.filesystem.s3_async import (
@@ -281,11 +282,14 @@ class TestAioS3FileSystem:
             )
         )
         fs._copy_object_with_multipart_upload = mock.AsyncMock(side_effect=PermissionError)
-        fs._sync_fs.dircache["bucket/dst"] = []
+        cache = fs._sync_fs._listing_cache
+        cache.put_lookup(
+            S3Path("bucket", "dst"), {}, fs._sync_fs._directory_object("bucket", "dst")
+        )
 
         with pytest.raises(PermissionError):
             await fs._cp_file("s3://bucket/src", "s3://bucket/dst")
-        assert "bucket/dst" not in fs._sync_fs.dircache
+        assert cache.get_lookup(S3Path("bucket", "dst"), {}) is None
 
     @pytest.mark.asyncio
     async def test_copy_object_with_multipart_upload_max_workers(self):
@@ -2093,17 +2097,19 @@ class TestAioS3FileSystem:
             for event in started.values():
                 assert await asyncio.to_thread(event.wait, EVENT_TIMEOUT)
             # Cached while the requests run, e.g. by a concurrent info().
-            fs.dircache["b1/a"] = []
-            fs.dircache["b2/b"] = []
+            cache = fs._sync_fs._listing_cache
+            paths = {bucket: S3Path(bucket, key) for bucket, key in (("b1", "a"), ("b2", "b"))}
+            for path in paths.values():
+                cache.put_lookup(path, {}, fs._sync_fs._directory_object(path.bucket, path.key))
             task.cancel()
             release["b1"].set()
-            await wait_until(lambda: "b1/a" not in fs.dircache)
-            assert "b2/b" in fs.dircache
+            await wait_until(lambda: cache.get_lookup(paths["b1"], {}) is None)
+            assert cache.get_lookup(paths["b2"], {}) is not None
             assert not task.done()
             release["b2"].set()
             with pytest.raises(asyncio.CancelledError):
                 await await_bounded(task)
-            assert "b2/b" not in fs.dircache
+            assert cache.get_lookup(paths["b2"], {}) is None
         finally:
             for event in release.values():
                 event.set()
@@ -3369,9 +3375,18 @@ class TestAioS3FileSystem:
             bucket="bucket",
             key="dir/a",
         )
-        fs.dircache[("bucket/dir", "/")] = [file, sync_fs._directory_object("bucket", "dir/sub")]
-        fs.dircache[("bucket/dir", "")] = [file]
-        fs.dircache[("bucket/dir/sub", "/")] = []
+        cache = sync_fs._listing_cache
+        cache.put_listing("bucket/dir", "/", [file, sync_fs._directory_object("bucket", "dir/sub")])
+        cache.put_listing("bucket/dir", "", [file])
+        cache.put_listing(
+            "bucket/dir/sub",
+            "/",
+            [
+                S3Object(
+                    init={}, type=S3ObjectType.S3_OBJECT_TYPE_FILE, bucket="bucket", key="dir/sub/b"
+                )
+            ],
+        )
         expected = copy.deepcopy(file)
 
         async def entries():
@@ -3405,12 +3420,17 @@ class TestAioS3FileSystem:
         sync_fs = fs._sync_fs
         # A listing of another prefix fails, which the walk yields empty.
         sync_fs._call = sync_fs._core.call = mock.MagicMock(side_effect=FileNotFoundError)
-        fs.dircache[("bucket/dir", "/")] = [sync_fs._directory_object("bucket", "dir/sub")]
-        fs.dircache[("bucket/dir/sub", "/")] = [
-            S3Object(
-                init={}, type=S3ObjectType.S3_OBJECT_TYPE_FILE, bucket="bucket", key="dir/sub/b"
-            )
-        ]
+        cache = sync_fs._listing_cache
+        cache.put_listing("bucket/dir", "/", [sync_fs._directory_object("bucket", "dir/sub")])
+        cache.put_listing(
+            "bucket/dir/sub",
+            "/",
+            [
+                S3Object(
+                    init={}, type=S3ObjectType.S3_OBJECT_TYPE_FILE, bucket="bucket", key="dir/sub/b"
+                )
+            ],
+        )
 
         walked = []
         async for root, dirs, files in fs._walk("bucket/dir", detail=True):
@@ -3737,6 +3757,24 @@ class TestAioS3FileSystem:
         )
         unpickled = pickle.loads(pickle.dumps(fs))
         assert unpickled._sync_fs._client.meta.region_name == "us-east-1"
+
+    @pytest.mark.asyncio
+    async def test_assigned_dircache_caches_the_lookups(self):
+        # GH-1384: the dircache assigned to the filesystem holds the lookups
+        # of both filesystems. It did not reach the internal S3FileSystem.
+        fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
+        sync_fs = fs._sync_fs
+        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": 2})
+        dircache = DirCache()
+        fs.dircache = dircache
+
+        await fs._info("s3://bucket/key")
+        assert fs.dircache is dircache
+        assert dircache
+        # Replacing the dircache of the internal filesystem replaces it too.
+        other = DirCache()
+        sync_fs.dircache = other
+        assert fs.dircache is other
 
     def test_internal_file_system_not_cached(self):
         # GH-978: the internal S3FileSystem was kept in the fsspec instance

@@ -48,9 +48,18 @@ class S3Path:
         's3://bucket/dir/key?versionId=v1'
     """
 
+    # The names of the query that gives a version ID.
+    VERSION_QUERY_NAMES: ClassVar[tuple[str, ...]] = (
+        "versionId",
+        "versionID",
+        "versionid",
+        "version_id",
+    )
     # Version IDs do not contain "?", so only the last query can be one.
     VERSION_QUERY: ClassVar[Pattern[str]] = re.compile(
-        r"\?version(Id|ID|id|_id)=(?P<version_id>[^?]+)\Z"
+        # The group keeps capturing the suffix after "version", as before.
+        rf"\?version({'|'.join(n.removeprefix('version') for n in VERSION_QUERY_NAMES)})"
+        r"=(?P<version_id>[^?]+)\Z"
     )
     # Keys may contain any character, including newlines. A bare "/" is tried
     # before a key so that "bucket/?versionId=..." names the bucket.
