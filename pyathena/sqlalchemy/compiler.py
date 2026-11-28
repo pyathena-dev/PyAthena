@@ -1585,9 +1585,13 @@ class AthenaDDLCompiler(DDLCompiler):
         Without it, the location is ``<base>/<schema>/<table>/``, where the base
         is the ``location`` connection option or the S3 staging directory, and
         the schema is the table's schema after the ``schema_translate_map``.
-        For a table left without a schema, it is the database of the
-        statement's cursor, taken from ``cursor_kwargs`` over the connection.
-        Without a database, the cursor runs in Athena's ``default`` database.
+        For a table left without a schema, or mapped to ``None``, it is the
+        dialect's default schema: the database that the engine's first
+        connection runs unqualified statements in.
+        Before the engine connects, the dialect has no default schema, so a
+        table left without a schema uses the ``schema_name`` of the connection
+        options, taken from ``cursor_kwargs`` over the connection, or Athena's
+        ``default`` database.
 
         Args:
             table: The table being created.
@@ -1610,8 +1614,12 @@ class AthenaDDLCompiler(DDLCompiler):
             schema = table.schema
             if self.schema_translate_map and schema in self.schema_translate_map:
                 schema = self.schema_translate_map[schema]
+            # The location of a table left without a schema, or mapped to None,
+            # names the default schema; SQLAlchemy qualifies a None target with
+            # the same name.
             schema = (
                 schema
+                or self.dialect.default_schema_name
                 or self._get_cursor_option(
                     connect_opts, "schema_name", connect_opts.get("schema_name")
                 )

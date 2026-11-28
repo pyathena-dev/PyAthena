@@ -72,10 +72,15 @@ async with engine.connect() as connection:
     )
 ```
 
+(reflection-and-identifiers)=
+
 ## Reflection and identifiers
 
 The dialect reflects schemas, tables, views, columns, comments, and Athena table options.
 Without an explicit schema, reflection reads the database that statements run in: the cursor's `schema_name` (which `cursor_kwargs` can override), or `default` when that is not set.
+This database is also the dialect's default schema (`Inspector.default_schema_name`), which an engine reads from its first connection.
+Later connections that run in another database do not change it.
+A `schema_translate_map` value of `None` qualifies tables with this name.
 Athena does not support primary key, foreign key, unique, or index constraints.
 Its `CREATE TABLE` syntax does not enforce `nullable=False`, and reflected columns report `nullable=True` and `autoincrement=False`.
 Iceberg strings do not preserve `CHAR` or `VARCHAR` length constraints; `CHAR` is not a supported Iceberg type.
@@ -210,8 +215,9 @@ location
   Description: Specifies the location of the underlying data in the Amazon S3 from which the table is created.
 
   Without this option, the location is `<base>/<schema>/<table>/`.
-  `<base>` is the `location` connection option, or the S3 staging directory of the statement's cursor (`s3_staging_dir`) when that option is not set.
-  `<schema>` is the table's schema after the connection's `schema_translate_map` execution option is applied; for a table left without one, it is the cursor's `schema_name` (which `cursor_kwargs` can override), or `default` when that is not set.
+  `<base>` is the `location` connection option or, when that option is not set, the S3 staging directory from the engine's connection options: `s3_staging_dir` in `cursor_kwargs` if given, otherwise the `s3_staging_dir` connection option, otherwise the `AWS_ATHENA_S3_STAGING_DIR` environment variable when the statement is compiled.
+  `<schema>` is the table's schema after the connection's `schema_translate_map` execution option is applied; for a table left without one, or mapped to `None`, it is the default schema described in [Reflection and identifiers](#reflection-and-identifiers).
+  Before the engine first connects, a table left without a schema uses the `schema_name` connection option (which `cursor_kwargs` can override), or `default` when that is not set.
   Except for [Amazon S3 Tables](#amazon-s3-tables), which take no location, compiling `CREATE TABLE` raises `CompileError` when neither `location` nor an S3 staging directory is available.
 
   value: s3://bucket/path/to/

@@ -414,6 +414,27 @@ class TestAthenaDialect:
         assert [request["schema_name"] for request in requests] == ["analytics", "other"]
 
     @pytest.mark.parametrize(
+        ("connect_args", "expected"),
+        [
+            ({}, "shared"),
+            ({"cursor_kwargs": {"schema_name": "tenant"}}, "tenant"),
+            ({"cursor_kwargs": {"schema_name": None}}, "default"),
+        ],
+        ids=["url_database", "cursor_kwargs", "cursor_kwargs_none"],
+    )
+    def test_default_schema_name_is_cursor_database(self, connect_args, expected):
+        # The default schema is the database that unqualified statements run in.
+        engine = create_engine(
+            "awsathena+rest://access_key:secret_key@athena.us-west-2.amazonaws.com/"
+            "shared?s3_staging_dir=s3%3A%2F%2Fbucket%2Fpath%2F",
+            connect_args=connect_args,
+        )
+        try:
+            assert sqlalchemy.inspect(engine).default_schema_name == expected
+        finally:
+            engine.dispose()
+
+    @pytest.mark.parametrize(
         ("schema_name", "cursor_kwargs"),
         [("shared", {"schema_name": None}), ("shared", {"schema_name": ""}), (None, {})],
         ids=["cursor_kwargs_none", "cursor_kwargs_empty", "connection_none"],

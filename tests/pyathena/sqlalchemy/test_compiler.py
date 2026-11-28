@@ -777,6 +777,22 @@ class TestAthenaStatementCompiler:
         stmt = select(column("x", String)).where(column("x", String).like("%(x)s"))
         assert executed_sql(stmt).endswith("WHERE x LIKE '%(x)s'")
 
+    @pytest.mark.parametrize(
+        ("cursor_kwargs", "expected"),
+        [(None, "default"), ({"schema_name": "tenant"}, "tenant")],
+        ids=["default_database", "cursor_kwargs_schema"],
+    )
+    def test_schema_translate_map_none_names_cursor_database(self, cursor_kwargs, expected):
+        # A None target names the database that the engine's first connection runs
+        # unqualified statements in.
+        engine, calls = recording_engine(cursor_kwargs=cursor_kwargs)
+        table = Table("events", MetaData(schema="logical"), Column("id", Integer))
+        with engine.connect().execution_options(schema_translate_map={"logical": None}) as conn:
+            conn.execute(select(table.c.id))
+
+        ((_, operation, _),) = calls
+        assert " ".join(operation.split()) == f"SELECT {expected}.events.id FROM {expected}.events"
+
 
 class TestAthenaDDLCompiler:
     """Compile-only (no AWS) tests for the DDL compiler.
@@ -824,6 +840,34 @@ class TestAthenaDDLCompiler:
         self, schema, schema_translate_map, expected_table, expected_location
     ):
         engine, calls = recording_engine(query="s3_staging_dir=s3%3A%2F%2Fbucket%2Fpath%2F")
+        table = Table("events", MetaData(schema=schema), Column("id", Integer))
+        with engine.connect().execution_options(schema_translate_map=schema_translate_map) as conn:
+            conn.execute(CreateTable(table))
+            conn.execute(DropTable(table))
+
+        (_, create, _), (_, drop, _) = calls
+        assert f"CREATE EXTERNAL TABLE {expected_table} (" in create
+        assert f"LOCATION 's3://bucket/path/{expected_location}/events/'" in create
+        assert drop.strip() == f"DROP TABLE {expected_table}"
+
+    @pytest.mark.parametrize(
+        ("schema", "schema_translate_map", "cursor_kwargs", "expected_table", "expected_location"),
+        [
+            ("logical", {"logical": None}, None, "default.events", "default"),
+            ("logical", {"logical": None}, {"schema_name": "tenant"}, "tenant.events", "tenant"),
+            (None, None, {"schema_name": "tenant"}, "events", "tenant"),
+        ],
+        ids=["none_target_default", "none_target_cursor_kwargs", "unqualified_cursor_kwargs"],
+    )
+    def test_ddl_default_schema_names_cursor_database(
+        self, schema, schema_translate_map, cursor_kwargs, expected_table, expected_location
+    ):
+        # The default location of a table mapped to None or left without a schema
+        # names the database of the engine's first connection, even when it
+        # differs from the URL database.
+        engine, calls = recording_engine(
+            query="s3_staging_dir=s3%3A%2F%2Fbucket%2Fpath%2F", cursor_kwargs=cursor_kwargs
+        )
         table = Table("events", MetaData(schema=schema), Column("id", Integer))
         with engine.connect().execution_options(schema_translate_map=schema_translate_map) as conn:
             conn.execute(CreateTable(table))
