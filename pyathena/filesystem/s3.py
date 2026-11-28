@@ -39,7 +39,7 @@ from fsspec.implementations.local import LocalFileSystem, make_path_posix, trail
 from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import check_contained, isfilelike, other_paths, stringify_path, tokenize
 
-from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3DeleteResult
+from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import (
     ItemT,
@@ -50,6 +50,7 @@ from pyathena.filesystem.s3_executor import (
     _S3PoolScope,
 )
 from pyathena.filesystem.s3_object import (
+    S3DeleteResult,
     S3Metadata,
     S3MultipartUpload,
     S3MultipartUploadPart,

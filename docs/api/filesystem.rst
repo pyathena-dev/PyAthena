@@ -96,34 +96,7 @@ S3 Core
 .. autoclass:: pyathena.filesystem.s3_core.S3Core
    :members:
 
-.. autoclass:: pyathena.filesystem.s3_core.S3ObjectSummary
-   :members:
-
-.. autoclass:: pyathena.filesystem.s3_core.S3CommonPrefix
-   :members:
-
-.. autoclass:: pyathena.filesystem.s3_core.S3Bucket
-   :members:
-
-.. autoclass:: pyathena.filesystem.s3_core.S3ListObjectsPage
-   :members:
-
-.. autoclass:: pyathena.filesystem.s3_core.S3ListObjectVersionsPage
-   :members:
-
-.. autoclass:: pyathena.filesystem.s3_core.S3ListBucketsPage
-   :members:
-
-.. autoclass:: pyathena.filesystem.s3_core.S3ListMultipartUploadsPage
-   :members:
-
 .. autoclass:: pyathena.filesystem.s3_core.S3DeleteBatch
-   :members:
-
-.. autoclass:: pyathena.filesystem.s3_core.S3DeleteResult
-   :members:
-
-.. autoclass:: pyathena.filesystem.s3_core.S3DeleteError
    :members:
 
 .. autoclass:: pyathena.filesystem.s3_core.S3MultipartCopyPlan
@@ -147,7 +120,28 @@ S3 Objects
 .. autoclass:: pyathena.filesystem.s3_object.S3ObjectVersion
    :members:
 
-S3 Upload Operations
+.. autoclass:: pyathena.filesystem.s3_object.S3ObjectSummary
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_object.S3CommonPrefix
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_object.S3Bucket
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_object.S3ListObjectsPage
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_object.S3ListObjectVersionsPage
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_object.S3ListBucketsPage
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_object.S3ListMultipartUploadsPage
+   :members:
+
+S3 Operation Results
 --------------------
 
 .. autoclass:: pyathena.filesystem.s3_object.S3PutObject
@@ -160,6 +154,18 @@ S3 Upload Operations
    :members:
 
 .. autoclass:: pyathena.filesystem.s3_object.S3CompleteMultipartUpload
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_object.S3CopyObject
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_object.S3DeleteObject
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_object.S3DeleteResult
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_object.S3DeleteError
    :members:
 
 Multipart Writer

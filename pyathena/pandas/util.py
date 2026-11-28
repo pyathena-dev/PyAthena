@@ -22,7 +22,8 @@ from boto3 import Session
 
 from pyathena import OperationalError
 from pyathena.cursor import Cursor
-from pyathena.filesystem.s3_core import S3Core, S3DeleteResult
+from pyathena.filesystem.s3_core import S3Core
+from pyathena.filesystem.s3_object import S3DeleteResult
 from pyathena.model import AthenaCompression
 from pyathena.util import RetryConfig, parse_output_location, retry_api_call
 

@@ -778,7 +778,11 @@ start with it, which `fs.list_multipart_uploads()` excludes.
 A range has an exclusive end; `None` as the end reads to the end of the object, and a
 negative start without an end reads the last bytes. The response body is closed after
 the read; a failure to read it raises the botocore exception and is not retried.
-`put_object()` writes bytes and returns an `S3PutObject`.
+`put_object()` writes bytes and returns an `S3PutObject`. `copy_object()` returns an
+`S3CopyObject` with the version IDs of the copy and of its source, and `delete_object()`
+an `S3DeleteObject` with the deleted or created version ID and whether it is a delete
+marker. The version IDs are those of the response: None where S3 returns none, as for a
+bucket that has never been versioned, and `null` for a version without an ID.
 
 ```python
 data = core.get_object(S3Path.parse("s3://YOUR_S3_BUCKET/path/to/object"), (0, 1024))
@@ -820,7 +824,7 @@ not have a version ID. The copy retains the content headers (`CacheControl`,
 `WebsiteRedirectLocation`, `StorageClass`, and the `ServerSideEncryption`,
 `SSEKMSKeyId` and `BucketKeyEnabled` of the object. Additional CopyObject parameters
 take precedence over the retained fields, and any encryption parameter replaces all of
-the retained encryption fields.
+the retained encryption fields. It returns the `S3CopyObject` of the copy.
 
 ```python
 path = S3Path.parse("s3://YOUR_S3_BUCKET/path/to/object")

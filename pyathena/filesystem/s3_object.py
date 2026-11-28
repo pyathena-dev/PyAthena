@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import logging
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.util import override
-
-if TYPE_CHECKING:
-    from pyathena.filesystem.s3_core import S3Bucket, S3ObjectSummary
 
 _logger = logging.getLogger(__name__)
 
@@ -50,6 +49,20 @@ _S3_OBJECT_FIELDS = frozenset(
         "is_latest",
     ]
 )
+# https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html
+# The checksum fields of the S3 API responses, by their names in the models.
+_CHECKSUM_FIELDS = {
+    "checksum_crc32": "ChecksumCRC32",
+    "checksum_crc32c": "ChecksumCRC32C",
+    "checksum_crc64nvme": "ChecksumCRC64NVME",
+    "checksum_sha1": "ChecksumSHA1",
+    "checksum_sha256": "ChecksumSHA256",
+    "checksum_sha512": "ChecksumSHA512",
+    "checksum_md5": "ChecksumMD5",
+    "checksum_xxhash64": "ChecksumXXHASH64",
+    "checksum_xxhash3": "ChecksumXXHASH3",
+    "checksum_xxhash128": "ChecksumXXHASH128",
+}
 
 
 class S3ObjectType:
@@ -322,7 +335,7 @@ class S3Object(dict[str, Any]):
         """
         fields: dict[str, Any] = {"version_id": version.version_id, "is_latest": version.is_latest}
         if version.version_id != "null":
-            fields["name"] = str(S3Path(version.bucket, version.key, version.version_id))
+            fields["name"] = str(version.path)
         return cls._from_listing(version, **fields)
 
     @classmethod
@@ -399,15 +412,50 @@ class S3Object(dict[str, Any]):
         )
 
 
-class S3Metadata(Mapping[str, str]):
+class _S3Response:
+    """The base of the models whose constructors read an S3 API response.
+
+    A plain class, so that it generates no equality of its own, which would
+    precede the mapping equality of :class:`S3Metadata`.
+    """
+
+    def _set_fields(self, **fields: Any) -> None:
+        """Set the fields of the frozen model; called by the constructors only.
+
+        Args:
+            **fields: The values of the fields, by field name.
+        """
+        # The instance dictionary is set directly, as a frozen dataclass
+        # rejects attribute assignment.
+        vars(self).update(fields)
+
+    @staticmethod
+    def _checksums(result: Mapping[str, Any]) -> dict[str, str | None]:
+        """Read the checksum values of a response.
+
+        Args:
+            result: The response, or the part of it that has the checksums,
+                such as ``CopyObjectResult``.
+
+        Returns:
+            The ``checksum_*`` fields, None where the response has none.
+        """
+        return {name: result.get(key) for name, key in _CHECKSUM_FIELDS.items()}
+
+
+@dataclass(frozen=True, eq=False, init=False, repr=False)
+class S3Metadata(_S3Response, Mapping[str, str]):
     """Represents the metadata of an S3 object as returned by HeadObject.
 
     Behaves as a read-only mapping of the user-defined metadata
     (``x-amz-meta-*``, whose keys are arbitrary user-chosen strings), so it
     is a drop-in for implementations that return the user-defined metadata
-    as a plain dictionary, and compares equal to such dictionaries. The
-    system-defined metadata (content type, encryption settings, storage
-    class, etc.) is exposed as typed properties.
+    as a plain dictionary. Its truth value and equality are those of that
+    mapping: it is false without user-defined metadata, and it compares
+    equal to any mapping of the same user-defined metadata, such as ``{}``,
+    whatever its system-defined metadata. The system-defined metadata
+    (content type, encryption settings, storage class, etc.) is exposed as
+    typed fields.
 
     Example:
         >>> metadata = fs.metadata("s3://bucket/key")
@@ -417,44 +465,113 @@ class S3Metadata(Mapping[str, str]):
         'text/plain'
 
     See https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html
+
+    Attributes:
+        path: The path that was looked up, or None if it is not known.
+        cache_control: The ``CacheControl`` header of the object.
+        content_disposition: The ``ContentDisposition`` header of the object.
+        content_encoding: The ``ContentEncoding`` header of the object.
+        content_language: The ``ContentLanguage`` header of the object.
+        content_length: The ``ContentLength`` of the object in bytes.
+        content_type: The ``ContentType`` of the object.
+        etag: The ``ETag`` (entity tag) of the object.
+        expiration: The ``Expiration`` header of the object.
+        expires: The ``Expires`` date of the object.
+        last_modified: The ``LastModified`` time of the object.
+        storage_class: The ``StorageClass`` of the object; ``STANDARD`` when
+            S3 omits it.
+        server_side_encryption: The ``ServerSideEncryption`` algorithm of
+            the object.
+        sse_customer_algorithm: The ``SSECustomerAlgorithm`` of the object.
+        sse_kms_key_id: The ``SSEKMSKeyId`` of the KMS key for the object.
+        bucket_key_enabled: Whether the object uses an S3 Bucket Key
+            (``BucketKeyEnabled``).
+        website_redirect_location: The ``WebsiteRedirectLocation`` of the
+            object.
+        version_id: The ``VersionId`` of the object.
+        object_lock_mode: The ``ObjectLockMode`` of the object.
+        object_lock_retain_until_date: The ``ObjectLockRetainUntilDate`` of
+            the object.
+        object_lock_legal_hold_status: The ``ObjectLockLegalHoldStatus`` of
+            the object.
+        checksum_*: The checksums of the object (``ChecksumCRC32`` and the
+            like), which HeadObject returns with ``ChecksumMode=ENABLED``.
+        checksum_type: The ``ChecksumType`` of the object: ``COMPOSITE`` or
+            ``FULL_OBJECT``.
     """
 
-    def __init__(self, response: dict[str, Any], path: S3Path | None = None) -> None:
+    path: S3Path | None
+    cache_control: str | None
+    content_disposition: str | None
+    content_encoding: str | None
+    content_language: str | None
+    content_length: int | None
+    content_type: str | None
+    etag: str | None
+    expiration: str | None
+    expires: datetime | None
+    last_modified: datetime | None
+    storage_class: str
+    server_side_encryption: str | None
+    sse_customer_algorithm: str | None
+    sse_kms_key_id: str | None
+    bucket_key_enabled: bool | None
+    website_redirect_location: str | None
+    version_id: str | None
+    object_lock_mode: str | None
+    object_lock_retain_until_date: datetime | None
+    object_lock_legal_hold_status: str | None
+    checksum_crc32: str | None
+    checksum_crc32c: str | None
+    checksum_crc64nvme: str | None
+    checksum_sha1: str | None
+    checksum_sha256: str | None
+    checksum_sha512: str | None
+    checksum_md5: str | None
+    checksum_xxhash64: str | None
+    checksum_xxhash3: str | None
+    checksum_xxhash128: str | None
+    checksum_type: str | None
+    _user_metadata: dict[str, str]
+
+    def __init__(self, response: Mapping[str, Any], path: S3Path | None = None) -> None:
         """Initialize the metadata from a HeadObject response.
 
         Args:
             response: The HeadObject response.
             path: The path that was looked up, if known.
         """
-        self._path = path
-        self._cache_control: str | None = response.get("CacheControl")
-        self._content_disposition: str | None = response.get("ContentDisposition")
-        self._content_encoding: str | None = response.get("ContentEncoding")
-        self._content_language: str | None = response.get("ContentLanguage")
-        self._content_length: int | None = response.get("ContentLength")
-        self._content_type: str | None = response.get("ContentType")
-        self._etag: str | None = response.get("ETag")
-        self._expiration: str | None = response.get("Expiration")
-        self._expires: datetime | None = response.get("Expires")
-        self._last_modified: datetime | None = response.get("LastModified")
-        # https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html#API_HeadObject_ResponseSyntax
-        # Amazon S3 returns this header for all objects except for
-        # S3 Standard storage class objects.
-        self._storage_class: str = response.get(
-            "StorageClass", S3StorageClass.S3_STORAGE_CLASS_STANDARD
+        self._set_fields(
+            path=path,
+            cache_control=response.get("CacheControl"),
+            content_disposition=response.get("ContentDisposition"),
+            content_encoding=response.get("ContentEncoding"),
+            content_language=response.get("ContentLanguage"),
+            content_length=response.get("ContentLength"),
+            content_type=response.get("ContentType"),
+            etag=response.get("ETag"),
+            expiration=response.get("Expiration"),
+            expires=response.get("Expires"),
+            last_modified=response.get("LastModified"),
+            # https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html#API_HeadObject_ResponseSyntax
+            # Amazon S3 returns this header for all objects except for
+            # S3 Standard storage class objects.
+            storage_class=response.get("StorageClass", S3StorageClass.S3_STORAGE_CLASS_STANDARD),
+            server_side_encryption=response.get("ServerSideEncryption"),
+            sse_customer_algorithm=response.get("SSECustomerAlgorithm"),
+            sse_kms_key_id=response.get("SSEKMSKeyId"),
+            bucket_key_enabled=response.get("BucketKeyEnabled"),
+            website_redirect_location=response.get("WebsiteRedirectLocation"),
+            version_id=response.get("VersionId"),
+            object_lock_mode=response.get("ObjectLockMode"),
+            object_lock_retain_until_date=response.get("ObjectLockRetainUntilDate"),
+            object_lock_legal_hold_status=response.get("ObjectLockLegalHoldStatus"),
+            **self._checksums(response),
+            checksum_type=response.get("ChecksumType"),
+            # A copy, so that a change to the response does not change the
+            # frozen model.
+            _user_metadata=dict(response.get("Metadata", {})),
         )
-        self._server_side_encryption: str | None = response.get("ServerSideEncryption")
-        self._sse_customer_algorithm: str | None = response.get("SSECustomerAlgorithm")
-        self._sse_kms_key_id: str | None = response.get("SSEKMSKeyId")
-        self._bucket_key_enabled: bool | None = response.get("BucketKeyEnabled")
-        self._website_redirect_location: str | None = response.get("WebsiteRedirectLocation")
-        self._version_id: str | None = response.get("VersionId")
-        self._object_lock_mode: str | None = response.get("ObjectLockMode")
-        self._object_lock_retain_until_date: datetime | None = response.get(
-            "ObjectLockRetainUntilDate"
-        )
-        self._object_lock_legal_hold_status: str | None = response.get("ObjectLockLegalHoldStatus")
-        self._user_metadata: dict[str, str] = response.get("Metadata", {})
 
     @override
     def __getitem__(self, key: str) -> str:
@@ -473,111 +590,6 @@ class S3Metadata(Mapping[str, str]):
         return f"{self.__class__.__name__}({self._user_metadata!r})"
 
     @property
-    def cache_control(self) -> str | None:
-        """The ``CacheControl`` header of the object."""
-        return self._cache_control
-
-    @property
-    def content_disposition(self) -> str | None:
-        """The ``ContentDisposition`` header of the object."""
-        return self._content_disposition
-
-    @property
-    def content_encoding(self) -> str | None:
-        """The ``ContentEncoding`` header of the object."""
-        return self._content_encoding
-
-    @property
-    def content_language(self) -> str | None:
-        """The ``ContentLanguage`` header of the object."""
-        return self._content_language
-
-    @property
-    def content_length(self) -> int | None:
-        """The ``ContentLength`` of the object in bytes."""
-        return self._content_length
-
-    @property
-    def content_type(self) -> str | None:
-        """The ``ContentType`` of the object."""
-        return self._content_type
-
-    @property
-    def etag(self) -> str | None:
-        """The ``ETag`` (entity tag) of the object."""
-        return self._etag
-
-    @property
-    def expiration(self) -> str | None:
-        """The ``Expiration`` header of the object."""
-        return self._expiration
-
-    @property
-    def expires(self) -> datetime | None:
-        """The ``Expires`` date of the object."""
-        return self._expires
-
-    @property
-    def last_modified(self) -> datetime | None:
-        """The ``LastModified`` time of the object."""
-        return self._last_modified
-
-    @property
-    def storage_class(self) -> str:
-        """The ``StorageClass`` of the object; ``STANDARD`` when S3 omits it."""
-        return self._storage_class
-
-    @property
-    def server_side_encryption(self) -> str | None:
-        """The ``ServerSideEncryption`` algorithm of the object."""
-        return self._server_side_encryption
-
-    @property
-    def sse_customer_algorithm(self) -> str | None:
-        """The ``SSECustomerAlgorithm`` of the object."""
-        return self._sse_customer_algorithm
-
-    @property
-    def sse_kms_key_id(self) -> str | None:
-        """The ``SSEKMSKeyId`` of the KMS key for the object."""
-        return self._sse_kms_key_id
-
-    @property
-    def bucket_key_enabled(self) -> bool | None:
-        """Whether the object uses an S3 Bucket Key (``BucketKeyEnabled``)."""
-        return self._bucket_key_enabled
-
-    @property
-    def website_redirect_location(self) -> str | None:
-        """The ``WebsiteRedirectLocation`` of the object."""
-        return self._website_redirect_location
-
-    @property
-    def version_id(self) -> str | None:
-        """The ``VersionId`` of the object."""
-        return self._version_id
-
-    @property
-    def path(self) -> S3Path | None:
-        """The path that was looked up, or None if it is not known."""
-        return self._path
-
-    @property
-    def object_lock_mode(self) -> str | None:
-        """The ``ObjectLockMode`` of the object."""
-        return self._object_lock_mode
-
-    @property
-    def object_lock_retain_until_date(self) -> datetime | None:
-        """The ``ObjectLockRetainUntilDate`` of the object."""
-        return self._object_lock_retain_until_date
-
-    @property
-    def object_lock_legal_hold_status(self) -> str | None:
-        """The ``ObjectLockLegalHoldStatus`` of the object."""
-        return self._object_lock_legal_hold_status
-
-    @property
     def user_metadata(self) -> dict[str, str]:
         """A copy of the user-defined metadata (``x-amz-meta-*``).
 
@@ -588,23 +600,98 @@ class S3Metadata(Mapping[str, str]):
         return dict(self._user_metadata)
 
 
-class S3ObjectVersion:
+@dataclass(frozen=True)
+class S3ObjectSummary:
+    """An object listed by ListObjectsV2 (a ``Contents`` entry).
+
+    Attributes:
+        bucket: The bucket of the object.
+        key: The key of the object.
+        size: The size of the object in bytes.
+        etag: The entity tag of the object.
+        last_modified: When the object was last modified.
+        storage_class: The storage class of the object.
+        checksum_algorithm: The algorithms of the checksums of the object
+            (``ChecksumAlgorithm``), if any.
+        checksum_type: The ``ChecksumType`` of the object: ``COMPOSITE`` or
+            ``FULL_OBJECT``.
+    """
+
+    bucket: str
+    key: str
+    size: int | None = None
+    etag: str | None = None
+    last_modified: datetime | None = None
+    storage_class: str | None = None
+    checksum_algorithm: tuple[str, ...] = ()
+    checksum_type: str | None = None
+
+    @classmethod
+    def from_response(cls, bucket: str, entry: Mapping[str, Any]) -> S3ObjectSummary:
+        """Build the object from a ``Contents`` entry of ListObjectsV2.
+
+        Args:
+            bucket: The bucket that was listed.
+            entry: The ``Contents`` entry.
+
+        Returns:
+            The listed object.
+        """
+        return cls(
+            bucket=bucket,
+            key=entry["Key"],
+            size=entry.get("Size"),
+            etag=entry.get("ETag"),
+            last_modified=entry.get("LastModified"),
+            storage_class=entry.get("StorageClass"),
+            checksum_algorithm=tuple(entry.get("ChecksumAlgorithm", ())),
+            checksum_type=entry.get("ChecksumType"),
+        )
+
+    @property
+    def path(self) -> S3Path:
+        """The path of the object."""
+        return S3Path(self.bucket, self.key)
+
+
+@dataclass(frozen=True, init=False)
+class S3ObjectVersion(_S3Response):
     """Represents a version of an S3 object as returned by ListObjectVersions.
 
     Attributes:
-        bucket: S3 bucket name.
-        key: Object key.
-        version_id: The version ID of the object.
-        is_latest: Whether the version is the latest version of the object.
+        bucket: The name of the bucket that contains the version.
+        key: The ``Key`` of the object.
+        version_id: The ``VersionId`` of the version.
+        is_latest: Whether the version is the latest version of the object
+            (``IsLatest``).
         is_delete_marker: Whether the version is a delete marker.
-        last_modified: Date and time when the version was last modified.
-        etag: Entity tag of the version. None for delete markers.
-        size: Size in bytes of the version. None for delete markers.
-        storage_class: Storage class of the version. None for delete markers.
-        owner: Owner of the version.
+        last_modified: The ``LastModified`` time of the version.
+        etag: The ``ETag`` of the version; None for delete markers.
+        size: The ``Size`` of the version in bytes; None for delete markers.
+        storage_class: The ``StorageClass`` of the version; None for delete
+            markers.
+        checksum_algorithm: The algorithms of the checksums of the version
+            (``ChecksumAlgorithm``); empty for delete markers.
+        checksum_type: The ``ChecksumType`` of the version; None for delete
+            markers.
+        owner: The ``Owner`` of the version, or None if the response has
+            none.
     """
 
-    def __init__(self, bucket: str, is_delete_marker: bool, response: dict[str, Any]) -> None:
+    bucket: str
+    key: str
+    version_id: str | None
+    is_latest: bool
+    is_delete_marker: bool
+    last_modified: datetime | None
+    etag: str | None
+    size: int | None
+    storage_class: str | None
+    checksum_algorithm: tuple[str, ...]
+    checksum_type: str | None
+    owner: S3Owner | None
+
+    def __init__(self, bucket: str, is_delete_marker: bool, response: Mapping[str, Any]) -> None:
         """Initialize the version from a ListObjectVersions entry.
 
         Args:
@@ -614,382 +701,666 @@ class S3ObjectVersion:
             response: A ``Versions`` or ``DeleteMarkers`` entry of the
                 ListObjectVersions response.
         """
-        self._bucket = bucket
-        self._is_delete_marker = is_delete_marker
-        self._key: str = response["Key"]
-        self._version_id: str | None = response.get("VersionId")
-        self._is_latest: bool = response.get("IsLatest", False)
-        self._last_modified: datetime | None = response.get("LastModified")
-        self._etag: str | None = response.get("ETag")
-        self._size: int | None = response.get("Size")
-        self._storage_class: str | None = response.get("StorageClass")
         owner = response.get("Owner")
-        self._owner: S3Owner | None = S3Owner(owner) if owner else None
-
-    @property
-    def bucket(self) -> str:
-        """The name of the bucket that contains the version."""
-        return self._bucket
-
-    @property
-    def key(self) -> str:
-        """The ``Key`` of the object."""
-        return self._key
+        self._set_fields(
+            bucket=bucket,
+            key=response["Key"],
+            version_id=response.get("VersionId"),
+            is_latest=response.get("IsLatest", False),
+            is_delete_marker=is_delete_marker,
+            last_modified=response.get("LastModified"),
+            etag=response.get("ETag"),
+            size=response.get("Size"),
+            storage_class=response.get("StorageClass"),
+            checksum_algorithm=tuple(response.get("ChecksumAlgorithm", ())),
+            checksum_type=response.get("ChecksumType"),
+            owner=S3Owner(owner) if owner else None,
+        )
 
     @property
     def name(self) -> str:
-        """The path of the version in ``bucket/key`` form."""
-        return f"{self._bucket}/{self._key}"
+        """The path of the object in ``bucket/key`` form, without the version."""
+        return f"{self.bucket}/{self.key}"
 
     @property
-    def version_id(self) -> str | None:
-        """The ``VersionId`` of the version."""
-        return self._version_id
+    def path(self) -> S3Path:
+        """The path of the version, with its version ID, including ``null``.
 
-    @property
-    def is_latest(self) -> bool:
-        """Whether the version is the latest version of the object (``IsLatest``)."""
-        return self._is_latest
-
-    @property
-    def is_delete_marker(self) -> bool:
-        """Whether the version is a delete marker."""
-        return self._is_delete_marker
-
-    @property
-    def last_modified(self) -> datetime | None:
-        """The ``LastModified`` time of the version."""
-        return self._last_modified
-
-    @property
-    def etag(self) -> str | None:
-        """The ``ETag`` of the version; None for delete markers."""
-        return self._etag
-
-    @property
-    def size(self) -> int | None:
-        """The ``Size`` of the version in bytes; None for delete markers."""
-        return self._size
-
-    @property
-    def storage_class(self) -> str | None:
-        """The ``StorageClass`` of the version; None for delete markers."""
-        return self._storage_class
-
-    @property
-    def owner(self) -> S3Owner | None:
-        """The ``Owner`` of the version, or None if the response has none."""
-        return self._owner
+        The key is that of the listing, which is URL-encoded when the listing
+        was requested with ``EncodingType="url"``.
+        """
+        return S3Path(self.bucket, self.key, self.version_id)
 
 
-class S3PutObject:
-    """Represents the response from an S3 PUT object operation.
-
-    This class encapsulates the metadata returned when uploading an object
-    to S3, including encryption details, versioning information, and
-    integrity checksums.
+@dataclass(frozen=True)
+class S3CommonPrefix:
+    """A key prefix listed with a delimiter (a ``CommonPrefixes`` entry).
 
     Attributes:
-        expiration: Object expiration time if lifecycle policy applies.
-        version_id: Version ID if bucket versioning is enabled.
-        etag: Entity tag for the uploaded object.
-        server_side_encryption: Server-side encryption method used.
-        Various checksum properties: For data integrity verification.
+        bucket: The bucket that was listed.
+        prefix: The key prefix, ending with the delimiter.
+    """
+
+    bucket: str
+    prefix: str
+
+    @classmethod
+    def from_response(cls, bucket: str, entry: Mapping[str, Any]) -> S3CommonPrefix:
+        """Build the prefix from a ``CommonPrefixes`` entry.
+
+        Args:
+            bucket: The bucket that was listed.
+            entry: The ``CommonPrefixes`` entry.
+
+        Returns:
+            The listed prefix.
+        """
+        return cls(bucket=bucket, prefix=entry["Prefix"])
+
+
+@dataclass(frozen=True)
+class S3Bucket:
+    """A bucket, as listed by ListBuckets or found by HeadBucket.
+
+    Attributes:
+        name: The name of the bucket.
+        creation_date: When the bucket was created, if returned.
+        bucket_region: The region of the bucket, if returned.
+    """
+
+    name: str
+    creation_date: datetime | None = None
+    bucket_region: str | None = None
+
+    @classmethod
+    def from_response(cls, entry: Mapping[str, Any]) -> S3Bucket:
+        """Build the bucket from a ``Buckets`` entry of ListBuckets.
+
+        Args:
+            entry: The ``Buckets`` entry.
+
+        Returns:
+            The listed bucket.
+        """
+        return cls(
+            name=entry["Name"],
+            creation_date=entry.get("CreationDate"),
+            bucket_region=entry.get("BucketRegion"),
+        )
+
+
+@dataclass(frozen=True)
+class S3ListObjectsPage:
+    """One page of a ListObjectsV2 listing.
+
+    Attributes:
+        bucket: The bucket that was listed.
+        objects: The listed objects (``Contents``).
+        common_prefixes: The listed key prefixes (``CommonPrefixes``).
+        key_count: The number of objects and prefixes of the page
+            (``KeyCount``), if returned.
+        is_truncated: Whether more pages follow.
+        next_continuation_token: The token of the next page, if any.
+    """
+
+    bucket: str
+    objects: tuple[S3ObjectSummary, ...] = ()
+    common_prefixes: tuple[S3CommonPrefix, ...] = ()
+    key_count: int | None = None
+    is_truncated: bool = False
+    next_continuation_token: str | None = None
+
+    @classmethod
+    def from_response(cls, bucket: str, response: Mapping[str, Any]) -> S3ListObjectsPage:
+        """Build the page from a ListObjectsV2 response.
+
+        Args:
+            bucket: The bucket that was listed.
+            response: The ListObjectsV2 response.
+
+        Returns:
+            The page.
+        """
+        return cls(
+            bucket=bucket,
+            objects=tuple(
+                S3ObjectSummary.from_response(bucket, c) for c in response.get("Contents", [])
+            ),
+            common_prefixes=tuple(
+                S3CommonPrefix.from_response(bucket, c) for c in response.get("CommonPrefixes", [])
+            ),
+            key_count=response.get("KeyCount"),
+            is_truncated=response.get("IsTruncated", False),
+            next_continuation_token=response.get("NextContinuationToken"),
+        )
+
+
+@dataclass(frozen=True)
+class S3ListObjectVersionsPage:
+    """One page of a ListObjectVersions listing.
+
+    Attributes:
+        bucket: The bucket that was listed.
+        versions: The listed versions (``Versions``).
+        delete_markers: The listed delete markers (``DeleteMarkers``).
+        common_prefixes: The listed key prefixes (``CommonPrefixes``).
+        is_truncated: Whether more pages follow.
+        next_key_marker: The key marker of the next page, if any.
+        next_version_id_marker: The version ID marker of the next page, if
+            any.
+    """
+
+    bucket: str
+    versions: tuple[S3ObjectVersion, ...] = ()
+    delete_markers: tuple[S3ObjectVersion, ...] = ()
+    common_prefixes: tuple[S3CommonPrefix, ...] = ()
+    is_truncated: bool = False
+    next_key_marker: str | None = None
+    next_version_id_marker: str | None = None
+
+    @classmethod
+    def from_response(cls, bucket: str, response: Mapping[str, Any]) -> S3ListObjectVersionsPage:
+        """Build the page from a ListObjectVersions response.
+
+        Args:
+            bucket: The bucket that was listed.
+            response: The ListObjectVersions response.
+
+        Returns:
+            The page.
+        """
+        return cls(
+            bucket=bucket,
+            versions=tuple(
+                S3ObjectVersion(bucket=bucket, is_delete_marker=False, response=v)
+                for v in response.get("Versions", [])
+            ),
+            delete_markers=tuple(
+                S3ObjectVersion(bucket=bucket, is_delete_marker=True, response=m)
+                for m in response.get("DeleteMarkers", [])
+            ),
+            common_prefixes=tuple(
+                S3CommonPrefix.from_response(bucket, c) for c in response.get("CommonPrefixes", [])
+            ),
+            is_truncated=response.get("IsTruncated", False),
+            next_key_marker=response.get("NextKeyMarker"),
+            next_version_id_marker=response.get("NextVersionIdMarker"),
+        )
+
+
+@dataclass(frozen=True)
+class S3ListBucketsPage:
+    """One page of a ListBuckets listing.
+
+    Attributes:
+        buckets: The listed buckets.
+        continuation_token: The token of the next page, if any.
+    """
+
+    buckets: tuple[S3Bucket, ...] = ()
+    continuation_token: str | None = None
+
+    @classmethod
+    def from_response(cls, response: Mapping[str, Any]) -> S3ListBucketsPage:
+        """Build the page from a ListBuckets response.
+
+        Args:
+            response: The ListBuckets response.
+
+        Returns:
+            The page.
+        """
+        return cls(
+            buckets=tuple(S3Bucket.from_response(b) for b in response.get("Buckets", [])),
+            continuation_token=response.get("ContinuationToken"),
+        )
+
+
+@dataclass(frozen=True)
+class S3ListMultipartUploadsPage:
+    """One page of a ListMultipartUploads listing.
+
+    Attributes:
+        bucket: The bucket that was listed.
+        uploads: The listed in-progress multipart uploads (``Uploads``),
+            with the listed bucket as their bucket.
+        is_truncated: Whether more pages follow.
+        next_key_marker: The key marker of the next page, if any.
+        next_upload_id_marker: The upload ID marker of the next page, if any.
+    """
+
+    bucket: str
+    uploads: tuple[S3MultipartUpload, ...] = ()
+    is_truncated: bool = False
+    next_key_marker: str | None = None
+    next_upload_id_marker: str | None = None
+
+    @classmethod
+    def from_response(cls, bucket: str, response: Mapping[str, Any]) -> S3ListMultipartUploadsPage:
+        """Build the page from a ListMultipartUploads response.
+
+        Args:
+            bucket: The bucket that was listed.
+            response: The ListMultipartUploads response.
+
+        Returns:
+            The page.
+        """
+        return cls(
+            bucket=bucket,
+            uploads=tuple(
+                S3MultipartUpload({**u, "Bucket": bucket}) for u in response.get("Uploads", [])
+            ),
+            is_truncated=response.get("IsTruncated", False),
+            next_key_marker=response.get("NextKeyMarker"),
+            next_upload_id_marker=response.get("NextUploadIdMarker"),
+        )
+
+
+@dataclass(frozen=True)
+class S3DeleteError:
+    """An object that DeleteObjects could not delete (an ``Errors`` entry).
+
+    ``str()`` gives ``"path (code: message)"``.
+
+    Attributes:
+        path: The path of the object, with the version ID of the request, if
+            any.
+        code: The error code.
+        message: The error message.
+    """
+
+    path: S3Path
+    code: str | None = None
+    message: str | None = None
+
+    @classmethod
+    def from_response(cls, bucket: str, entry: Mapping[str, Any]) -> S3DeleteError:
+        """Build the error from an ``Errors`` entry of DeleteObjects.
+
+        Args:
+            bucket: The bucket of the request.
+            entry: The ``Errors`` entry.
+
+        Returns:
+            The error.
+        """
+        return cls(
+            path=S3Path(bucket, entry["Key"], entry.get("VersionId")),
+            code=entry.get("Code"),
+            message=entry.get("Message"),
+        )
+
+    @override
+    def __str__(self) -> str:
+        return f"{self.path} ({self.code}: {self.message})"
+
+
+@dataclass(frozen=True)
+class S3DeleteResult:
+    """The result of a DeleteObjects request.
+
+    S3 answers a request with 200 also when it could not delete some of the
+    objects, and lists them in ``errors``.
+
+    Attributes:
+        bucket: The bucket of the request.
+        deleted: The deleted objects, with the version ID of the request, if
+            any. Empty for a quiet batch.
+        errors: The objects that S3 could not delete.
+    """
+
+    bucket: str
+    deleted: tuple[S3Path, ...] = ()
+    errors: tuple[S3DeleteError, ...] = ()
+
+    @classmethod
+    def from_response(cls, bucket: str, response: Mapping[str, Any]) -> S3DeleteResult:
+        """Build the result from a DeleteObjects response.
+
+        Args:
+            bucket: The bucket of the request.
+            response: The DeleteObjects response.
+
+        Returns:
+            The result.
+        """
+        return cls(
+            bucket=bucket,
+            deleted=tuple(
+                S3Path(bucket, d["Key"], d.get("VersionId")) for d in response.get("Deleted", [])
+            ),
+            errors=tuple(
+                S3DeleteError.from_response(bucket, e) for e in response.get("Errors", [])
+            ),
+        )
+
+
+@dataclass(frozen=True, init=False)
+class S3DeleteObject(_S3Response):
+    """The result of a DeleteObject request.
+
+    Attributes:
+        version_id: The ``VersionId`` of the deleted version, or of the
+            delete marker that the request created, if the bucket is
+            versioned.
+        delete_marker: Whether the deleted version, or the version that the
+            request created, is a delete marker (``DeleteMarker``).
+    """
+
+    version_id: str | None
+    delete_marker: bool
+
+    def __init__(self, response: Mapping[str, Any]) -> None:
+        """Initialize the result from a DeleteObject response.
+
+        Args:
+            response: The DeleteObject response.
+        """
+        self._set_fields(
+            version_id=response.get("VersionId"),
+            delete_marker=response.get("DeleteMarker", False),
+        )
+
+
+@dataclass(frozen=True, init=False)
+class S3CopyObject(_S3Response):
+    """The result of a CopyObject request.
+
+    Attributes:
+        version_id: The ``VersionId`` of the copy, if the destination bucket
+            is versioned.
+        copy_source_version_id: The ``CopySourceVersionId`` of the copied
+            version of the source, if the source bucket is versioned.
+        etag: The ``ETag`` of the copy.
+        last_modified: The ``LastModified`` time of the copy.
+        checksum_*: The checksums of the copy (``ChecksumCRC32`` and the
+            like), if returned.
+        checksum_type: The ``ChecksumType`` of the copy: ``COMPOSITE`` or
+            ``FULL_OBJECT``.
+    """
+
+    version_id: str | None
+    copy_source_version_id: str | None
+    etag: str | None
+    last_modified: datetime | None
+    checksum_crc32: str | None
+    checksum_crc32c: str | None
+    checksum_crc64nvme: str | None
+    checksum_sha1: str | None
+    checksum_sha256: str | None
+    checksum_sha512: str | None
+    checksum_md5: str | None
+    checksum_xxhash64: str | None
+    checksum_xxhash3: str | None
+    checksum_xxhash128: str | None
+    checksum_type: str | None
+
+    def __init__(self, response: Mapping[str, Any]) -> None:
+        """Initialize the result from a CopyObject response.
+
+        The ``ETag``, ``LastModified`` and checksums are read from its
+        ``CopyObjectResult``.
+
+        Args:
+            response: The CopyObject response.
+        """
+        result = response.get("CopyObjectResult", {})
+        self._set_fields(
+            version_id=response.get("VersionId"),
+            copy_source_version_id=response.get("CopySourceVersionId"),
+            etag=result.get("ETag"),
+            last_modified=result.get("LastModified"),
+            **self._checksums(result),
+            checksum_type=result.get("ChecksumType"),
+        )
+
+
+@dataclass(frozen=True, init=False)
+class S3PutObject(_S3Response):
+    """Represents the response from an S3 PUT object operation.
+
+    Attributes:
+        expiration: The ``Expiration`` header of the uploaded object.
+        version_id: The ``VersionId`` of the uploaded object.
+        etag: The ``ETag`` of the uploaded object.
+        checksum_*: The checksums of the uploaded object (``ChecksumCRC32``
+            and the like), if returned.
+        checksum_type: The ``ChecksumType`` of the uploaded object.
+        server_side_encryption: The ``ServerSideEncryption`` algorithm of
+            the uploaded object.
+        sse_customer_algorithm: The ``SSECustomerAlgorithm`` of the uploaded
+            object.
+        sse_customer_key_md5: The ``SSECustomerKeyMD5`` of the
+            customer-provided key for the uploaded object.
+        sse_kms_key_id: The ``SSEKMSKeyId`` of the KMS key for the uploaded
+            object.
+        sse_kms_encryption_context: The ``SSEKMSEncryptionContext`` of the
+            uploaded object.
+        bucket_key_enabled: Whether the uploaded object uses an S3 Bucket
+            Key (``BucketKeyEnabled``).
+        request_charged: The ``RequestCharged`` field of the response.
 
     Note:
         This class is used internally by S3FileSystem operations and
         typically not instantiated directly by users.
     """
 
-    def __init__(self, response: dict[str, Any]) -> None:
+    expiration: str | None
+    version_id: str | None
+    etag: str | None
+    checksum_crc32: str | None
+    checksum_crc32c: str | None
+    checksum_crc64nvme: str | None
+    checksum_sha1: str | None
+    checksum_sha256: str | None
+    checksum_sha512: str | None
+    checksum_md5: str | None
+    checksum_xxhash64: str | None
+    checksum_xxhash3: str | None
+    checksum_xxhash128: str | None
+    checksum_type: str | None
+    server_side_encryption: str | None
+    sse_customer_algorithm: str | None
+    sse_customer_key_md5: str | None
+    sse_kms_key_id: str | None
+    # Left out of the representation, which logs may show.
+    sse_kms_encryption_context: str | None = field(repr=False)
+    bucket_key_enabled: bool | None
+    request_charged: str | None
+
+    def __init__(self, response: Mapping[str, Any]) -> None:
         """Initialize the result from a PutObject response.
 
         Args:
             response: The PutObject response.
         """
-        self._expiration: str | None = response.get("Expiration")
-        self._version_id: str | None = response.get("VersionId")
-        self._etag: str | None = response.get("ETag")
-        self._checksum_crc32: str | None = response.get("ChecksumCRC32")
-        self._checksum_crc32c: str | None = response.get("ChecksumCRC32C")
-        self._checksum_sha1: str | None = response.get("ChecksumSHA1")
-        self._checksum_sha256: str | None = response.get("ChecksumSHA256")
-        self._server_side_encryption = response.get("ServerSideEncryption")
-        self._sse_customer_algorithm = response.get("SSECustomerAlgorithm")
-        self._sse_customer_key_md5 = response.get("SSECustomerKeyMD5")
-        self._sse_kms_key_id = response.get("SSEKMSKeyId")
-        self._sse_kms_encryption_context = response.get("SSEKMSEncryptionContext")
-        self._bucket_key_enabled = response.get("BucketKeyEnabled")
-        self._request_charged = response.get("RequestCharged")
-
-    @property
-    def expiration(self) -> str | None:
-        """The ``Expiration`` header of the uploaded object."""
-        return self._expiration
-
-    @property
-    def version_id(self) -> str | None:
-        """The ``VersionId`` of the uploaded object."""
-        return self._version_id
-
-    @property
-    def etag(self) -> str | None:
-        """The ``ETag`` of the uploaded object."""
-        return self._etag
-
-    @property
-    def checksum_crc32(self) -> str | None:
-        """The ``ChecksumCRC32`` of the uploaded object."""
-        return self._checksum_crc32
-
-    @property
-    def checksum_crc32c(self) -> str | None:
-        """The ``ChecksumCRC32C`` of the uploaded object."""
-        return self._checksum_crc32c
-
-    @property
-    def checksum_sha1(self) -> str | None:
-        """The ``ChecksumSHA1`` of the uploaded object."""
-        return self._checksum_sha1
-
-    @property
-    def checksum_sha256(self) -> str | None:
-        """The ``ChecksumSHA256`` of the uploaded object."""
-        return self._checksum_sha256
-
-    @property
-    def server_side_encryption(self) -> str | None:
-        """The ``ServerSideEncryption`` algorithm of the uploaded object."""
-        return self._server_side_encryption
-
-    @property
-    def sse_customer_algorithm(self) -> str | None:
-        """The ``SSECustomerAlgorithm`` of the uploaded object."""
-        return self._sse_customer_algorithm
-
-    @property
-    def sse_customer_key_md5(self) -> str | None:
-        """The ``SSECustomerKeyMD5`` of the customer-provided key for the uploaded object."""
-        return self._sse_customer_key_md5
-
-    @property
-    def sse_kms_key_id(self) -> str | None:
-        """The ``SSEKMSKeyId`` of the KMS key for the uploaded object."""
-        return self._sse_kms_key_id
-
-    @property
-    def sse_kms_encryption_context(self) -> str | None:
-        """The ``SSEKMSEncryptionContext`` of the uploaded object."""
-        return self._sse_kms_encryption_context
-
-    @property
-    def bucket_key_enabled(self) -> bool | None:
-        """Whether the uploaded object uses an S3 Bucket Key (``BucketKeyEnabled``)."""
-        return self._bucket_key_enabled
-
-    @property
-    def request_charged(self) -> str | None:
-        """The ``RequestCharged`` field of the response."""
-        return self._request_charged
+        self._set_fields(
+            expiration=response.get("Expiration"),
+            version_id=response.get("VersionId"),
+            etag=response.get("ETag"),
+            **self._checksums(response),
+            checksum_type=response.get("ChecksumType"),
+            server_side_encryption=response.get("ServerSideEncryption"),
+            sse_customer_algorithm=response.get("SSECustomerAlgorithm"),
+            sse_customer_key_md5=response.get("SSECustomerKeyMD5"),
+            sse_kms_key_id=response.get("SSEKMSKeyId"),
+            sse_kms_encryption_context=response.get("SSEKMSEncryptionContext"),
+            bucket_key_enabled=response.get("BucketKeyEnabled"),
+            request_charged=response.get("RequestCharged"),
+        )
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert the response to a dictionary.
+        """Convert the result to a dictionary.
 
         Returns:
-            Deep copy of the instance attributes, keyed by their attribute
-            names (e.g., ``_etag``).
+            A deep copy of the fields, keyed by their names with a leading
+            underscore (e.g., ``_etag``).
         """
-        return copy.deepcopy(self.__dict__)
+        return {f"_{k}": v for k, v in dataclasses.asdict(self).items()}
 
 
-class S3Owner:
+@dataclass(frozen=True, init=False)
+class S3Owner(_S3Response):
     """Represents the owner or initiator of an S3 object or multipart upload.
 
     Attributes:
-        display_name: The display name of the owner.
-        id: The canonical user ID of the owner.
+        display_name: The ``DisplayName`` of the owner.
+        id: The canonical user ``ID`` of the owner.
     """
 
-    def __init__(self, response: dict[str, Any]) -> None:
+    display_name: str | None
+    id: str | None
+
+    def __init__(self, response: Mapping[str, Any]) -> None:
         """Initialize the owner from an ``Owner`` or ``Initiator`` response field.
 
         Args:
             response: The ``Owner`` or ``Initiator`` field of an S3 API response.
         """
-        self._display_name: str | None = response.get("DisplayName")
-        self._id: str | None = response.get("ID")
-
-    @property
-    def display_name(self) -> str | None:
-        """The ``DisplayName`` of the owner."""
-        return self._display_name
-
-    @property
-    def id(self) -> str | None:
-        """The canonical user ``ID`` of the owner."""
-        return self._id
+        self._set_fields(display_name=response.get("DisplayName"), id=response.get("ID"))
 
 
-class S3MultipartUpload:
+@dataclass(frozen=True, init=False)
+class S3MultipartUpload(_S3Response):
     """Represents an S3 multipart upload operation.
 
-    This class manages the metadata for multipart uploads, which allow
-    uploading large files in chunks for better reliability and performance.
-    It tracks upload identifiers, encryption settings, and lifecycle rules.
-
     Attributes:
-        bucket: S3 bucket name for the upload.
-        key: Object key being uploaded.
-        upload_id: Unique identifier for the multipart upload.
-        server_side_encryption: Encryption method applied to the upload.
-        abort_date/abort_rule_id: Lifecycle rule information for upload cleanup.
-        initiated/storage_class/owner/initiator: Fields returned by the
-            ListMultipartUploads API for in-progress uploads.
+        abort_date: The ``AbortDate`` of the upload set by a lifecycle rule.
+        abort_rule_id: The ``AbortRuleId`` of the lifecycle rule that applies
+            to the upload.
+        bucket: The ``Bucket`` of the upload.
+        key: The ``Key`` of the object being uploaded.
+        upload_id: The ``UploadId`` of the multipart upload.
+        server_side_encryption: The ``ServerSideEncryption`` algorithm of
+            the upload.
+        sse_customer_algorithm: The ``SSECustomerAlgorithm`` of the upload.
+        sse_customer_key_md5: The ``SSECustomerKeyMD5`` of the
+            customer-provided key for the upload.
+        sse_kms_key_id: The ``SSEKMSKeyId`` of the KMS key for the upload.
+        sse_kms_encryption_context: The ``SSEKMSEncryptionContext`` of the
+            upload.
+        bucket_key_enabled: Whether the upload uses an S3 Bucket Key
+            (``BucketKeyEnabled``).
+        request_charged: The ``RequestCharged`` field of the response.
+        checksum_algorithm: The ``ChecksumAlgorithm`` of the upload.
+        checksum_type: The ``ChecksumType`` of the upload: ``COMPOSITE`` or
+            ``FULL_OBJECT``.
+        initiated: The ``Initiated`` time of the upload, returned by
+            ListMultipartUploads.
+        storage_class: The ``StorageClass`` of the upload, returned by
+            ListMultipartUploads.
+        owner: The ``Owner`` of the upload, returned by ListMultipartUploads.
+        initiator: The ``Initiator`` of the upload, returned by
+            ListMultipartUploads.
 
     Note:
         Used internally by S3FileSystem for large file upload operations,
         and returned by ``S3FileSystem.list_multipart_uploads``.
     """
 
-    def __init__(self, response: dict[str, Any]) -> None:
+    abort_date: datetime | None
+    abort_rule_id: str | None
+    bucket: str | None
+    key: str | None
+    upload_id: str | None
+    server_side_encryption: str | None
+    sse_customer_algorithm: str | None
+    sse_customer_key_md5: str | None
+    sse_kms_key_id: str | None
+    # Left out of the representation, which logs may show.
+    sse_kms_encryption_context: str | None = field(repr=False)
+    bucket_key_enabled: bool | None
+    request_charged: str | None
+    checksum_algorithm: str | None
+    checksum_type: str | None
+    initiated: datetime | None
+    storage_class: str | None
+    owner: S3Owner | None
+    initiator: S3Owner | None
+
+    def __init__(self, response: Mapping[str, Any]) -> None:
         """Initialize the upload from an S3 API response.
 
         Args:
             response: A CreateMultipartUpload response or an ``Uploads`` entry
                 of a ListMultipartUploads response.
         """
-        self._abort_date = response.get("AbortDate")
-        self._abort_rule_id = response.get("AbortRuleId")
-        self._bucket = response.get("Bucket")
-        self._key = response.get("Key")
-        self._upload_id = response.get("UploadId")
-        self._server_side_encryption = response.get("ServerSideEncryption")
-        self._sse_customer_algorithm = response.get("SSECustomerAlgorithm")
-        self._sse_customer_key_md5 = response.get("SSECustomerKeyMD5")
-        self._sse_kms_key_id = response.get("SSEKMSKeyId")
-        self._sse_kms_encryption_context = response.get("SSEKMSEncryptionContext")
-        self._bucket_key_enabled = response.get("BucketKeyEnabled")
-        self._request_charged = response.get("RequestCharged")
-        self._checksum_algorithm = response.get("ChecksumAlgorithm")
-        self._checksum_type = response.get("ChecksumType")
-        # The following fields are returned by the ListMultipartUploads API.
-        self._initiated: datetime | None = response.get("Initiated")
-        self._storage_class: str | None = response.get("StorageClass")
         owner = response.get("Owner")
-        self._owner: S3Owner | None = S3Owner(owner) if owner else None
         initiator = response.get("Initiator")
-        self._initiator: S3Owner | None = S3Owner(initiator) if initiator else None
-
-    @property
-    def abort_date(self) -> datetime | None:
-        """The ``AbortDate`` of the upload set by a lifecycle rule."""
-        return self._abort_date
-
-    @property
-    def abort_rule_id(self) -> str | None:
-        """The ``AbortRuleId`` of the lifecycle rule that applies to the upload."""
-        return self._abort_rule_id
-
-    @property
-    def bucket(self) -> str | None:
-        """The ``Bucket`` of the upload."""
-        return self._bucket
-
-    @property
-    def key(self) -> str | None:
-        """The ``Key`` of the object being uploaded."""
-        return self._key
-
-    @property
-    def upload_id(self) -> str | None:
-        """The ``UploadId`` of the multipart upload."""
-        return self._upload_id
-
-    @property
-    def server_side_encryption(self) -> str | None:
-        """The ``ServerSideEncryption`` algorithm of the upload."""
-        return self._server_side_encryption
-
-    @property
-    def sse_customer_algorithm(self) -> str | None:
-        """The ``SSECustomerAlgorithm`` of the upload."""
-        return self._sse_customer_algorithm
-
-    @property
-    def sse_customer_key_md5(self) -> str | None:
-        """The ``SSECustomerKeyMD5`` of the customer-provided key for the upload."""
-        return self._sse_customer_key_md5
-
-    @property
-    def sse_kms_key_id(self) -> str | None:
-        """The ``SSEKMSKeyId`` of the KMS key for the upload."""
-        return self._sse_kms_key_id
-
-    @property
-    def sse_kms_encryption_context(self) -> str | None:
-        """The ``SSEKMSEncryptionContext`` of the upload."""
-        return self._sse_kms_encryption_context
-
-    @property
-    def bucket_key_enabled(self) -> bool | None:
-        """Whether the upload uses an S3 Bucket Key (``BucketKeyEnabled``)."""
-        return self._bucket_key_enabled
-
-    @property
-    def request_charged(self) -> str | None:
-        """The ``RequestCharged`` field of the response."""
-        return self._request_charged
-
-    @property
-    def checksum_algorithm(self) -> str | None:
-        """The ``ChecksumAlgorithm`` of the upload."""
-        return self._checksum_algorithm
-
-    @property
-    def checksum_type(self) -> str | None:
-        """The ``ChecksumType`` of the upload: COMPOSITE or FULL_OBJECT."""
-        return self._checksum_type
-
-    @property
-    def initiated(self) -> datetime | None:
-        """The ``Initiated`` time of the upload, returned by ListMultipartUploads."""
-        return self._initiated
-
-    @property
-    def storage_class(self) -> str | None:
-        """The ``StorageClass`` of the upload, returned by ListMultipartUploads."""
-        return self._storage_class
-
-    @property
-    def owner(self) -> S3Owner | None:
-        """The ``Owner`` of the upload, returned by ListMultipartUploads."""
-        return self._owner
-
-    @property
-    def initiator(self) -> S3Owner | None:
-        """The ``Initiator`` of the upload, returned by ListMultipartUploads."""
-        return self._initiator
+        self._set_fields(
+            abort_date=response.get("AbortDate"),
+            abort_rule_id=response.get("AbortRuleId"),
+            bucket=response.get("Bucket"),
+            key=response.get("Key"),
+            upload_id=response.get("UploadId"),
+            server_side_encryption=response.get("ServerSideEncryption"),
+            sse_customer_algorithm=response.get("SSECustomerAlgorithm"),
+            sse_customer_key_md5=response.get("SSECustomerKeyMD5"),
+            sse_kms_key_id=response.get("SSEKMSKeyId"),
+            sse_kms_encryption_context=response.get("SSEKMSEncryptionContext"),
+            bucket_key_enabled=response.get("BucketKeyEnabled"),
+            request_charged=response.get("RequestCharged"),
+            checksum_algorithm=response.get("ChecksumAlgorithm"),
+            checksum_type=response.get("ChecksumType"),
+            # The following fields are returned by the ListMultipartUploads API.
+            initiated=response.get("Initiated"),
+            storage_class=response.get("StorageClass"),
+            owner=S3Owner(owner) if owner else None,
+            initiator=S3Owner(initiator) if initiator else None,
+        )
 
 
-class S3MultipartUploadPart:
+@dataclass(frozen=True, init=False)
+class S3MultipartUploadPart(_S3Response):
     """Represents a single part in an S3 multipart upload operation.
 
-    Each part in a multipart upload has its own metadata including checksums,
-    encryption details, and part identification. This class manages that
-    metadata and provides methods to convert it to API-compatible formats.
-
     Attributes:
-        part_number: The sequential part number (1-based).
-        etag: Entity tag for this specific part.
-        checksum_*: Various integrity checksums for the part data.
-        server_side_encryption: Encryption settings for this part.
+        part_number: The part number of the part.
+        copy_source_version_id: The ``CopySourceVersionId`` of the source
+            object of a copied part.
+        last_modified: The ``LastModified`` time from ``CopyPartResult``;
+            None for uploaded parts.
+        etag: The ``ETag`` of the part.
+        checksum_*: The checksums of the part (``ChecksumCRC32`` and the
+            like), if returned.
+        server_side_encryption: The ``ServerSideEncryption`` algorithm of
+            the part.
+        sse_customer_algorithm: The ``SSECustomerAlgorithm`` of the part.
+        sse_customer_key_md5: The ``SSECustomerKeyMD5`` of the
+            customer-provided key for the part.
+        sse_kms_key_id: The ``SSEKMSKeyId`` of the KMS key for the part.
+        bucket_key_enabled: Whether the part uses an S3 Bucket Key
+            (``BucketKeyEnabled``).
+        request_charged: The ``RequestCharged`` field of the response.
 
     Note:
         Parts must be at least 5MB except for the last part. Used internally
         by S3FileSystem for chunked upload operations.
     """
 
-    def __init__(self, part_number: int, response: dict[str, Any]) -> None:
+    part_number: int
+    copy_source_version_id: str | None
+    last_modified: datetime | None
+    etag: str | None
+    checksum_crc32: str | None
+    checksum_crc32c: str | None
+    checksum_crc64nvme: str | None
+    checksum_sha1: str | None
+    checksum_sha256: str | None
+    checksum_sha512: str | None
+    checksum_md5: str | None
+    checksum_xxhash64: str | None
+    checksum_xxhash3: str | None
+    checksum_xxhash128: str | None
+    server_side_encryption: str | None
+    sse_customer_algorithm: str | None
+    sse_customer_key_md5: str | None
+    sse_kms_key_id: str | None
+    bucket_key_enabled: bool | None
+    request_charged: str | None
+
+    def __init__(self, part_number: int, response: Mapping[str, Any]) -> None:
         """Initialize the part from an UploadPart or UploadPartCopy response.
 
         For an UploadPartCopy response, the ``ETag``, ``LastModified`` and
@@ -999,130 +1370,21 @@ class S3MultipartUploadPart:
             part_number: The part number of the part.
             response: The UploadPart or UploadPartCopy response.
         """
-        self._part_number = part_number
-        self._copy_source_version_id: str | None = response.get("CopySourceVersionId")
         copy_part_result = response.get("CopyPartResult")
-        self._last_modified: datetime | None = (
-            copy_part_result.get("LastModified") if copy_part_result else None
-        )
         part_result = copy_part_result or response
-        self._etag: str | None = part_result.get("ETag")
-        self._checksum_crc32: str | None = part_result.get("ChecksumCRC32")
-        self._checksum_crc32c: str | None = part_result.get("ChecksumCRC32C")
-        self._checksum_crc64nvme: str | None = part_result.get("ChecksumCRC64NVME")
-        self._checksum_sha1: str | None = part_result.get("ChecksumSHA1")
-        self._checksum_sha256: str | None = part_result.get("ChecksumSHA256")
-        self._checksum_sha512: str | None = part_result.get("ChecksumSHA512")
-        self._checksum_md5: str | None = part_result.get("ChecksumMD5")
-        self._checksum_xxhash64: str | None = part_result.get("ChecksumXXHASH64")
-        self._checksum_xxhash3: str | None = part_result.get("ChecksumXXHASH3")
-        self._checksum_xxhash128: str | None = part_result.get("ChecksumXXHASH128")
-        self._server_side_encryption: str | None = response.get("ServerSideEncryption")
-        self._sse_customer_algorithm: str | None = response.get("SSECustomerAlgorithm")
-        self._sse_customer_key_md5: str | None = response.get("SSECustomerKeyMD5")
-        self._sse_kms_key_id: str | None = response.get("SSEKMSKeyId")
-        self._bucket_key_enabled: bool | None = response.get("BucketKeyEnabled")
-        self._request_charged: str | None = response.get("RequestCharged")
-
-    @property
-    def part_number(self) -> int:
-        """The part number of the part."""
-        return self._part_number
-
-    @property
-    def copy_source_version_id(self) -> str | None:
-        """The ``CopySourceVersionId`` of the source object of a copied part."""
-        return self._copy_source_version_id
-
-    @property
-    def last_modified(self) -> datetime | None:
-        """The ``LastModified`` time from ``CopyPartResult``; None for uploaded parts."""
-        return self._last_modified
-
-    @property
-    def etag(self) -> str | None:
-        """The ``ETag`` of the part."""
-        return self._etag
-
-    @property
-    def checksum_crc32(self) -> str | None:
-        """The ``ChecksumCRC32`` of the part."""
-        return self._checksum_crc32
-
-    @property
-    def checksum_crc32c(self) -> str | None:
-        """The ``ChecksumCRC32C`` of the part."""
-        return self._checksum_crc32c
-
-    @property
-    def checksum_sha1(self) -> str | None:
-        """The ``ChecksumSHA1`` of the part."""
-        return self._checksum_sha1
-
-    @property
-    def checksum_sha256(self) -> str | None:
-        """The ``ChecksumSHA256`` of the part."""
-        return self._checksum_sha256
-
-    @property
-    def checksum_crc64nvme(self) -> str | None:
-        """The ``ChecksumCRC64NVME`` of the part."""
-        return self._checksum_crc64nvme
-
-    @property
-    def checksum_sha512(self) -> str | None:
-        """The ``ChecksumSHA512`` of the part."""
-        return self._checksum_sha512
-
-    @property
-    def checksum_md5(self) -> str | None:
-        """The ``ChecksumMD5`` of the part."""
-        return self._checksum_md5
-
-    @property
-    def checksum_xxhash64(self) -> str | None:
-        """The ``ChecksumXXHASH64`` of the part."""
-        return self._checksum_xxhash64
-
-    @property
-    def checksum_xxhash3(self) -> str | None:
-        """The ``ChecksumXXHASH3`` of the part."""
-        return self._checksum_xxhash3
-
-    @property
-    def checksum_xxhash128(self) -> str | None:
-        """The ``ChecksumXXHASH128`` of the part."""
-        return self._checksum_xxhash128
-
-    @property
-    def server_side_encryption(self) -> str | None:
-        """The ``ServerSideEncryption`` algorithm of the part."""
-        return self._server_side_encryption
-
-    @property
-    def sse_customer_algorithm(self) -> str | None:
-        """The ``SSECustomerAlgorithm`` of the part."""
-        return self._sse_customer_algorithm
-
-    @property
-    def sse_customer_key_md5(self) -> str | None:
-        """The ``SSECustomerKeyMD5`` of the customer-provided key for the part."""
-        return self._sse_customer_key_md5
-
-    @property
-    def sse_kms_key_id(self) -> str | None:
-        """The ``SSEKMSKeyId`` of the KMS key for the part."""
-        return self._sse_kms_key_id
-
-    @property
-    def bucket_key_enabled(self) -> bool | None:
-        """Whether the part uses an S3 Bucket Key (``BucketKeyEnabled``)."""
-        return self._bucket_key_enabled
-
-    @property
-    def request_charged(self) -> str | None:
-        """The ``RequestCharged`` field of the response."""
-        return self._request_charged
+        self._set_fields(
+            part_number=part_number,
+            copy_source_version_id=response.get("CopySourceVersionId"),
+            last_modified=copy_part_result.get("LastModified") if copy_part_result else None,
+            etag=part_result.get("ETag"),
+            **self._checksums(part_result),
+            server_side_encryption=response.get("ServerSideEncryption"),
+            sse_customer_algorithm=response.get("SSECustomerAlgorithm"),
+            sse_customer_key_md5=response.get("SSECustomerKeyMD5"),
+            sse_kms_key_id=response.get("SSEKMSKeyId"),
+            bucket_key_enabled=response.get("BucketKeyEnabled"),
+            request_charged=response.get("RequestCharged"),
+        )
 
     def to_api_repr(self) -> dict[str, Any]:
         """Convert the part to a part entry of a CompleteMultipartUpload request.
@@ -1133,137 +1395,88 @@ class S3MultipartUploadPart:
         """
         fields = {
             "ETag": self.etag,
-            "ChecksumCRC32": self.checksum_crc32,
-            "ChecksumCRC32C": self.checksum_crc32c,
-            "ChecksumCRC64NVME": self.checksum_crc64nvme,
-            "ChecksumSHA1": self.checksum_sha1,
-            "ChecksumSHA256": self.checksum_sha256,
-            "ChecksumSHA512": self.checksum_sha512,
-            "ChecksumMD5": self.checksum_md5,
-            "ChecksumXXHASH64": self.checksum_xxhash64,
-            "ChecksumXXHASH3": self.checksum_xxhash3,
-            "ChecksumXXHASH128": self.checksum_xxhash128,
+            **{key: getattr(self, name) for name, key in _CHECKSUM_FIELDS.items()},
             "PartNumber": self.part_number,
         }
         return {key: value for key, value in fields.items() if value is not None}
 
 
-class S3CompleteMultipartUpload:
+@dataclass(frozen=True, init=False)
+class S3CompleteMultipartUpload(_S3Response):
     """Represents the completion of an S3 multipart upload operation.
 
-    This class encapsulates the final response when a multipart upload is
-    completed, including the final object location, versioning information,
-    and consolidated metadata from all parts.
-
     Attributes:
-        location: Final S3 URL of the completed object.
-        bucket: S3 bucket containing the object.
-        key: Final object key.
-        version_id: Version ID if bucket versioning is enabled.
-        etag: Final entity tag of the complete object.
-        server_side_encryption: Encryption applied to the final object.
+        location: The ``Location`` URI of the completed object.
+        bucket: The ``Bucket`` of the completed object.
+        key: The ``Key`` of the completed object.
+        expiration: The ``Expiration`` header of the completed object.
+        version_id: The ``VersionId`` of the completed object.
+        etag: The ``ETag`` of the completed object.
+        checksum_*: The checksums of the completed object
+            (``ChecksumCRC32`` and the like), if returned.
+        checksum_type: The ``ChecksumType`` of the completed object:
+            ``COMPOSITE`` or ``FULL_OBJECT``.
+        server_side_encryption: The ``ServerSideEncryption`` algorithm of
+            the completed object.
+        sse_kms_key_id: The ``SSEKMSKeyId`` of the KMS key for the completed
+            object.
+        bucket_key_enabled: Whether the completed object uses an S3 Bucket
+            Key (``BucketKeyEnabled``).
+        request_charged: The ``RequestCharged`` field of the response.
 
     Note:
         This represents the successful completion of a multipart upload.
         Used internally by S3FileSystem operations.
     """
 
-    def __init__(self, response: dict[str, Any]) -> None:
+    location: str | None
+    bucket: str | None
+    key: str | None
+    expiration: str | None
+    version_id: str | None
+    etag: str | None
+    checksum_crc32: str | None
+    checksum_crc32c: str | None
+    checksum_crc64nvme: str | None
+    checksum_sha1: str | None
+    checksum_sha256: str | None
+    checksum_sha512: str | None
+    checksum_md5: str | None
+    checksum_xxhash64: str | None
+    checksum_xxhash3: str | None
+    checksum_xxhash128: str | None
+    checksum_type: str | None
+    server_side_encryption: str | None
+    sse_kms_key_id: str | None
+    bucket_key_enabled: bool | None
+    request_charged: str | None
+
+    def __init__(self, response: Mapping[str, Any]) -> None:
         """Initialize the result from a CompleteMultipartUpload response.
 
         Args:
             response: The CompleteMultipartUpload response.
         """
-        self._location: str | None = response.get("Location")
-        self._bucket: str | None = response.get("Bucket")
-        self._key: str | None = response.get("Key")
-        self._expiration: str | None = response.get("Expiration")
-        self._version_id: str | None = response.get("VersionId")
-        self._etag: str | None = response.get("ETag")
-        self._checksum_crc32: str | None = response.get("ChecksumCRC32")
-        self._checksum_crc32c: str | None = response.get("ChecksumCRC32C")
-        self._checksum_sha1: str | None = response.get("ChecksumSHA1")
-        self._checksum_sha256: str | None = response.get("ChecksumSHA256")
-        self._server_side_encryption = response.get("ServerSideEncryption")
-        self._sse_kms_key_id = response.get("SSEKMSKeyId")
-        self._bucket_key_enabled = response.get("BucketKeyEnabled")
-        self._request_charged = response.get("RequestCharged")
+        self._set_fields(
+            location=response.get("Location"),
+            bucket=response.get("Bucket"),
+            key=response.get("Key"),
+            expiration=response.get("Expiration"),
+            version_id=response.get("VersionId"),
+            etag=response.get("ETag"),
+            **self._checksums(response),
+            checksum_type=response.get("ChecksumType"),
+            server_side_encryption=response.get("ServerSideEncryption"),
+            sse_kms_key_id=response.get("SSEKMSKeyId"),
+            bucket_key_enabled=response.get("BucketKeyEnabled"),
+            request_charged=response.get("RequestCharged"),
+        )
 
-    @property
-    def location(self) -> str | None:
-        """The ``Location`` URI of the completed object."""
-        return self._location
-
-    @property
-    def bucket(self) -> str | None:
-        """The ``Bucket`` of the completed object."""
-        return self._bucket
-
-    @property
-    def key(self) -> str | None:
-        """The ``Key`` of the completed object."""
-        return self._key
-
-    @property
-    def expiration(self) -> str | None:
-        """The ``Expiration`` header of the completed object."""
-        return self._expiration
-
-    @property
-    def version_id(self) -> str | None:
-        """The ``VersionId`` of the completed object."""
-        return self._version_id
-
-    @property
-    def etag(self) -> str | None:
-        """The ``ETag`` of the completed object."""
-        return self._etag
-
-    @property
-    def checksum_crc32(self) -> str | None:
-        """The ``ChecksumCRC32`` of the completed object."""
-        return self._checksum_crc32
-
-    @property
-    def checksum_crc32c(self) -> str | None:
-        """The ``ChecksumCRC32C`` of the completed object."""
-        return self._checksum_crc32c
-
-    @property
-    def checksum_sha1(self) -> str | None:
-        """The ``ChecksumSHA1`` of the completed object."""
-        return self._checksum_sha1
-
-    @property
-    def checksum_sha256(self) -> str | None:
-        """The ``ChecksumSHA256`` of the completed object."""
-        return self._checksum_sha256
-
-    @property
-    def server_side_encryption(self) -> str | None:
-        """The ``ServerSideEncryption`` algorithm of the completed object."""
-        return self._server_side_encryption
-
-    @property
-    def sse_kms_key_id(self) -> str | None:
-        """The ``SSEKMSKeyId`` of the KMS key for the completed object."""
-        return self._sse_kms_key_id
-
-    @property
-    def bucket_key_enabled(self) -> bool | None:
-        """Whether the completed object uses an S3 Bucket Key (``BucketKeyEnabled``)."""
-        return self._bucket_key_enabled
-
-    @property
-    def request_charged(self) -> str | None:
-        """The ``RequestCharged`` field of the response."""
-        return self._request_charged
-
-    def to_dict(self):
-        """Convert the response to a dictionary.
+    def to_dict(self) -> dict[str, Any]:
+        """Convert the result to a dictionary.
 
         Returns:
-            Deep copy of the instance attributes, keyed by their attribute
-            names (e.g., ``_etag``).
+            A deep copy of the fields, keyed by their names with a leading
+            underscore (e.g., ``_etag``).
         """
-        return copy.deepcopy(self.__dict__)
+        return {f"_{k}": v for k, v in dataclasses.asdict(self).items()}
