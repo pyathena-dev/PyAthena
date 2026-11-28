@@ -3283,7 +3283,13 @@ class S3FileSystem(AbstractFileSystem):
         Returns:
             True if the source has no version and is a directory.
         """
-        path = rpath if isinstance(rpath, S3Path) else S3Path.parse(self._strip_protocol(rpath))
+        # Split, not parsed, so that the root path, which get() expands and
+        # leaves out as a directory, is accepted.
+        version_id = (
+            rpath.version_id
+            if isinstance(rpath, S3Path)
+            else S3Path.split_version_id(self._strip_protocol(rpath))[1]
+        )
         file_kwargs = file_kwargs or {}
         # The request parameters of the file, as open() merges them.
         params = {
@@ -3291,7 +3297,7 @@ class S3FileSystem(AbstractFileSystem):
             **(file_kwargs.get("s3_additional_kwargs") or {}),
             **file_kwargs,
         }
-        if path.version_id or file_kwargs.get("version_id") or params.get("VersionId"):
+        if version_id or file_kwargs.get("version_id") or params.get("VersionId"):
             return False
         return bool(self.isdir(rpath))
 

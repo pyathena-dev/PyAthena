@@ -3638,6 +3638,15 @@ class TestS3FileSystem:
         fs.get("s3://bucket/k*", f"{tmp_path}/out/", **kwargs)
         assert [str(c.args[0]) for c in fs.get_file.call_args_list] == sources
 
+    def test_get_root_is_left_out(self, tmp_path):
+        # The root path is a directory, which get() leaves out without a
+        # recursion: nothing is downloaded and nothing raises.
+        fs = self._make_fs()
+        fs.get_file = mock.MagicMock()
+
+        fs.get("s3://", f"{tmp_path}/out/")
+        fs.get_file.assert_not_called()
+
     def test_put_directories_with_one_destination(self, tmp_path):
         # GH-1398: put_file() uploads nothing for a local directory, so
         # directories with one destination do not conflict. They used to.
