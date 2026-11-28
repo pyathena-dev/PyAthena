@@ -299,11 +299,16 @@ serdeproperties
   { "property_name": "property_value", "property_name": "property_value", ... }
   ```
 
+  Keys and values are inserted into string literals as given.
+  Escape a backslash or a single quote with a backslash, and write `%` as `%%` under the default `pyformat` parameter style.
+  Reflection returns the stored values, without this escaping.
+
   Example:
 
   ```python
   Table("some_table", metadata, ..., awsathena_serdeproperties={
-      "separatorChar": ",", "escapeChar": "\\\\"
+      "separatorChar": ",",
+      "escapeChar": "\\\\",  # Stored as one backslash.
   })
   ```
 
@@ -317,6 +322,8 @@ tblproperties
   ```python
   { "property_name": "property_value", "property_name": "property_value", ... }
   ```
+
+  Keys and values are inserted into string literals as given, with the same escaping as `serdeproperties`.
 
   Example:
 
@@ -349,7 +356,9 @@ awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3%
 ```
 
 `serdeproperties` and `tblproperties` must be converted to strings in the `'key'='value','key'='value'` format and url encoded.
-If single quotes are included, escape them with a backslash.
+These strings, and the `row_format` and `file_format` options, are inserted into the statement as given.
+Within a string literal, escape a backslash or a single quote with a backslash.
+Write `%` as `%%` under the default `pyformat` parameter style, which is `%25%25` when url encoded.
 
 For example, if you configure a projection setting `'projection.enabled'='true','projection.dt.type'='date','projection.dt.range'='NOW-1YEARS,NOW','projection.dt.format'= 'yyyy-MM-dd'` in tblproperties, it would look like this
 
