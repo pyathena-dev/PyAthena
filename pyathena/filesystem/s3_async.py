@@ -1096,9 +1096,9 @@ class AioS3FileSystem(AsyncFileSystem):
         Raises:
             ValueError: If two paths of a dictionary name the same object.
         """
-        if hasattr(path, "items"):
-            # Any object with items(), such as a mapping, whose items fsspec
-            # writes.
+        if not isinstance(path, str) and callable(getattr(path, "items", None)):
+            # Any other object with items(), such as a mapping, whose items
+            # fsspec writes.
             path = dict(self._sync_fs._pipe_items(path))
             count = len(path)
         else:
