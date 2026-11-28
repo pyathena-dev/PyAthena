@@ -5861,6 +5861,8 @@ class TestS3FileSystem:
     @pytest.mark.parametrize(
         ("rpath", "kwargs", "fs_params"),
         [
+            # The suffix is kept when the source is opened.
+            ("s3://bucket/key?versionId=v1", {}, {}),
             ("s3://bucket/key", {"version_id": "v1"}, {}),
             ("s3://bucket/key", {"VersionId": "v1"}, {}),
             ("s3://bucket/key", {"s3_additional_kwargs": {"VersionId": "v1"}}, {}),
