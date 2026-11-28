@@ -94,7 +94,7 @@ class S3PathPairing:
         return (
             isinstance(self.path1, str)
             and not self._is_glob(self.path1)
-            and not trailing_sep(self.path1)
+            and not S3Path.split_trailing_separators(self.path1)[1]
             and isinstance(self.path2, str)
             and not trailing_sep(self.path2)
         )
@@ -141,8 +141,11 @@ class S3PathPairing:
         # As in fsspec's copy(); destination_is_dir is None only when
         # looks_up_destination is false, where the other terms decide.
         dest_is_dir = isinstance(path2, str) and (trailing_sep(path2) or bool(destination_is_dir))
+        # A trailing slash names the contents of a directory, unless it
+        # belongs to a version ID.
+        contents = isinstance(path1, str) and bool(S3Path.split_trailing_separators(path1)[1])
         exists = source_is_str and (
-            (glob and len(sources) == 1) or (not glob and dest_is_dir and not trailing_sep(path1))
+            (glob and len(sources) == 1) or (not glob and dest_is_dir and not contents)
         )
         names = [
             p.name if isinstance(p, S3Path) else S3Path.split_version_id(p)[0] for p in sources

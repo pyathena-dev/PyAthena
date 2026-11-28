@@ -516,9 +516,7 @@ class TestS3FileSystem:
             ("s3://bucket/a/c.txt?version_id=v1", S3Path("bucket", "a/c.txt", "v1")),
             # A directory marker object keeps the trailing slash before the query.
             ("s3://bucket/a/c.txt/?versionId=v1", S3Path("bucket", "a/c.txt/", "v1")),
-            # info() strips a slash after the version ID of a path, but not
-            # of the version_id argument.
-            ("s3://bucket/a/c.txt?versionId=v1/", S3Path("bucket", "a/c.txt", "v1")),
+            # GH-1469: a slash after the version ID belongs to it.
             ("s3://bucket/a/c.txt?versionId=v1/", S3Path("bucket", "a/c.txt", "v1/")),
             # Without a version ID after it, the query is part of the key.
             pytest.param(
@@ -542,6 +540,34 @@ class TestS3FileSystem:
         self._cache(fs, *invalidated, *kept)
         fs.invalidate_cache(path)
         assert self._cached(fs, invalidated + kept) == kept
+
+    def test_invalidate_cache_version_ending_in_a_slash(self):
+        # GH-1469: the path names the version v1/, whose slash is not one of
+        # a directory, so the versions v1 and v1// stay cached. The version
+        # v1 was invalidated, and v1/ was not.
+        fs = self._make_fs()
+        versions = [("lookup", S3Path("bucket", "a/c.txt", v)) for v in ("v1", "v1/", "v1//")]
+        self._cache(fs, *versions)
+        fs.invalidate_cache("s3://bucket/a/c.txt?versionId=v1/")
+        assert self._cached(fs, versions) == [versions[0], versions[2]]
+
+    @pytest.mark.parametrize(
+        ("path", "stripped", "parent"),
+        [
+            # GH-1469: the slashes that end a version ID are kept. They were
+            # stripped, which named the version v1.
+            ("s3://bucket/key?versionId=v1/", "bucket/key?versionId=v1/", "bucket"),
+            ("s3a://bucket/a/key?versionId=x/y//", "bucket/a/key?versionId=x/y//", "bucket/a"),
+            # A query that names no version without the slash is a key.
+            ("s3://bucket/key?versionId=/", "bucket/key?versionId=", "bucket"),
+            ("s3://bucket/dir//", "bucket/dir", "bucket"),
+        ],
+    )
+    def test_strip_protocol_keeps_version_slashes(self, path, stripped, parent):
+        assert S3FileSystem._strip_protocol(path) == stripped
+        assert S3FileSystem._strip_protocol([path]) == [stripped]
+        # The parent of a version is that of its object.
+        assert S3FileSystem._parent(path) == parent
 
     def test_rm_file_version_invalidates_object_path(self):
         fs = self._make_fs()
@@ -4944,9 +4970,10 @@ class TestS3FileSystem:
         requests = []
 
         def call(method, **request):
-            requests.append((method._extract_mock_name().split(".")[-1], request))
+            name = method._extract_mock_name().split(".")[-1]
+            requests.append((name, request))
             if request.get("VersionId") == version:
-                if "Range" in request:
+                if name == "get_object":
                     return {"Body": io.BytesIO(data)}
                 return {"ContentLength": len(data), "ETag": '"v1"', "VersionId": version}
             return {"ContentLength": 0, "ETag": '"current"'}
@@ -4965,6 +4992,8 @@ class TestS3FileSystem:
             # lookup of the path string dropped the slash.
             ("s3://bucket/key", {"VersionId": "v1/"}, "v1/"),
             ("s3://bucket/key", {"version_id": "v1/"}, "v1/"),
+            # GH-1469: also one that the path names.
+            ("s3://bucket/key?versionId=v1/", {}, "v1/"),
         ],
     )
     def test_open_version_id_parameter(self, path, kwargs, version):
@@ -5007,6 +5036,85 @@ class TestS3FileSystem:
         with reopen(*args) as reopened:
             assert reopened.read() == b"data"
         assert {r["VersionId"] for _, r in requests} == {"v1"}
+
+    @pytest.mark.parametrize(
+        ("path", "kwargs"),
+        [
+            ("s3://bucket/key", {"version_id": "v1/"}),
+            ("s3://bucket/key", {"VersionId": "v1/"}),
+            ("s3://bucket/key?versionId=v1/", {}),
+        ],
+    )
+    def test_open_version_ending_in_a_slash_reopens_the_version(self, path, kwargs):
+        # GH-1469: fsspec reopens a file (e.g., when it is unpickled) by its
+        # path, which keeps the slash that ends the version ID. The reopened
+        # file looked up the version v1.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        requests = self._serve_object_version(fs, "v1/")
+
+        with fs.open(path, "rb", **kwargs) as f:
+            reopen, args = f.__reduce__()
+        requests.clear()
+        with reopen(*args) as reopened:
+            assert reopened.read() == b"data"
+        assert {r["VersionId"] for _, r in requests} == {"v1/"}
+
+    @pytest.mark.parametrize(
+        ("method", "expected"),
+        [
+            ("cat", b"data"),
+            ("exists", True),
+            ("size", 4),
+            ("ls", ["bucket/key?versionId=v1/"]),
+            ("walk", [("bucket/key?versionId=v1/", [], [""])]),
+        ],
+    )
+    def test_version_ending_in_a_slash(self, method, expected):
+        # GH-1469: a path that ends in a slash after its version ID names
+        # that version. The slash was stripped, and the version v1 was looked
+        # up; walk() also named the file after the path instead of "".
+        fs = self._make_fs()
+        requests = self._serve_object_version(fs, "v1/")
+
+        result = getattr(fs, method)("s3://bucket/key?versionId=v1/")
+        assert (list(result) if method == "walk" else result) == expected
+        assert {r["VersionId"] for _, r in requests} == {"v1/"}
+
+    @pytest.mark.parametrize("method", ["get", "copy"])
+    def test_version_ending_in_a_slash_is_paired_as_an_object(self, tmp_path, method):
+        # GH-1469: the slash of a version ID is not one of a directory, so
+        # the version is transferred into the destination directory, named
+        # after its key, also one that is looked up because its path ends in
+        # no slash.
+        fs = self._make_fs()
+        self._serve_object_version(fs, "v1/")
+        fs.get_file = mock.MagicMock()
+        fs.cp_file = mock.MagicMock()
+
+        if method == "get":
+            (tmp_path / "out").mkdir()
+            fs.get("s3://bucket/key?versionId=v1/", f"{tmp_path}/out")
+            pairs = [c.args[:2] for c in fs.get_file.call_args_list]
+            expected = f"{tmp_path.as_posix()}/out/key"
+        else:
+            fs.copy("s3://bucket/key?versionId=v1/", "s3://bucket/out/")
+            pairs = [c.args[:2] for c in fs.cp_file.call_args_list]
+            expected = "s3://bucket/out/key"
+        assert [(str(p1), str(p2)) for p1, p2 in pairs] == [("bucket/key?versionId=v1/", expected)]
+
+    def test_glob_pattern_ending_in_a_slash_after_a_query(self):
+        # GH-1469: in a glob pattern, "?" matches any character, and a
+        # trailing slash after what looks like a version ID query selects the
+        # directories, as fsspec selects them for a pattern that ends in a
+        # slash, although the slash is kept by _strip_protocol().
+        fs = self._make_fs()
+        self._serve_keys(fs, {"abversionId=v1/x", "acversionId=v1"})
+
+        assert fs.glob("s3://bucket/a?versionId=v1/") == ["bucket/abversionId=v1"]
+        assert list(fs.glob("s3://bucket/a?versionId=v1/", detail=True)) == [
+            "bucket/abversionId=v1"
+        ]
 
     def test_open_empty_version_id_parameter_is_sent(self):
         # GH-1437: an empty VersionId parameter is sent as given, as

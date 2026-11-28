@@ -1612,6 +1612,20 @@ class AioS3FileSystem(AsyncFileSystem):
         Returns:
             The matching paths, or a dict of their info with ``detail=True``.
         """
+        stripped = self._strip_protocol(path)
+        if stripped.endswith("/"):
+            # As in S3FileSystem.glob(): the slashes that _strip_protocol()
+            # keeps end a pattern that matches directories.
+            detail = kwargs.pop("detail", False)
+            found = await super()._glob(
+                stripped.rstrip("/"), maxdepth=maxdepth, detail=True, **kwargs
+            )
+            directories = {
+                name: info
+                for name, info in found.items()
+                if info["type"] == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
+            }
+            return directories if detail else list(directories)
         return await super()._glob(stringify_path(path), maxdepth=maxdepth, **kwargs)
 
     def walk(self, path, maxdepth=None, topdown=True, on_error="omit", **kwargs):
@@ -1849,6 +1863,33 @@ class AioS3FileSystem(AsyncFileSystem):
             create=create,
             missing_exceptions=missing_exceptions,
         )
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        """Remove the protocol and the trailing slashes from a path.
+
+        As :meth:`S3FileSystem._strip_protocol`, which keeps the slashes that
+        end a version ID.
+
+        Args:
+            path: The path, an ``os.PathLike``, or a list of them.
+
+        Returns:
+            The path without the protocol, or a list of them.
+        """
+        return S3FileSystem._strip_protocol(path)
+
+    @classmethod
+    def _parent(cls, path):
+        """Return the parent of a path, as :meth:`S3FileSystem._parent` does.
+
+        Args:
+            path: The path.
+
+        Returns:
+            The parent path, without the protocol.
+        """
+        return S3FileSystem._parent(path)
 
     def unstrip_protocol(self, name: str | os.PathLike[str]) -> str:
         """Add the protocol to a path, as fsspec's ``unstrip_protocol()`` does.

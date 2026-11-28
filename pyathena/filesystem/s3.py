@@ -1040,7 +1040,7 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError(
                 "Cannot list the object versions unless the filesystem is version aware."
             )
-        path = self._strip_protocol(path).rstrip("/")
+        path = self._strip_protocol(path)
         if path in ["", "/"]:
             files = self._ls_buckets(refresh)
         else:
@@ -1761,7 +1761,7 @@ class S3FileSystem(AbstractFileSystem):
             if name.startswith(path + "/"):
                 (dirs if is_directory else files)[name[len(path) + 1 :]] = info
                 continue
-            pathname = name.rstrip("/")
+            pathname = S3Path.split_trailing_separators(name)[0]
             if is_directory and pathname != path:
                 dirs[pathname.rsplit("/", 1)[-1]] = info
             elif pathname == path:
@@ -1821,6 +1821,18 @@ class S3FileSystem(AbstractFileSystem):
         stem = stripped[: min(wildcards)].rpartition("/")[2] if wildcards else ""
         if stem and "prefix" not in kwargs:
             kwargs["prefix"] = stem
+        if stripped.endswith("/"):
+            # The slashes that _strip_protocol() keeps after what looks like a
+            # version ID query end a pattern, which matches directories, as
+            # fsspec matches a pattern that ends in a slash.
+            detail = kwargs.pop("detail", False)
+            found = super().glob(stripped.rstrip("/"), maxdepth=maxdepth, detail=True, **kwargs)
+            directories = {
+                name: info
+                for name, info in found.items()
+                if info["type"] == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
+            }
+            return directories if detail else list(directories)
         return super().glob(stringify_path(path), maxdepth=maxdepth, **kwargs)
 
     def tree(
@@ -1887,6 +1899,43 @@ class S3FileSystem(AbstractFileSystem):
             create=create,
             missing_exceptions=missing_exceptions,
         )
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        """Remove the protocol and the trailing slashes from a path, as fsspec does.
+
+        Unlike fsspec, the slashes that end a version ID are kept (see
+        :meth:`S3Path.split_trailing_separators`), so that
+        ``s3://bucket/key?versionId=v1/`` names the version ``v1/``, also
+        when fsspec reopens a file of that version by its path.
+
+        Args:
+            path: The path, an ``os.PathLike``, or a list of them.
+
+        Returns:
+            The path without the protocol, or a list of them.
+        """
+        if isinstance(path, list):
+            return [cls._strip_protocol(p) for p in path]
+        stripped = super()._strip_protocol(path)
+        name, _ = S3Path.split_trailing_separators(stringify_path(path))
+        # The slashes of a version ID, which fsspec strips.
+        return stripped + name[len(name.rstrip("/")) :]
+
+    @classmethod
+    def _parent(cls, path):
+        """Return the parent of a path, as fsspec's ``_parent()`` does.
+
+        The parent of a path with a version ID is that of the path without
+        it: ``bucket/a/key?versionId=x/y`` is in ``bucket/a``.
+
+        Args:
+            path: The path.
+
+        Returns:
+            The parent path, without the protocol.
+        """
+        return super()._parent(S3Path.split_version_id(cls._strip_protocol(path))[0])
 
     def unstrip_protocol(self, name: str | os.PathLike[str]) -> str:
         """Add the protocol to a path, as fsspec's ``unstrip_protocol()`` does.
@@ -2578,7 +2627,7 @@ class S3FileSystem(AbstractFileSystem):
             ValueError: If the ACL is invalid, the path is empty, or
                 botocore rejects the parameters of the CreateBucket request.
         """
-        path = self._strip_protocol(path).rstrip("/")
+        path = self._strip_protocol(path)
         if not path:
             raise ValueError("Cannot create the root directory.")
         s3_path = S3Path.parse(path)
@@ -2653,7 +2702,7 @@ class S3FileSystem(AbstractFileSystem):
                 filesystem instance.
             OSError: If the bucket is not empty.
         """
-        path = self._strip_protocol(path).rstrip("/")
+        path = self._strip_protocol(path)
         s3_path = S3Path.parse(path)
         if s3_path.key:
             if self.exists(path):
@@ -2916,7 +2965,10 @@ class S3FileSystem(AbstractFileSystem):
             )
             if not (
                 pairing.skips_directories
-                and (trailing_sep(name) or (not versioned and self.isdir(target)))
+                and (
+                    S3Path.split_trailing_separators(name)[1]
+                    or (not versioned and self.isdir(target))
+                )
             )
         ]
         isdir = LocalFileSystem().isdir if local else self.isdir
@@ -4774,7 +4826,7 @@ class S3FileSystem(AbstractFileSystem):
             return
         raw = stringify_path(path)
         self._listing_cache.invalidate_path(
-            self._strip_protocol(raw), len(raw) - len(raw.rstrip("/"))
+            self._strip_protocol(raw), len(S3Path.split_trailing_separators(raw)[1])
         )
 
     def _invalidate(self, path: S3Path) -> None:
@@ -5099,8 +5151,8 @@ class S3FileTarget:
             # so that a reopened (e.g., unpickled) file reads the same version.
             path = f"{path}?versionId={version_id}"
         if version_id:
-            # A version is looked up by its bucket, key and version, also one
-            # that ends in a slash, which the lookup of a path string drops.
+            # A version is looked up by its bucket, key and version, without
+            # parsing the path again.
             target = s3_path.with_version_id(version_id)
         if "r" not in mode and not (
             fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE

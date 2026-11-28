@@ -161,6 +161,21 @@ class TestS3Path:
     @pytest.mark.parametrize(
         ("path", "expected"),
         [
+            ("bucket/dir//", ("bucket/dir", "//")),
+            ("bucket/key", ("bucket/key", "")),
+            # GH-1469: the slashes of a version ID are not split.
+            ("s3://bucket/key?versionId=v1/", ("s3://bucket/key?versionId=v1/", "")),
+            ("bucket/key?version_id=x/y//", ("bucket/key?version_id=x/y//", "")),
+            # Without the slash, the query names no version: it is a key.
+            ("bucket/key?versionId=/", ("bucket/key?versionId=", "/")),
+        ],
+    )
+    def test_split_trailing_separators(self, path, expected):
+        assert S3Path.split_trailing_separators(path) == expected
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
             ("bucket/key", False),
             ("bucket/key?versionId=v1", True),
             ("bucket/what?.txt", False),

@@ -331,7 +331,8 @@ Every method of the filesystems also accepts paths as `os.PathLike` objects, suc
 protocol or a trailing slash needs to be a string. On Windows, `pathlib.Path` joins
 its parts with backslashes, so S3 paths need `PurePosixPath`.
 
-Paths are normalized as in fsspec, which drops a trailing slash, so `info`, `isfile`,
+Paths are normalized as in fsspec, which drops a trailing slash (except the slashes
+that end a version ID, as described under Versioning), so `info`, `isfile`,
 and `open` treat `s3://YOUR_S3_BUCKET/dir/` as `s3://YOUR_S3_BUCKET/dir`: the object
 `dir` if it exists, and otherwise the directory `dir`. An object whose key ends in a
 slash, such as a folder marker, is therefore not a file for these methods. Opening
@@ -615,7 +616,12 @@ with `maxdepth`, a name that ends in a slash, such as a folder marker that a glo
 names a local directory and is still left out.
 Only a
 `?versionId=` (or `?versionID=`, `?versionid=`, `?version_id=`) query at the end of a
-path is a version; any other `?` is part of the key. A path with a version is not a
+path is a version; any other `?` is part of the key. Slashes at the end of the query
+belong to the version ID, which may end in slashes: `s3://YOUR_S3_BUCKET/key?versionId=v1/`
+is version `v1/` of `key`, also when a file of that version is reopened (e.g., when it is
+unpickled). A query that names no version without the slashes, such as `?versionId=/`, is
+part of the key. In a `glob()` pattern, where `?` matches any character, a trailing
+slash after such a query still selects directories. A path with a version is not a
 glob pattern: `copy()`, `mv()` and `get()` copy that version to a destination named
 after its key. `ls()` and `find()` of a key path with a version return only that
 version, named as `ls(versions=True)` names it, without listing the keys under the

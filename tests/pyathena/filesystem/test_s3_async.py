@@ -3398,6 +3398,24 @@ class TestAioS3FileSystem:
             "bucket/dir/a1",
         ]
 
+    def test_strip_protocol_keeps_version_slashes(self):
+        # GH-1469: as S3FileSystem, whose expansion and lookups the
+        # filesystem runs, so that both name the same paths.
+        path = "s3://bucket/a/key?versionId=v1/"
+        assert AioS3FileSystem._strip_protocol(path) == "bucket/a/key?versionId=v1/"
+        assert AioS3FileSystem._parent(path) == "bucket/a"
+
+    @pytest.mark.asyncio
+    async def test_glob_pattern_ending_in_a_slash_after_a_query(self):
+        # GH-1469: as with S3FileSystem.glob(), the pattern selects the
+        # directories that it matches.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, {"abversionId=v1/x", "acversionId=v1"})
+
+        assert await fs._glob("s3://bucket/a?versionId=v1/") == ["bucket/abversionId=v1"]
+
     @pytest.mark.asyncio
     async def test_get_passes_kwargs_to_expansion(self, tmp_path):
         # GH-1425: as with S3FileSystem.get(), the keyword arguments of
