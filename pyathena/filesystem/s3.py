@@ -2691,11 +2691,11 @@ class S3FileSystem(AbstractFileSystem):
                 except ``Body``: the object is empty.
 
         Returns:
-            The PutObject response as a dictionary (see
-            :meth:`S3PutObject.to_dict`).
+            The PutObject response as botocore returns it, including
+            ``ResponseMetadata``, as s3fs returns it.
 
         Raises:
-            TypeError: If kwargs has ``Body``.
+            TypeError: If kwargs has ``Body``, ``Bucket`` or ``Key``.
             ValueError: If the path has a version ID, is a bucket, or exists
                 while ``truncate`` is False.
         """
@@ -2710,11 +2710,11 @@ class S3FileSystem(AbstractFileSystem):
         if not s3_path.key:
             raise ValueError("Cannot touch the bucket.")
 
-        # The empty body is passed, so that a body keyword argument raises
-        # TypeError.
-        object_ = self.core.put_object(s3_path, None, **kwargs)
+        response = self.core.call(
+            self.core.client.put_object, Bucket=s3_path.bucket, Key=s3_path.key, **kwargs
+        )
         self.invalidate_cache(path)
-        return object_.to_dict()
+        return response
 
     def mv(self, path1, path2, recursive=False, maxdepth=None, batch_size=None, **kwargs) -> None:
         """Move files from one S3 location to another.
@@ -3692,6 +3692,10 @@ class S3FileSystem(AbstractFileSystem):
             **kwargs.pop("s3_additional_kwargs", {}),
             **kwargs,
         }
+        # As in the open() path, the parameters yield to the fields that the
+        # write sets.
+        for name in ("Bucket", "Key", "Body"):
+            request_kwargs.pop(name, None)
         if mode == "create":
             # Checked up front, as open() does in "xb" mode, and with
             # IfNoneMatch for an object created since.
@@ -3926,6 +3930,10 @@ class S3FileSystem(AbstractFileSystem):
         # offset: that of the path, then version_id, then the VersionId
         # parameter, which is sent as given.
         version_id = path.version_id or version_id or kwargs.get("VersionId") or None
+        if version_id and kwargs.get("VersionId") == version_id:
+            # The parameter named the version that the path now has; another
+            # one is a field that the path sets, which raises TypeError.
+            del kwargs["VersionId"]
         ranges: tuple[int, int | None] | None = None
         if start is not None and start < 0 and end is None:
             # S3 returns the last bytes, or the whole object when it is
@@ -4955,6 +4963,11 @@ class S3FileSystem(AbstractFileSystem):
         )
 
 
+# The fields that a read of a file sets, to which its parameters yield, without
+# and with the version ID of the file.
+_READ_FIELDS = frozenset(["Bucket", "Key", "Range"])
+_VERSION_READ_FIELDS = _READ_FIELDS | {"VersionId"}
+
 # The parameters of the encryption of a written object, kept from an appended
 # object as a whole.
 _ENCRYPTION_PARAMS = frozenset(
@@ -5362,17 +5375,19 @@ class S3File(AbstractBufferedFile):
         """The bucket, key and version of the object that the file reads or writes."""
         return S3Path(self.bucket, self.key, self.version_id)
 
-    def _get_request_kwargs(self, method: str) -> dict[str, Any]:
-        """Select the parameters of the file that an S3 operation accepts.
+    def _get_request_kwargs(self) -> dict[str, Any]:
+        """Select the parameters of the file that a read of it takes.
 
-        Args:
-            method: The name of the client method, such as ``get_object``.
+        The parameters of the file yield to the fields that the read sets:
+        its bucket, key and range, and its version ID if it has one.
 
         Returns:
-            The parameters in ``s3_additional_kwargs`` that the operation
-            accepts.
+            The parameters in ``s3_additional_kwargs`` that GetObject
+            accepts, except those fields.
         """
-        return self.fs.core.operation_params(method, self.s3_additional_kwargs)
+        params = self.fs.core.operation_params("get_object", self.s3_additional_kwargs)
+        fields = _VERSION_READ_FIELDS if self.version_id else _READ_FIELDS
+        return {k: v for k, v in params.items() if k not in fields}
 
     def close(self) -> None:
         """Close the file, flushing any written data, and shut down its executor.
@@ -6077,7 +6092,7 @@ class S3File(AbstractBufferedFile):
             start, end, max_workers=self.max_workers, worker_block_size=self.blocksize
         )
         path = S3Path(self.bucket, self.key, self.version_id)
-        request_kwargs = self._get_request_kwargs("get_object")
+        request_kwargs = self._get_request_kwargs()
         if len(ranges) > 1:
             # Not kept by a variable of this frame, which the traceback of an
             # interrupt keeps (F5).
@@ -6152,7 +6167,7 @@ class S3File(AbstractBufferedFile):
         block = self.blocksize if self.blocksize > 0 else max(size, 1)
         window = min(self.max_workers, self.fs._request_pool.max_workers)
         path = S3Path(self.bucket, self.key, self.version_id)
-        read = functools.partial(self._get_range, path, **self._get_request_kwargs("get_object"))
+        read = functools.partial(self._get_range, path, **self._get_request_kwargs())
         wave = window * block
         result: S3MapResult[bytes] | None = None
         try:

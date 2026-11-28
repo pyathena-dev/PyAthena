@@ -1194,10 +1194,9 @@ class S3PutObject(_S3Response):
         """Convert the result to a dictionary.
 
         Returns:
-            A deep copy of the fields, keyed by their names with a leading
-            underscore (e.g., ``_etag``).
+            A deep copy of the fields, keyed by their names (e.g., ``etag``).
         """
-        return {f"_{k}": v for k, v in dataclasses.asdict(self).items()}
+        return dataclasses.asdict(self)
 
 
 @dataclass(frozen=True, init=False)
@@ -1476,7 +1475,6 @@ class S3CompleteMultipartUpload(_S3Response):
         """Convert the result to a dictionary.
 
         Returns:
-            A deep copy of the fields, keyed by their names with a leading
-            underscore (e.g., ``_etag``).
+            A deep copy of the fields, keyed by their names (e.g., ``etag``).
         """
-        return {f"_{k}": v for k, v in dataclasses.asdict(self).items()}
+        return dataclasses.asdict(self)

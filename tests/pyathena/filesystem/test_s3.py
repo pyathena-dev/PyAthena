@@ -2009,19 +2009,23 @@ class TestS3FileSystem:
 
     def test_touch_put_object(self):
         fs = self._make_fs()
-        fs.core.call.return_value = {"ETag": '"e"'}
+        fs.core.call.return_value = {"ETag": '"e"', "ResponseMetadata": {"HTTPStatusCode": 200}}
 
-        assert fs.touch("s3://bucket/key", ContentType="text/plain")["_etag"] == '"e"'
+        # GH-1383: the response as botocore returns it, as s3fs returns it.
+        assert fs.touch("s3://bucket/key", ContentType="text/plain") == {
+            "ETag": '"e"',
+            "ResponseMetadata": {"HTTPStatusCode": 200},
+        }
         fs.core.call.assert_called_once_with(
             fs.core.client.put_object, Bucket="bucket", Key="key", ContentType="text/plain"
         )
-        # touch() writes no data, so a body is rejected.
         fs.core.call.reset_mock()
-        with pytest.raises(TypeError, match="body"):
-            fs.touch("s3://bucket/key", body=b"data")
-        # GH-1372: also as the parameter of PutObject.
+        # GH-1372: touch() writes no data, so a body is rejected.
         with pytest.raises(TypeError, match="empty object"):
             fs.touch("s3://bucket/key", Body=b"data")
+        # GH-1383: the path sets the bucket and the key.
+        with pytest.raises(TypeError, match="Key"):
+            fs.touch("s3://bucket/key", Key="other")
         # A version of an object cannot be written.
         with pytest.raises(ValueError):  # noqa: PT011
             fs.touch("s3://bucket/key?versionId=v1")
@@ -2109,6 +2113,13 @@ class TestS3FileSystem:
             b"data",
             ServerSideEncryption="AES256",
             ContentType="text/plain",
+        )
+        # GH-1383: the parameters yield to the fields that the write sets, as
+        # they do when the value is large enough for the open() path.
+        fs.core.put_object.reset_mock()
+        fs.pipe_file("s3://bucket/key", b"data", Key="other", Body=b"other")
+        fs.core.put_object.assert_called_once_with(
+            S3Path("bucket", "key"), b"data", ServerSideEncryption="AES256"
         )
 
     def test_asynchronous_ignored(self):
@@ -5797,6 +5808,16 @@ class TestS3FileSystem:
             VersionId=expected,
         )
 
+    def test_cat_file_version_parameter_of_another_version(self):
+        # GH-1383: the version of the path is a field that the path sets, so
+        # a VersionId parameter for another version raises TypeError instead
+        # of reading either version.
+        fs = self._make_fs()
+
+        with pytest.raises(TypeError, match="VersionId"):
+            fs.cat_file("s3://bucket/key?versionId=v2", VersionId="v1")
+        fs.core.call.assert_not_called()
+
     def test_cat_file_range_version_ending_in_slash(self):
         # GH-1425: a version of the path that ends in a slash sizes a
         # negative offset, as it is read. The name of the path, which drops
@@ -7688,10 +7709,19 @@ class TestS3FileSystem:
         assert raised.value is error
 
     @pytest.mark.parametrize(
-        ("algorithm", "checksum_type"),
-        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+        ("algorithm", "checksum_type", "echoed"),
+        [
+            (None, None, True),
+            ("SHA256", None, True),
+            ("CRC32", None, True),
+            ("CRC32", "FULL_OBJECT", True),
+            # GH-1383: an upload created without the checksum fields in its
+            # response uses those of the request.
+            ("CRC32", "FULL_OBJECT", False),
+            ("SHA256", "COMPOSITE", False),
+        ],
     )
-    def test_multipart_copy_uses_creation_algorithm(self, algorithm, checksum_type):
+    def test_multipart_copy_uses_creation_algorithm(self, algorithm, checksum_type, echoed):
         fs = S3FileSystem(
             key="dummy",
             secret="dummy",
@@ -7711,7 +7741,12 @@ class TestS3FileSystem:
             )
             stubber.add_response(
                 "create_multipart_upload",
-                {"Bucket": "bucket", "Key": "dst", "UploadId": "u", **checksum_kwargs},
+                {
+                    "Bucket": "bucket",
+                    "Key": "dst",
+                    "UploadId": "u",
+                    **(checksum_kwargs if echoed else {}),
+                },
                 {"Bucket": "bucket", "Key": "dst", **checksum_kwargs},
             )
             for number, range_ in (
@@ -7786,6 +7821,34 @@ class TestS3FileSystem:
                 file.write(data)
             assert fs.cat_file(path) == data
             assert not fs.list_multipart_uploads(path)
+        finally:
+            fs.clear_multipart_uploads(path)
+            if fs.exists(path):
+                fs.rm(path)
+
+    def test_open_multipart_sends_whole_object_checksum(self, fs):
+        # GH-1383: the completion of a FULL_OBJECT upload takes the
+        # whole-object checksum of the file, which S3 checks: a wrong one
+        # fails the write.
+        block_size = 5 * 2**20
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_open_multipart_sends_whole_object_checksum/{uuid.uuid4()}"
+        )
+        kwargs = {
+            "ChecksumAlgorithm": "CRC32",
+            "ChecksumType": "FULL_OBJECT",
+            "ChecksumCRC32": "AAAAAA==",
+        }
+        try:
+            with (
+                pytest.raises(OSError, match=r"(?i)crc32") as error,
+                fs.open(path, "wb", block_size=block_size, s3_additional_kwargs=kwargs) as file,
+            ):
+                file.write(b"x" * (block_size + 1))
+            # The parts did not carry the checksum: the completion failed.
+            assert error.value.__cause__.operation_name == "CompleteMultipartUpload"
+            assert not fs.exists(path)
         finally:
             fs.clear_multipart_uploads(path)
             if fs.exists(path):

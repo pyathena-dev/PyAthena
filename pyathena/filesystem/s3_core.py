@@ -140,7 +140,8 @@ class S3MultipartCopyPlan:
         create_params: The parameters of CreateMultipartUpload, with the
             metadata and the tags that CopyObject would write.
         part_params: The parameters of each UploadPartCopy.
-        complete_params: The parameters of CompleteMultipartUpload.
+        complete_params: The parameters of CompleteMultipartUpload,
+            without ``ChecksumType``, which is that of the upload.
         abort_params: The parameters of AbortMultipartUpload.
         annotations: The names of the annotations to copy; empty if the
             directive excludes them or the source cannot have any.
@@ -186,6 +187,16 @@ class S3Core:
     with a source version that is a delete marker raise ``OSError`` with
     ``EINVAL``.
     As in S3, deleting a missing key is not an error. Nothing is cached.
+
+    The ``**params`` of an operation are additional request parameters. A
+    field that the operation derives from its other arguments, such as
+    ``Bucket`` and ``Key`` from a path, raises ``TypeError`` if ``params``
+    also has it; a field is derived only when an argument sets it, so
+    ``range_=None`` of :meth:`get_object` accepts ``Range``. The defaults
+    that an operation fills in, the ``request_kwargs`` and the fields that
+    :meth:`replace_object_metadata` retains, yield to ``params``.
+    :meth:`plan_multipart_copy` ignores the metadata and the ``Tagging`` of
+    ``params`` with the COPY directives, as CopyObject does.
 
     Example:
         >>> core = S3Core(boto3.client("s3"))
@@ -422,13 +433,46 @@ class S3Core:
         body.seek(position)
         return func(**request)
 
+    @staticmethod
+    def _check_params(fields: Iterable[str], params: Mapping[str, Any]) -> None:
+        """Reject the parameters that an operation derives from its arguments.
+
+        Args:
+            fields: The request fields that the operation derives.
+            params: The additional request parameters of the call.
+
+        Raises:
+            TypeError: If ``params`` has one of the fields.
+        """
+        given = params.keys() & fields
+        if given:
+            raise TypeError(f"Set by the arguments, not by parameters: {', '.join(sorted(given))}.")
+
+    @staticmethod
+    def _with_params(request: Mapping[str, Any], params: Mapping[str, Any]) -> dict[str, Any]:
+        """Add the additional parameters of a call to the fields that it derives.
+
+        Args:
+            request: The request fields that the operation derives from its
+                arguments.
+            params: The additional request parameters of the call.
+
+        Returns:
+            The request with both.
+
+        Raises:
+            TypeError: If ``params`` has a field of ``request``.
+        """
+        S3Core._check_params(request, params)
+        return {**request, **params}
+
     def head_object(self, path: S3Path, **params) -> S3Metadata:
         """Look up an object, or a version of it, with HeadObject.
 
         Args:
             path: The path of the object, with the version ID to look up, if
                 any.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The metadata of the object.
@@ -436,13 +480,14 @@ class S3Core:
         Raises:
             ValueError: If the path has no key.
             FileNotFoundError: If the object or version does not exist.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")
         request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
         if path.version_id:
             request.update({"VersionId": path.version_id})
-        response = self.call(self._client.head_object, **request, **params)
+        response = self.call(self._client.head_object, **self._with_params(request, params))
         return S3Metadata(response, path=path)
 
     def head_bucket(self, bucket: str, **params) -> S3Bucket:
@@ -450,15 +495,18 @@ class S3Core:
 
         Args:
             bucket: The name of the bucket.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The bucket, with its region if returned.
 
         Raises:
             FileNotFoundError: If the bucket does not exist.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
-        response = self.call(self._client.head_bucket, Bucket=bucket, **params)
+        response = self.call(
+            self._client.head_bucket, **self._with_params({"Bucket": bucket}, params)
+        )
         return S3Bucket(name=bucket, bucket_region=response.get("BucketRegion"))
 
     def get_object(
@@ -480,9 +528,7 @@ class S3Core:
                 bytes, or the whole object if it is shorter. None sends no
                 range of its own, so the whole object is read unless
                 ``params`` or ``request_kwargs`` have ``Range``.
-            **params: Additional request parameters. The fields that the
-                other arguments set take precedence over parameters of the
-                same name.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The bytes read.
@@ -495,6 +541,7 @@ class S3Core:
             OSError: If the range starts at or past the end of the object.
                 Its ``__cause__`` is the ``ClientError`` with the
                 ``InvalidRange`` code.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")
@@ -509,7 +556,7 @@ class S3Core:
                 raise ValueError(f"Invalid range: {range_}.")
             else:
                 request.update({"Range": f"bytes={start}-{end - 1}"})
-        request = {**params, **request}
+        request = self._with_params(request, params)
         _logger.debug(f"Get object: {path.uri} range={request.get('Range')}")
         response = self.call(self._client.get_object, **request)
         # Read through the StreamingBody, which verifies the length and the
@@ -525,9 +572,7 @@ class S3Core:
             body: The data to write. None or empty bytes send no body of
                 their own, so an empty object is written unless ``params`` or
                 ``request_kwargs`` have ``Body``.
-            **params: Additional request parameters. The fields that the
-                other arguments set take precedence over parameters of the
-                same name.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The result of the write.
@@ -535,6 +580,7 @@ class S3Core:
         Raises:
             ValueError: If the path has no key, or has a version ID, which a
                 write cannot replace.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")
@@ -544,7 +590,7 @@ class S3Core:
         if body:
             request.update({"Body": body})
         _logger.debug(f"Put object: {path.uri}")
-        response = self.call(self._client.put_object, **{**params, **request})
+        response = self.call(self._client.put_object, **self._with_params(request, params))
         return S3PutObject(response)
 
     def create_bucket(
@@ -567,8 +613,8 @@ class S3Core:
                 empty string uses the region of the client. A location
                 constraint is sent for every region except ``us-east-1``,
                 which does not accept one.
-            **params: Additional request parameters, sent as given, except
-                ``CreateBucketConfiguration``. Its fields are kept, and the
+            **params: Additional request parameters (see :class:`S3Core`),
+                except ``CreateBucketConfiguration``. Its fields are kept, and the
                 ``LocationConstraint`` of ``region_name`` is added unless
                 the region is ``us-east-1`` or the configuration has a
                 ``LocationConstraint``, ``Location`` or ``Bucket``. A
@@ -579,6 +625,7 @@ class S3Core:
 
         Raises:
             ValueError: If the ACL is not a canned ACL of buckets.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         if acl and acl not in self.BUCKET_ACLS:
             raise ValueError(f"ACL not in {self.BUCKET_ACLS}.")
@@ -598,7 +645,7 @@ class S3Core:
         if configuration:
             request.update({"CreateBucketConfiguration": configuration})
         _logger.debug(f"Create bucket: s3://{bucket}")
-        self.call(self._client.create_bucket, **request, **params)
+        self.call(self._client.create_bucket, **self._with_params(request, params))
 
     def delete_bucket(self, bucket: str, **params) -> None:
         """Delete a bucket, which must be empty, with DeleteBucket.
@@ -608,20 +655,21 @@ class S3Core:
 
         Args:
             bucket: The name of the bucket.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Raises:
             FileNotFoundError: If the bucket does not exist.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         _logger.debug(f"Delete bucket: s3://{bucket}")
-        self.call(self._client.delete_bucket, Bucket=bucket, **params)
+        self.call(self._client.delete_bucket, **self._with_params({"Bucket": bucket}, params))
 
     def get_bucket_versioning(self, bucket: str, **params) -> str | None:
         """Get the versioning state of a bucket with GetBucketVersioning.
 
         Args:
             bucket: The name of the bucket.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             ``Enabled`` or ``Suspended``, or None if versioning has never
@@ -629,8 +677,11 @@ class S3Core:
 
         Raises:
             FileNotFoundError: If the bucket does not exist.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
-        response = self.call(self._client.get_bucket_versioning, Bucket=bucket, **params)
+        response = self.call(
+            self._client.get_bucket_versioning, **self._with_params({"Bucket": bucket}, params)
+        )
         return cast(str | None, response.get("Status"))
 
     def delete_object(self, path: S3Path, **params) -> S3DeleteObject:
@@ -639,7 +690,7 @@ class S3Core:
         Args:
             path: The path of the object, with the version ID to delete, if
                 any.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The result, with the version ID that the request deleted or
@@ -648,13 +699,14 @@ class S3Core:
         Raises:
             ValueError: If the path has no key.
             FileNotFoundError: If the bucket does not exist.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")
         request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
         if path.version_id:
             request.update({"VersionId": path.version_id})
-        response = self.call(self._client.delete_object, **request, **params)
+        response = self.call(self._client.delete_object, **self._with_params(request, params))
         return S3DeleteObject(response)
 
     def delete_objects(self, batch: S3DeleteBatch, **params) -> S3DeleteResult:
@@ -662,7 +714,7 @@ class S3Core:
 
         Args:
             batch: The objects to delete.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The result, with the objects that S3 could not delete in its
@@ -670,6 +722,7 @@ class S3Core:
 
         Raises:
             FileNotFoundError: If the bucket does not exist.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         objects = []
         for path in batch.objects:
@@ -677,12 +730,8 @@ class S3Core:
             if path.version_id:
                 object_.update({"VersionId": path.version_id})
             objects.append(object_)
-        response = self.call(
-            self._client.delete_objects,
-            Bucket=batch.bucket,
-            Delete={"Objects": objects, "Quiet": batch.quiet},
-            **params,
-        )
+        request = {"Bucket": batch.bucket, "Delete": {"Objects": objects, "Quiet": batch.quiet}}
+        response = self.call(self._client.delete_objects, **self._with_params(request, params))
         return S3DeleteResult.from_response(batch.bucket, response)
 
     def create_multipart_upload(self, path: S3Path, **params) -> S3MultipartUpload:
@@ -690,17 +739,20 @@ class S3Core:
 
         Args:
             path: The path of the object to write, without a version ID.
-            **params: Additional request parameters. The bucket and key of
-                the path take precedence over parameters of the same name.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The upload retaining the path's bucket and key, including an
             access point alias or ARN, and the response's upload ID and
-            checksum configuration.
+            checksum configuration. A ``ChecksumAlgorithm`` or
+            ``ChecksumType`` that the request sent and the response omits,
+            as some S3-compatible services do, is retained from the request,
+            so that the parts and the completion use it.
 
         Raises:
             ValueError: If the path has no key, or has a version ID, which a
                 write cannot replace.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")
@@ -708,10 +760,14 @@ class S3Core:
             raise ValueError(f"Cannot write to a version: {path.uri}.")
         request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
         _logger.debug(f"Create multipart upload to {path.uri}.")
-        response = self.call(self._client.create_multipart_upload, **{**params, **request})
+        response = self.call(
+            self._client.create_multipart_upload, **self._with_params(request, params)
+        )
+        sent = {**self.operation_params("create_multipart_upload", self._request_kwargs), **params}
+        checksum = {k: sent[k] for k in ("ChecksumAlgorithm", "ChecksumType") if sent.get(k)}
         # S3 returns the bucket name even when creation uses an access point.
         # Keep the request identity for every subsequent upload operation.
-        return S3MultipartUpload({**response, "Bucket": path.bucket, "Key": path.key})
+        return S3MultipartUpload({**checksum, **response, "Bucket": path.bucket, "Key": path.key})
 
     @staticmethod
     def _multipart_upload_request(upload: S3MultipartUpload) -> dict[str, Any]:
@@ -734,15 +790,14 @@ class S3Core:
                 algorithm is passed to the SDK to calculate the part checksum.
             part_number: The number of the part, from 1.
             body: The data of the part.
-            **params: Additional request parameters. The fields that the
-                other arguments set take precedence over parameters of the
-                same name.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The uploaded part.
 
         Raises:
             ValueError: If the upload has no bucket, key, or upload ID.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         request: dict[str, Any] = {
             **self._multipart_upload_request(upload),
@@ -752,7 +807,7 @@ class S3Core:
         if upload.checksum_algorithm is not None:
             request["ChecksumAlgorithm"] = upload.checksum_algorithm
         _logger.debug(f"Upload part of {upload.upload_id} as part {part_number}.")
-        response = self.call(self._client.upload_part, **{**params, **request})
+        response = self.call(self._client.upload_part, **self._with_params(request, params))
         return S3MultipartUploadPart(part_number, response)
 
     def upload_part_copy(
@@ -774,9 +829,7 @@ class S3Core:
                 with an exclusive end. None sends no range of its own, so the
                 whole source is copied unless ``params`` or ``request_kwargs``
                 have ``CopySourceRange``.
-            **params: Additional request parameters. The fields that the
-                other arguments set take precedence over parameters of the
-                same name.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The copied part.
@@ -788,6 +841,7 @@ class S3Core:
                 does not exist.
             OSError: With ``EINVAL`` for an invalid request, such as a source
                 version that is a delete marker.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         request = self._multipart_upload_request(upload)
         if not source.key:
@@ -806,7 +860,7 @@ class S3Core:
         _logger.debug(
             f"Copy part from {source.uri} to upload {upload.upload_id} as part {part_number}."
         )
-        response = self.call(self._client.upload_part_copy, **{**params, **request})
+        response = self.call(self._client.upload_part_copy, **self._with_params(request, params))
         return S3MultipartUploadPart(part_number, response)
 
     def complete_multipart_upload(
@@ -823,15 +877,14 @@ class S3Core:
                 type is sent when present. Without an algorithm, only the ETag
                 and part number are sent, even if the SDK added a part checksum.
             parts: The uploaded parts, in part-number order.
-            **params: Additional request parameters. The fields that the
-                other arguments set take precedence over parameters of the
-                same name.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The completed upload.
 
         Raises:
             ValueError: If the upload has no bucket, key, or upload ID.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         request = self._multipart_upload_request(upload)
         part_fields = {"ETag", "PartNumber"}
@@ -846,7 +899,9 @@ class S3Core:
             ]
         }
         _logger.debug(f"Complete multipart upload {upload.upload_id}.")
-        response = self.call(self._client.complete_multipart_upload, **{**params, **request})
+        response = self.call(
+            self._client.complete_multipart_upload, **self._with_params(request, params)
+        )
         return S3CompleteMultipartUpload(response)
 
     def abort_multipart_upload(self, upload: S3MultipartUpload, **params) -> None:
@@ -857,18 +912,17 @@ class S3Core:
 
         Args:
             upload: The multipart upload returned by creation or listing.
-            **params: Additional request parameters. The fields that the
-                other arguments set take precedence over parameters of the
-                same name.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Raises:
             ValueError: If the upload has no bucket, key, or upload ID.
             FileNotFoundError: If the upload does not exist, for example
                 because it was completed or aborted.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         request = self._multipart_upload_request(upload)
         with unstoppable_retries():
-            self.call(self._client.abort_multipart_upload, **{**params, **request})
+            self.call(self._client.abort_multipart_upload, **self._with_params(request, params))
 
     def part_ranges(self, size: int, block_size: int) -> list[tuple[int, int]]:
         """Split an object into the source ranges of the parts that copy it.
@@ -940,7 +994,7 @@ class S3Core:
                 copy, if any.
             destination: The path of the object to write, without a version
                 ID.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The result of the copy.
@@ -952,6 +1006,7 @@ class S3Core:
                 does not exist.
             OSError: With ``EINVAL`` for an invalid request, such as a source
                 version that is a delete marker.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         if not source.key:
             raise ValueError(f"The source has no key: {source.uri}.")
@@ -968,7 +1023,7 @@ class S3Core:
             "Key": destination.key,
         }
         _logger.debug(f"Copy object from {source.uri} to {destination.uri}.")
-        response = self.call(self._client.copy_object, **request, **params)
+        response = self.call(self._client.copy_object, **self._with_params(request, params))
         return S3CopyObject(response)
 
     def plan_multipart_copy(
@@ -1013,9 +1068,13 @@ class S3Core:
                 ``MULTIPART_UPLOAD_MAX_PART_SIZE`` (the default); see
                 :meth:`part_ranges`.
             **params: The CopyObject parameters of the copy. Each request
-                receives those that it accepts; CreateMultipartUpload also
-                receives those that CopyObject does not accept either, so
-                that botocore rejects them as it would for CopyObject.
+                receives those that it accepts, so CreateMultipartUpload
+                also receives those that only it accepts, such as
+                ``ChecksumType``. It receives as well those that CopyObject
+                does not accept either, so that botocore rejects them as it
+                would for CopyObject. The
+                fields that CopyObject derives from the paths raise
+                ``TypeError``, as for :meth:`copy_object`.
 
         Returns:
             The plan.
@@ -1025,6 +1084,8 @@ class S3Core:
                 destination has a version ID, ``block_size`` is out of the
                 part size limits, a directive has a value that CopyObject
                 does not accept, or HeadObject reports no size.
+            TypeError: If ``params`` has a field that CopyObject derives from
+                the paths.
         """
         if not source.key:
             raise ValueError(f"The source has no key: {source.uri}.")
@@ -1032,6 +1093,7 @@ class S3Core:
             raise ValueError(f"The path has no key: {destination.uri}.")
         if destination.version_id:
             raise ValueError(f"Cannot write to a version: {destination.uri}.")
+        self._check_params(("CopySource", "Bucket", "Key"), params)
         block_size = block_size if block_size else self.MULTIPART_UPLOAD_MAX_PART_SIZE
         if (
             block_size < self.MULTIPART_UPLOAD_MIN_PART_SIZE
@@ -1122,7 +1184,13 @@ class S3Core:
             ranges=ranges,
             create_params=create_params,
             part_params=self.operation_params("upload_part_copy", params),
-            complete_params=self.operation_params("complete_multipart_upload", params),
+            # The completion is sent with the checksum type of the upload,
+            # which CreateMultipartUpload receives from create_params.
+            complete_params={
+                k: v
+                for k, v in self.operation_params("complete_multipart_upload", params).items()
+                if k != "ChecksumType"
+            },
             abort_params=self.operation_params("abort_multipart_upload", params),
             annotations=annotations,
         )
@@ -1135,21 +1203,23 @@ class S3Core:
         Args:
             path: The path of the object, with the version ID to list, if
                 any.
-            **params: Additional request parameters. The fields that the
-                other arguments set take precedence over parameters of the
-                same name.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The annotation names, across all pages.
 
         Raises:
             ValueError: If the path has no key.
+            TypeError: If ``params`` has a field that the other arguments
+                set, or ``ContinuationToken``, which the method advances.
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")
-        request: dict[str, Any] = {**params, "Bucket": path.bucket, "Key": path.key}
+        self._check_params(("ContinuationToken",), params)
+        request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
         if path.version_id:
             request.update({"VersionId": path.version_id})
+        request = self._with_params(request, params)
         names: list[str] = []
         while True:
             _logger.debug(f"List object annotations: {path.uri}")
@@ -1192,11 +1262,12 @@ class S3Core:
             **params: The CopyObject parameters of the copy.
                 GetObjectAnnotation receives those of the source, mapped as
                 for :meth:`plan_multipart_copy`, and PutObjectAnnotation
-                those that it accepts; the fields that the other arguments
-                set take precedence.
+                those that it accepts.
 
         Raises:
             ValueError: If the source or the destination has no key.
+            TypeError: If ``params`` has a field that the other arguments
+                set for PutObjectAnnotation.
         """
         if not source.key:
             raise ValueError(f"The source has no key: {source.uri}.")
@@ -1209,27 +1280,29 @@ class S3Core:
         }
         if source.version_id:
             get_request.update({"VersionId": source.version_id})
-        _logger.debug(f"Copy object annotation {name} from {source.uri} to {destination.uri}.")
-        response = self.call(
-            self._client.get_object_annotation,
-            **self.operation_params("get_object_annotation", self.copy_source_params(params)),
-            **get_request,
-        )
         put_request: dict[str, Any] = {
             "Bucket": destination.bucket,
             "Key": destination.key,
             "AnnotationName": name,
         }
-        with contextlib.closing(response["AnnotationPayload"]) as payload:
-            put_request.update({"AnnotationPayload": payload.read()})
         if version_id:
             put_request.update({"VersionId": version_id})
         if etag:
             put_request.update({"ObjectIfMatch": etag})
-        self.call(
-            self._client.put_object_annotation,
-            **{**self.operation_params("put_object_annotation", params), **put_request},
+        put_params = self.operation_params("put_object_annotation", params)
+        # Checked before the source is read.
+        self._check_params((*put_request, "AnnotationPayload"), put_params)
+        _logger.debug(f"Copy object annotation {name} from {source.uri} to {destination.uri}.")
+        response = self.call(
+            self._client.get_object_annotation,
+            **self._with_params(
+                get_request,
+                self.operation_params("get_object_annotation", self.copy_source_params(params)),
+            ),
         )
+        with contextlib.closing(response["AnnotationPayload"]) as payload:
+            put_request.update({"AnnotationPayload": payload.read()})
+        self.call(self._client.put_object_annotation, **{**put_request, **put_params})
 
     def get_object_tagging(self, path: S3Path, **params) -> dict[str, str]:
         """Get the tags of an object, or of a version of it, with GetObjectTagging.
@@ -1237,7 +1310,7 @@ class S3Core:
         Args:
             path: The path of the object, with the version ID to read, if
                 any, including ``null``.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The tags, mapping each key to its value, in the order of the
@@ -1246,6 +1319,7 @@ class S3Core:
         Raises:
             ValueError: If the path has no key.
             FileNotFoundError: If the object or version does not exist.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")
@@ -1253,7 +1327,7 @@ class S3Core:
         if path.version_id:
             request.update({"VersionId": path.version_id})
         _logger.debug(f"Get object tagging: {path.uri}")
-        response = self.call(self._client.get_object_tagging, **request, **params)
+        response = self.call(self._client.get_object_tagging, **self._with_params(request, params))
         return {t["Key"]: t["Value"] for t in response["TagSet"]}
 
     def put_object_tagging(self, path: S3Path, tags: Mapping[str, str], **params) -> None:
@@ -1264,11 +1338,12 @@ class S3Core:
                 including ``null``.
             tags: The tags, mapping each key to its value. They replace all
                 the existing tags.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Raises:
             ValueError: If the path has no key.
             FileNotFoundError: If the object or version does not exist.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")
@@ -1280,7 +1355,7 @@ class S3Core:
         if path.version_id:
             request.update({"VersionId": path.version_id})
         _logger.debug(f"Put object tagging: {path.uri}")
-        self.call(self._client.put_object_tagging, **request, **params)
+        self.call(self._client.put_object_tagging, **self._with_params(request, params))
 
     def put_object_acl(self, path: S3Path, acl: str, **params) -> None:
         """Apply a canned ACL to an object, or to a version of it, with PutObjectAcl.
@@ -1289,12 +1364,13 @@ class S3Core:
             path: The path of the object, with the version ID to apply the
                 ACL to, if any, including ``null``.
             acl: The canned ACL, one of ``OBJECT_ACLS``.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Raises:
             ValueError: If the path has no key, or the ACL is not in
                 ``OBJECT_ACLS``.
             FileNotFoundError: If the object or version does not exist.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")
@@ -1304,7 +1380,7 @@ class S3Core:
         if path.version_id:
             request.update({"VersionId": path.version_id})
         _logger.debug(f"Put object acl: {path.uri}")
-        self.call(self._client.put_object_acl, **request, **params)
+        self.call(self._client.put_object_acl, **self._with_params(request, params))
 
     def put_bucket_acl(self, bucket: str, acl: str, **params) -> None:
         """Apply a canned ACL to a bucket with PutBucketAcl.
@@ -1312,16 +1388,19 @@ class S3Core:
         Args:
             bucket: The name of the bucket.
             acl: The canned ACL, one of ``BUCKET_ACLS``.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Raises:
             ValueError: If the ACL is not in ``BUCKET_ACLS``.
             FileNotFoundError: If the bucket does not exist.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         if acl not in self.BUCKET_ACLS:
             raise ValueError(f"ACL not in {self.BUCKET_ACLS}.")
         _logger.debug(f"Put bucket acl: s3://{bucket}")
-        self.call(self._client.put_bucket_acl, Bucket=bucket, ACL=acl, **params)
+        self.call(
+            self._client.put_bucket_acl, **self._with_params({"Bucket": bucket, "ACL": acl}, params)
+        )
 
     def replace_object_metadata(
         self, path: S3Path, head: S3Metadata, metadata: Mapping[str, str], **params
@@ -1347,10 +1426,9 @@ class S3Core:
                 whose fields are retained.
             metadata: The user-defined metadata of the copy, which replaces
                 all the existing user-defined metadata.
-            **params: Additional CopyObject parameters. They take precedence
-                over the retained fields; one that the copy itself sets,
-                such as ``Metadata``, ``MetadataDirective`` or ``Key``,
-                raises ``TypeError``.
+            **params: Additional CopyObject parameters (see
+                :class:`S3Core`). They take precedence over the retained
+                fields.
 
         Returns:
             The result of the copy.
@@ -1358,11 +1436,15 @@ class S3Core:
         Raises:
             ValueError: If the path has no key or has a version ID, which a
                 write cannot replace.
+            TypeError: If ``params`` has a field that the copy sets:
+                ``Metadata``, ``MetadataDirective``, ``CopySource``,
+                ``Bucket`` or ``Key``.
         """
         if not path.key:
             raise ValueError(f"The path has no key: {path.uri}.")
         if path.version_id:
             raise ValueError(f"Cannot write to a version: {path.uri}.")
+        self._check_params(("Metadata", "MetadataDirective"), params)
         _logger.debug(f"Replace object metadata: {path.uri}")
         retained: dict[str, Any] = {
             "CacheControl": head.cache_control,
@@ -1414,11 +1496,14 @@ class S3Core:
             client_method: The name of the client method to sign, such as
                 ``get_object`` or ``put_object``.
             expires_in: The number of seconds for which the URL is valid.
-            **params: Parameters of the method to sign. They take precedence
-                over the bucket, key and version ID of the path.
+            **params: Parameters of the method to sign. The bucket, key and
+                version ID of the path raise ``TypeError`` if also given.
 
         Returns:
             The presigned URL.
+
+        Raises:
+            TypeError: If ``params`` has a field that the path sets.
         """
         request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
         if path.version_id:
@@ -1429,7 +1514,7 @@ class S3Core:
             self.call(
                 self._client.generate_presigned_url,
                 ClientMethod=client_method,
-                Params={**request, **params},
+                Params=self._with_params(request, params),
                 ExpiresIn=expires_in,
             ),
         )
@@ -1496,10 +1581,13 @@ class S3Core:
                 recursively.
             max_keys: The maximum number of keys of the page.
             continuation_token: The token of the page to list.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The page.
+
+        Raises:
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         request: dict[str, Any] = {"Bucket": bucket, "Prefix": prefix}
         if delimiter is not None:
@@ -1508,7 +1596,7 @@ class S3Core:
             request.update({"ContinuationToken": continuation_token})
         if max_keys is not None:
             request.update({"MaxKeys": max_keys})
-        response = self.call(self._client.list_objects_v2, **request, **params)
+        response = self.call(self._client.list_objects_v2, **self._with_params(request, params))
         return S3ListObjectsPage.from_response(bucket, response)
 
     def list_objects(
@@ -1529,14 +1617,15 @@ class S3Core:
                 recursively.
             max_keys: The maximum number of keys per page.
             continuation_token: The token of the first page to list.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Yields:
             The pages, until one has no continuation token.
 
         Raises:
-            TypeError: If ``params`` has ``ContinuationToken``, which the
-                iterator advances; pass ``continuation_token`` instead.
+            TypeError: If ``params`` has a field that the other arguments
+                set, or ``ContinuationToken``, which the iterator advances;
+                pass ``continuation_token`` instead.
         """
         if "ContinuationToken" in params:
             raise TypeError("Pass the first page's token as continuation_token.")
@@ -1573,10 +1662,13 @@ class S3Core:
             key_marker: The key marker of the page to list.
             version_id_marker: The version ID marker of the page to list. S3
                 accepts it only with a key marker.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The page.
+
+        Raises:
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         request: dict[str, Any] = {"Bucket": bucket, "Prefix": prefix}
         if delimiter is not None:
@@ -1585,7 +1677,9 @@ class S3Core:
             request.update({"KeyMarker": key_marker})
         if version_id_marker is not None:
             request.update({"VersionIdMarker": version_id_marker})
-        response = self.call(self._client.list_object_versions, **request, **params)
+        response = self.call(
+            self._client.list_object_versions, **self._with_params(request, params)
+        )
         return S3ListObjectVersionsPage.from_response(bucket, response)
 
     def list_object_versions(
@@ -1607,14 +1701,15 @@ class S3Core:
             key_marker: The key marker of the first page to list.
             version_id_marker: The version ID marker of the first page to
                 list, sent with ``key_marker``.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Yields:
             The pages, until one is not truncated or has no key marker.
 
         Raises:
-            TypeError: If ``params`` has ``KeyMarker`` or ``VersionIdMarker``,
-                which the iterator advances; pass ``key_marker`` and
+            TypeError: If ``params`` has a field that the other arguments
+                set, or ``KeyMarker`` or ``VersionIdMarker``, which the
+                iterator advances; pass ``key_marker`` and
                 ``version_id_marker`` instead.
         """
         if "KeyMarker" in params or "VersionIdMarker" in params:
@@ -1651,13 +1746,14 @@ class S3Core:
             key_marker: The key marker of the page to list.
             upload_id_marker: The upload ID marker of the page to list. S3
                 accepts it only with a key marker.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The page.
 
         Raises:
             FileNotFoundError: If the bucket does not exist.
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         request: dict[str, Any] = {"Bucket": bucket}
         if prefix is not None:
@@ -1666,7 +1762,9 @@ class S3Core:
             request.update({"KeyMarker": key_marker})
         if upload_id_marker is not None:
             request.update({"UploadIdMarker": upload_id_marker})
-        response = self.call(self._client.list_multipart_uploads, **request, **params)
+        response = self.call(
+            self._client.list_multipart_uploads, **self._with_params(request, params)
+        )
         return S3ListMultipartUploadsPage.from_response(bucket, response)
 
     def list_multipart_uploads(
@@ -1686,14 +1784,15 @@ class S3Core:
             key_marker: The key marker of the first page to list.
             upload_id_marker: The upload ID marker of the first page to list,
                 sent with ``key_marker``.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Yields:
             The pages, until one is not truncated or lacks either next marker.
 
         Raises:
-            TypeError: If ``params`` has ``KeyMarker`` or ``UploadIdMarker``,
-                which the iterator advances; pass ``key_marker`` and
+            TypeError: If ``params`` has a field that the other arguments
+                set, or ``KeyMarker`` or ``UploadIdMarker``, which the
+                iterator advances; pass ``key_marker`` and
                 ``upload_id_marker`` instead.
             FileNotFoundError: If the bucket does not exist.
         """
@@ -1720,15 +1819,18 @@ class S3Core:
 
         Args:
             continuation_token: The token of the page to list.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Returns:
             The page.
+
+        Raises:
+            TypeError: If ``params`` has a field that the other arguments set.
         """
         request: dict[str, Any] = {}
         if continuation_token:
             request.update({"ContinuationToken": continuation_token})
-        response = self.call(self._client.list_buckets, **request, **params)
+        response = self.call(self._client.list_buckets, **self._with_params(request, params))
         return S3ListBucketsPage.from_response(response)
 
     def list_buckets(
@@ -1738,14 +1840,15 @@ class S3Core:
 
         Args:
             continuation_token: The token of the first page to list.
-            **params: Additional request parameters, sent as given.
+            **params: Additional request parameters (see :class:`S3Core`).
 
         Yields:
             The pages, until one has no continuation token.
 
         Raises:
-            TypeError: If ``params`` has ``ContinuationToken``, which the
-                iterator advances; pass ``continuation_token`` instead.
+            TypeError: If ``params`` has a field that the other arguments
+                set, or ``ContinuationToken``, which the iterator advances;
+                pass ``continuation_token`` instead.
         """
         if "ContinuationToken" in params:
             raise TypeError("Pass the first page's token as continuation_token.")

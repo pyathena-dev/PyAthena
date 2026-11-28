@@ -4564,6 +4564,30 @@ class TestAioS3StreamedFile:
         fs.core.put_object.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_read_parameters_yield_to_the_read(self, fs):
+        # GH-1383: the parameters of the file yield to the fields that a read
+        # sets, as those of an S3File do.
+        info = S3Object(
+            init={"Key": "key"},
+            type=S3ObjectType.S3_OBJECT_TYPE_FILE,
+            bucket="bucket",
+            key="key",
+        )
+        info.size = 2
+        fs._sync_fs._info_entry = mock.MagicMock(return_value=info)
+        fs.core.get_object = mock.MagicMock(return_value=b"ab")
+        f = AioS3StreamedFile(
+            fs, "bucket/key", "rb", Range="bytes=0-0", Key="other", RequestPayer="requester"
+        )
+        assert await f.read() == b"ab"
+        await f.close()
+        assert fs.core.get_object.call_args_list
+        for call in fs.core.get_object.call_args_list:
+            assert call.args[0] == S3Path("bucket", "key")
+            assert call.kwargs == {"RequestPayer": "requester"}
+        assert [call.args[1] for call in fs.core.get_object.call_args_list] == [(0, 2)]
+
+    @pytest.mark.asyncio
     async def test_garbage_collected_unclosed(self, fs):
         # An unclosed file that is garbage collected warns, and aborts its
         # multipart upload instead of leaving it incomplete.

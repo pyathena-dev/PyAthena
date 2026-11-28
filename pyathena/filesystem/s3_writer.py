@@ -14,11 +14,12 @@ import enum
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import CancelledError, Future, wait
-from typing import Any, BinaryIO, TypeVar, cast
+from typing import Any, BinaryIO, ClassVar, TypeVar, cast
 
 from pyathena.filesystem.s3_core import S3Core
 from pyathena.filesystem.s3_executor import S3Executor
 from pyathena.filesystem.s3_object import (
+    _CHECKSUM_FIELDS,
     S3CompleteMultipartUpload,
     S3MultipartUpload,
     S3MultipartUploadPart,
@@ -42,6 +43,45 @@ class S3MultipartWriter:
         upload: The identity returned by creation, retained after completion
             and after an abort failure. A successful abort clears it.
     """
+
+    # https://docs.aws.amazon.com/AmazonS3/latest/userguide/checking-object-integrity.html
+    # The checksum values of the whole object, which the completion takes only
+    # for the FULL_OBJECT checksum type; that of a COMPOSITE upload is a
+    # checksum of the part checksums instead.
+    _WHOLE_OBJECT_CHECKSUMS: ClassVar[frozenset[str]] = frozenset(_CHECKSUM_FIELDS.values())
+    # The inherited parameters that the requests of a write do not take: the
+    # fields that a request sets itself, and the parameters of the whole
+    # object that do not describe a part.
+    _NOT_INHERITED: ClassVar[Mapping[str, frozenset[str]]] = {
+        "put_object": frozenset({"Bucket", "Key", "Body"}),
+        "create_multipart_upload": frozenset({"Bucket", "Key"}),
+        "upload_part": frozenset(
+            {
+                "Bucket",
+                "Key",
+                "UploadId",
+                "PartNumber",
+                "Body",
+                *_WHOLE_OBJECT_CHECKSUMS,
+                "ContentMD5",
+                "ContentLength",
+            }
+        ),
+        "upload_part_copy": frozenset({"Bucket", "Key", "UploadId", "PartNumber", "CopySource"}),
+        "complete_multipart_upload": frozenset({"Bucket", "Key", "UploadId", "MultipartUpload"}),
+        "abort_multipart_upload": frozenset({"Bucket", "Key", "UploadId"}),
+    }
+    # The parameters that a request takes from the upload instead, when the
+    # upload has them, by the upload's field name.
+    _FROM_UPLOAD: ClassVar[Mapping[str, tuple[str, str]]] = {
+        "upload_part": ("ChecksumAlgorithm", "checksum_algorithm"),
+        "complete_multipart_upload": ("ChecksumType", "checksum_type"),
+    }
+    # The inherited parameters that a request with a range of its own does not
+    # take.
+    _RANGE_FIELDS: ClassVar[Mapping[str, frozenset[str]]] = {
+        "upload_part_copy": frozenset({"CopySourceRange"}),
+    }
 
     def __init__(
         self,
@@ -80,8 +120,97 @@ class S3MultipartWriter:
         self._request_kwargs = dict(request_kwargs or {})
         self.upload: S3MultipartUpload | None = None
 
-    def _params(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
-        return self._core.operation_params(method, {**self._request_kwargs, **params})
+    def _params(
+        self, method: str, params: Mapping[str, Any], ranged: bool = False
+    ) -> dict[str, Any]:
+        """Select the parameters of a request of the upload.
+
+        Args:
+            method: The name of the client method, such as ``upload_part``.
+            params: The parameters given to the request, which override the
+                inherited ones.
+            ranged: Whether the request sends a range of its own.
+
+        Returns:
+            The parameters that the operation accepts.
+        """
+        # A ChecksumType of the request is the type that the completion
+        # sends, by which it takes the inherited whole-object values.
+        decisive = {
+            **self._request_kwargs,
+            **{k: v for k, v in params.items() if k == "ChecksumType"},
+        }
+        inherited = self.inherited_params(method, decisive, ranged)
+        return self._core.operation_params(method, {**inherited, **params})
+
+    def _upload_fields(self, method: str) -> frozenset[str]:
+        """Return the fields that a request takes from the known upload.
+
+        Args:
+            method: The name of the client method.
+
+        Returns:
+            ``ChecksumAlgorithm`` of an ``UploadPart`` request or
+            ``ChecksumType`` of a ``CompleteMultipartUpload`` request, if the
+            upload has it; otherwise empty.
+        """
+        if method not in self._FROM_UPLOAD or self.upload is None:
+            return frozenset()
+        name, field = self._FROM_UPLOAD[method]
+        return frozenset({name}) if getattr(self.upload, field) is not None else frozenset()
+
+    def _checksum_type(self, request_kwargs: Mapping[str, Any]) -> str | None:
+        """Return the checksum type that the completion sends.
+
+        Args:
+            request_kwargs: The parameters inherited by the requests of the
+                write.
+
+        Returns:
+            The checksum type of the known upload, if it has one, else the
+            inherited ``ChecksumType``, if any.
+        """
+        if self.upload is not None and self.upload.checksum_type is not None:
+            return self.upload.checksum_type
+        return request_kwargs.get("ChecksumType")
+
+    def inherited_params(
+        self, method: str, request_kwargs: Mapping[str, Any], ranged: bool = False
+    ) -> dict[str, Any]:
+        """Select the inherited parameters that a request of an upload takes.
+
+        The inherited parameters yield to the fields that the request sets,
+        such as ``Bucket``, ``Key``, ``UploadId`` and ``PartNumber``, and to
+        the checksum algorithm of an ``UploadPart`` request and the checksum
+        type of a ``CompleteMultipartUpload`` request when the upload has
+        them. An ``UploadPart`` request takes neither the checksum values,
+        ``ContentMD5`` nor ``ContentLength`` of the whole object. The
+        completion takes the checksum values only when its checksum type,
+        that of the upload or else the ``ChecksumType`` of
+        ``request_kwargs``, is ``FULL_OBJECT``, the type for which S3 can
+        check them; the writer counts a ``ChecksumType`` given to the
+        completion itself.
+
+        Args:
+            method: The name of the client method, such as ``upload_part``.
+            request_kwargs: The parameters inherited by the requests of the
+                write.
+            ranged: Whether the request sends a range of its own, to which an
+                inherited ``CopySourceRange`` yields.
+
+        Returns:
+            The inherited parameters, without those that the request does not
+            take; not yet filtered by the input shape of the operation.
+        """
+        excluded = self._NOT_INHERITED.get(method, frozenset()) | self._upload_fields(method)
+        if ranged:
+            excluded = excluded | self._RANGE_FIELDS.get(method, frozenset())
+        if (
+            method == "complete_multipart_upload"
+            and self._checksum_type(request_kwargs) != "FULL_OBJECT"
+        ):
+            excluded = excluded | self._WHOLE_OBJECT_CHECKSUMS
+        return {k: v for k, v in request_kwargs.items() if k not in excluded}
 
     def _require_upload(self) -> S3MultipartUpload:
         if self.upload is None:
@@ -252,7 +381,7 @@ class S3MultipartWriter:
             part_number=part_number,
             source=source,
             range_=range_,
-            **self._params("upload_part_copy", params),
+            **self._params("upload_part_copy", params, range_ is not None),
         )
 
     def complete(
@@ -610,7 +739,9 @@ class _S3WriteSession:
             part_number=part_number,
             source=source,
             range_=range_,
-            **self._params("upload_part_copy"),
+            # A part copy of a file has a range of its own: the whole source
+            # without a range.
+            **self._params("upload_part_copy", True),
         )
 
     def put(self, body: bytes | None) -> S3PutObject:
@@ -799,20 +930,23 @@ class _S3WriteSession:
                     self._state = _S3WriteState.ABORT_FAILED
             raise
 
-    def _params(self, method: str) -> dict[str, Any]:
+    def _params(self, method: str, ranged: bool = False) -> dict[str, Any]:
         """Select the parameters of a request of an S3 operation.
 
         Args:
             method: The name of the client method, such as ``upload_part``.
+            ranged: Whether the request sends a range of its own.
 
         Returns:
             The prepared parameters of the operation, if any, else the
-            inherited parameters that it accepts.
+            inherited parameters that it accepts and takes (see
+            :meth:`S3MultipartWriter.inherited_params`).
         """
         prepared = self._prepared_params.get(method)
         if prepared is not None:
             return dict(prepared)
-        return self._core.operation_params(method, self._request_kwargs)
+        inherited = self._writer.inherited_params(method, self._request_kwargs, ranged)
+        return self._core.operation_params(method, inherited)
 
     def _initiate(self, params: Mapping[str, Any]) -> S3MultipartUpload:
         """Create the multipart upload; the request of the creation.
