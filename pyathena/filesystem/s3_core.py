@@ -16,7 +16,6 @@ import math
 import traceback
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any, ClassVar, cast
 from urllib.parse import urlencode
 
@@ -24,14 +23,27 @@ import botocore.exceptions
 from botocore.client import BaseClient
 
 from pyathena.filesystem.s3_errors import S3ClientError
+
+# The response models that moved to s3_object stay importable from here.
+from pyathena.filesystem.s3_object import S3Bucket as S3Bucket
+from pyathena.filesystem.s3_object import S3CommonPrefix as S3CommonPrefix
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
+    S3CopyObject,
+    S3DeleteObject,
     S3Metadata,
     S3MultipartUpload,
     S3MultipartUploadPart,
-    S3ObjectVersion,
     S3PutObject,
 )
+from pyathena.filesystem.s3_object import S3DeleteError as S3DeleteError
+from pyathena.filesystem.s3_object import S3DeleteResult as S3DeleteResult
+from pyathena.filesystem.s3_object import S3ListBucketsPage as S3ListBucketsPage
+from pyathena.filesystem.s3_object import S3ListMultipartUploadsPage as S3ListMultipartUploadsPage
+from pyathena.filesystem.s3_object import S3ListObjectsPage as S3ListObjectsPage
+from pyathena.filesystem.s3_object import S3ListObjectVersionsPage as S3ListObjectVersionsPage
+from pyathena.filesystem.s3_object import S3ObjectSummary as S3ObjectSummary
+from pyathena.filesystem.s3_object import S3ObjectVersion as S3ObjectVersion
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_retry import (
     THROTTLING_ERROR_CODES,
@@ -42,280 +54,8 @@ from pyathena.filesystem.s3_retry import (
     unstoppable_retries,
     with_exceptions,
 )
-from pyathena.filesystem.util import override
 
 _logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class S3ObjectSummary:
-    """An object listed by ListObjectsV2 (a ``Contents`` entry).
-
-    Attributes:
-        bucket: The bucket of the object.
-        key: The key of the object.
-        size: The size of the object in bytes.
-        etag: The entity tag of the object.
-        last_modified: When the object was last modified.
-        storage_class: The storage class of the object.
-    """
-
-    bucket: str
-    key: str
-    size: int | None = None
-    etag: str | None = None
-    last_modified: datetime | None = None
-    storage_class: str | None = None
-
-    @classmethod
-    def from_response(cls, bucket: str, entry: Mapping[str, Any]) -> S3ObjectSummary:
-        """Build the object from a ``Contents`` entry of ListObjectsV2.
-
-        Args:
-            bucket: The bucket that was listed.
-            entry: The ``Contents`` entry.
-
-        Returns:
-            The listed object.
-        """
-        return cls(
-            bucket=bucket,
-            key=entry["Key"],
-            size=entry.get("Size"),
-            etag=entry.get("ETag"),
-            last_modified=entry.get("LastModified"),
-            storage_class=entry.get("StorageClass"),
-        )
-
-    @property
-    def path(self) -> S3Path:
-        """The path of the object."""
-        return S3Path(self.bucket, self.key)
-
-
-@dataclass(frozen=True)
-class S3CommonPrefix:
-    """A key prefix listed with a delimiter (a ``CommonPrefixes`` entry).
-
-    Attributes:
-        bucket: The bucket that was listed.
-        prefix: The key prefix, ending with the delimiter.
-    """
-
-    bucket: str
-    prefix: str
-
-    @classmethod
-    def from_response(cls, bucket: str, entry: Mapping[str, Any]) -> S3CommonPrefix:
-        """Build the prefix from a ``CommonPrefixes`` entry.
-
-        Args:
-            bucket: The bucket that was listed.
-            entry: The ``CommonPrefixes`` entry.
-
-        Returns:
-            The listed prefix.
-        """
-        return cls(bucket=bucket, prefix=entry["Prefix"])
-
-
-@dataclass(frozen=True)
-class S3Bucket:
-    """A bucket, as listed by ListBuckets or found by HeadBucket.
-
-    Attributes:
-        name: The name of the bucket.
-        creation_date: When the bucket was created, if returned.
-        bucket_region: The region of the bucket, if returned.
-    """
-
-    name: str
-    creation_date: datetime | None = None
-    bucket_region: str | None = None
-
-    @classmethod
-    def from_response(cls, entry: Mapping[str, Any]) -> S3Bucket:
-        """Build the bucket from a ``Buckets`` entry of ListBuckets.
-
-        Args:
-            entry: The ``Buckets`` entry.
-
-        Returns:
-            The listed bucket.
-        """
-        return cls(
-            name=entry["Name"],
-            creation_date=entry.get("CreationDate"),
-            bucket_region=entry.get("BucketRegion"),
-        )
-
-
-@dataclass(frozen=True)
-class S3ListObjectsPage:
-    """One page of a ListObjectsV2 listing.
-
-    Attributes:
-        bucket: The bucket that was listed.
-        objects: The listed objects (``Contents``).
-        common_prefixes: The listed key prefixes (``CommonPrefixes``).
-        key_count: The number of objects and prefixes of the page
-            (``KeyCount``), if returned.
-        is_truncated: Whether more pages follow.
-        next_continuation_token: The token of the next page, if any.
-    """
-
-    bucket: str
-    objects: tuple[S3ObjectSummary, ...] = ()
-    common_prefixes: tuple[S3CommonPrefix, ...] = ()
-    key_count: int | None = None
-    is_truncated: bool = False
-    next_continuation_token: str | None = None
-
-    @classmethod
-    def from_response(cls, bucket: str, response: Mapping[str, Any]) -> S3ListObjectsPage:
-        """Build the page from a ListObjectsV2 response.
-
-        Args:
-            bucket: The bucket that was listed.
-            response: The ListObjectsV2 response.
-
-        Returns:
-            The page.
-        """
-        return cls(
-            bucket=bucket,
-            objects=tuple(
-                S3ObjectSummary.from_response(bucket, c) for c in response.get("Contents", [])
-            ),
-            common_prefixes=tuple(
-                S3CommonPrefix.from_response(bucket, c) for c in response.get("CommonPrefixes", [])
-            ),
-            key_count=response.get("KeyCount"),
-            is_truncated=response.get("IsTruncated", False),
-            next_continuation_token=response.get("NextContinuationToken"),
-        )
-
-
-@dataclass(frozen=True)
-class S3ListObjectVersionsPage:
-    """One page of a ListObjectVersions listing.
-
-    Attributes:
-        bucket: The bucket that was listed.
-        versions: The listed versions (``Versions``).
-        delete_markers: The listed delete markers (``DeleteMarkers``).
-        common_prefixes: The listed key prefixes (``CommonPrefixes``).
-        is_truncated: Whether more pages follow.
-        next_key_marker: The key marker of the next page, if any.
-        next_version_id_marker: The version ID marker of the next page, if
-            any.
-    """
-
-    bucket: str
-    versions: tuple[S3ObjectVersion, ...] = ()
-    delete_markers: tuple[S3ObjectVersion, ...] = ()
-    common_prefixes: tuple[S3CommonPrefix, ...] = ()
-    is_truncated: bool = False
-    next_key_marker: str | None = None
-    next_version_id_marker: str | None = None
-
-    @classmethod
-    def from_response(cls, bucket: str, response: Mapping[str, Any]) -> S3ListObjectVersionsPage:
-        """Build the page from a ListObjectVersions response.
-
-        Args:
-            bucket: The bucket that was listed.
-            response: The ListObjectVersions response.
-
-        Returns:
-            The page.
-        """
-        return cls(
-            bucket=bucket,
-            versions=tuple(
-                S3ObjectVersion(bucket=bucket, is_delete_marker=False, response=v)
-                for v in response.get("Versions", [])
-            ),
-            delete_markers=tuple(
-                S3ObjectVersion(bucket=bucket, is_delete_marker=True, response=m)
-                for m in response.get("DeleteMarkers", [])
-            ),
-            common_prefixes=tuple(
-                S3CommonPrefix.from_response(bucket, c) for c in response.get("CommonPrefixes", [])
-            ),
-            is_truncated=response.get("IsTruncated", False),
-            next_key_marker=response.get("NextKeyMarker"),
-            next_version_id_marker=response.get("NextVersionIdMarker"),
-        )
-
-
-@dataclass(frozen=True)
-class S3ListBucketsPage:
-    """One page of a ListBuckets listing.
-
-    Attributes:
-        buckets: The listed buckets.
-        continuation_token: The token of the next page, if any.
-    """
-
-    buckets: tuple[S3Bucket, ...] = ()
-    continuation_token: str | None = None
-
-    @classmethod
-    def from_response(cls, response: Mapping[str, Any]) -> S3ListBucketsPage:
-        """Build the page from a ListBuckets response.
-
-        Args:
-            response: The ListBuckets response.
-
-        Returns:
-            The page.
-        """
-        return cls(
-            buckets=tuple(S3Bucket.from_response(b) for b in response.get("Buckets", [])),
-            continuation_token=response.get("ContinuationToken"),
-        )
-
-
-@dataclass(frozen=True)
-class S3ListMultipartUploadsPage:
-    """One page of a ListMultipartUploads listing.
-
-    Attributes:
-        bucket: The bucket that was listed.
-        uploads: The listed in-progress multipart uploads (``Uploads``),
-            with the listed bucket as their bucket.
-        is_truncated: Whether more pages follow.
-        next_key_marker: The key marker of the next page, if any.
-        next_upload_id_marker: The upload ID marker of the next page, if any.
-    """
-
-    bucket: str
-    uploads: tuple[S3MultipartUpload, ...] = ()
-    is_truncated: bool = False
-    next_key_marker: str | None = None
-    next_upload_id_marker: str | None = None
-
-    @classmethod
-    def from_response(cls, bucket: str, response: Mapping[str, Any]) -> S3ListMultipartUploadsPage:
-        """Build the page from a ListMultipartUploads response.
-
-        Args:
-            bucket: The bucket that was listed.
-            response: The ListMultipartUploads response.
-
-        Returns:
-            The page.
-        """
-        return cls(
-            bucket=bucket,
-            uploads=tuple(
-                S3MultipartUpload({**u, "Bucket": bucket}) for u in response.get("Uploads", [])
-            ),
-            is_truncated=response.get("IsTruncated", False),
-            next_key_marker=response.get("NextKeyMarker"),
-            next_upload_id_marker=response.get("NextUploadIdMarker"),
-        )
 
 
 @dataclass(frozen=True)
@@ -374,85 +114,6 @@ class S3DeleteBatch:
             for bucket, paths_ in objects.items()
             for i in range(0, len(paths_), cls.MAX_KEYS)
         ]
-
-
-@dataclass(frozen=True)
-class S3DeleteError:
-    """An object that DeleteObjects could not delete (an ``Errors`` entry).
-
-    ``str()`` gives ``"path (code: message)"``.
-
-    Attributes:
-        path: The path of the object, with the version ID of the request, if
-            any.
-        code: The error code.
-        message: The error message.
-    """
-
-    path: S3Path
-    code: str | None = None
-    message: str | None = None
-
-    @classmethod
-    def from_response(cls, bucket: str, entry: Mapping[str, Any]) -> S3DeleteError:
-        """Build the error from an ``Errors`` entry of DeleteObjects.
-
-        Args:
-            bucket: The bucket of the request.
-            entry: The ``Errors`` entry.
-
-        Returns:
-            The error.
-        """
-        return cls(
-            path=S3Path(bucket, entry["Key"], entry.get("VersionId")),
-            code=entry.get("Code"),
-            message=entry.get("Message"),
-        )
-
-    @override
-    def __str__(self) -> str:
-        return f"{self.path} ({self.code}: {self.message})"
-
-
-@dataclass(frozen=True)
-class S3DeleteResult:
-    """The result of a DeleteObjects request.
-
-    S3 answers a request with 200 also when it could not delete some of the
-    objects, and lists them in ``errors``.
-
-    Attributes:
-        bucket: The bucket of the request.
-        deleted: The deleted objects, with the version ID of the request, if
-            any. Empty for a quiet batch.
-        errors: The objects that S3 could not delete.
-    """
-
-    bucket: str
-    deleted: tuple[S3Path, ...] = ()
-    errors: tuple[S3DeleteError, ...] = ()
-
-    @classmethod
-    def from_response(cls, bucket: str, response: Mapping[str, Any]) -> S3DeleteResult:
-        """Build the result from a DeleteObjects response.
-
-        Args:
-            bucket: The bucket of the request.
-            response: The DeleteObjects response.
-
-        Returns:
-            The result.
-        """
-        return cls(
-            bucket=bucket,
-            deleted=tuple(
-                S3Path(bucket, d["Key"], d.get("VersionId")) for d in response.get("Deleted", [])
-            ),
-            errors=tuple(
-                S3DeleteError.from_response(bucket, e) for e in response.get("Errors", [])
-            ),
-        )
 
 
 @dataclass(frozen=True)
@@ -972,13 +633,17 @@ class S3Core:
         response = self.call(self._client.get_bucket_versioning, Bucket=bucket, **params)
         return cast(str | None, response.get("Status"))
 
-    def delete_object(self, path: S3Path, **params) -> None:
+    def delete_object(self, path: S3Path, **params) -> S3DeleteObject:
         """Delete an object, or a version of it, with DeleteObject.
 
         Args:
             path: The path of the object, with the version ID to delete, if
                 any.
             **params: Additional request parameters, sent as given.
+
+        Returns:
+            The result, with the version ID that the request deleted or
+            created, if the bucket is versioned.
 
         Raises:
             ValueError: If the path has no key.
@@ -989,7 +654,8 @@ class S3Core:
         request: dict[str, Any] = {"Bucket": path.bucket, "Key": path.key}
         if path.version_id:
             request.update({"VersionId": path.version_id})
-        self.call(self._client.delete_object, **request, **params)
+        response = self.call(self._client.delete_object, **request, **params)
+        return S3DeleteObject(response)
 
     def delete_objects(self, batch: S3DeleteBatch, **params) -> S3DeleteResult:
         """Delete the objects of a batch with one DeleteObjects request.
@@ -1266,7 +932,7 @@ class S3Core:
                 f"Use a block size of at least {min_block_size} bytes."
             )
 
-    def copy_object(self, source: S3Path, destination: S3Path, **params) -> None:
+    def copy_object(self, source: S3Path, destination: S3Path, **params) -> S3CopyObject:
         """Copy an object, or a version of it, with CopyObject.
 
         Args:
@@ -1275,6 +941,9 @@ class S3Core:
             destination: The path of the object to write, without a version
                 ID.
             **params: Additional request parameters, sent as given.
+
+        Returns:
+            The result of the copy.
 
         Raises:
             ValueError: If the source or the destination has no key, or the
@@ -1299,7 +968,8 @@ class S3Core:
             "Key": destination.key,
         }
         _logger.debug(f"Copy object from {source.uri} to {destination.uri}.")
-        self.call(self._client.copy_object, **request, **params)
+        response = self.call(self._client.copy_object, **request, **params)
+        return S3CopyObject(response)
 
     def plan_multipart_copy(
         self,
@@ -1655,7 +1325,7 @@ class S3Core:
 
     def replace_object_metadata(
         self, path: S3Path, head: S3Metadata, metadata: Mapping[str, str], **params
-    ) -> None:
+    ) -> S3CopyObject:
         """Replace the user-defined metadata of an object by copying it onto itself.
 
         S3 does not update the metadata of an object in place, so the object
@@ -1681,6 +1351,9 @@ class S3Core:
                 over the retained fields; one that the copy itself sets,
                 such as ``Metadata``, ``MetadataDirective`` or ``Key``,
                 raises ``TypeError``.
+
+        Returns:
+            The result of the copy.
 
         Raises:
             ValueError: If the path has no key or has a version ID, which a
@@ -1709,7 +1382,7 @@ class S3Core:
                     "BucketKeyEnabled": head.bucket_key_enabled,
                 }
             )
-        self.copy_object(
+        return self.copy_object(
             path,
             path,
             # botocore accepts only a dict, not another mapping such as an

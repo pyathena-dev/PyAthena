@@ -27,22 +27,25 @@ from botocore.config import Config
 from botocore.response import StreamingBody
 from botocore.stub import Stubber
 
-from pyathena.filesystem.s3_core import (
+from pyathena.filesystem import s3_core, s3_object
+from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3MultipartCopyPlan
+from pyathena.filesystem.s3_executor import S3ThreadPool
+from pyathena.filesystem.s3_object import (
     S3Bucket,
     S3CommonPrefix,
-    S3Core,
-    S3DeleteBatch,
+    S3CopyObject,
     S3DeleteError,
+    S3DeleteObject,
     S3DeleteResult,
     S3ListBucketsPage,
     S3ListMultipartUploadsPage,
     S3ListObjectsPage,
     S3ListObjectVersionsPage,
-    S3MultipartCopyPlan,
+    S3Metadata,
+    S3MultipartUpload,
+    S3MultipartUploadPart,
     S3ObjectSummary,
 )
-from pyathena.filesystem.s3_executor import S3ThreadPool
-from pyathena.filesystem.s3_object import S3Metadata, S3MultipartUpload, S3MultipartUploadPart
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.util import RetryConfig, stop_retries_on
 from tests.pyathena.util import (
@@ -938,7 +941,7 @@ class TestS3Core:
         stubber.add_response("delete_object", {}, {"Bucket": "bucket", "Key": "key"})
         stubber.add_response(
             "delete_object",
-            {},
+            {"VersionId": "v1", "DeleteMarker": False},
             {
                 "Bucket": "bucket",
                 "Key": "key",
@@ -947,9 +950,13 @@ class TestS3Core:
             },
         )
         with stubber:
-            core.delete_object(S3Path("bucket", "key"))
-            core.delete_object(S3Path("bucket", "key", "v1"), BypassGovernanceRetention=True)
+            assert core.delete_object(S3Path("bucket", "key")) == S3DeleteObject({})
+            # GH-1383: the version that the request deleted.
+            deleted = core.delete_object(
+                S3Path("bucket", "key", "v1"), BypassGovernanceRetention=True
+            )
         stubber.assert_no_pending_responses()
+        assert (deleted.version_id, deleted.delete_marker) == ("v1", False)
 
     def test_delete_objects(self):
         core, stubber = _make_core()
@@ -1319,9 +1326,14 @@ class TestS3Core:
 
     def test_copy_object(self):
         core, stubber = _make_core()
+        response = {
+            "VersionId": "v-dst",
+            "CopySourceVersionId": "v1",
+            "CopyObjectResult": {"ETag": '"e"', "LastModified": MODIFIED},
+        }
         stubber.add_response(
             "copy_object",
-            {},
+            response,
             {
                 "CopySource": {"Bucket": "src-bucket", "Key": "src", "VersionId": "v1"},
                 "Bucket": "bucket",
@@ -1335,13 +1347,16 @@ class TestS3Core:
             {"CopySource": {"Bucket": "bucket", "Key": "src"}, "Bucket": "bucket", "Key": "dst"},
         )
         with stubber:
-            core.copy_object(
+            copied = core.copy_object(
                 S3Path("src-bucket", "src", "v1"),
                 S3Path("bucket", "dst"),
                 MetadataDirective="REPLACE",
             )
             core.copy_object(S3Path("bucket", "src"), S3Path("bucket", "dst"))
         stubber.assert_no_pending_responses()
+        # GH-1383: the result of the copy.
+        assert copied == S3CopyObject(response)
+        assert (copied.version_id, copied.copy_source_version_id) == ("v-dst", "v1")
 
     @pytest.mark.parametrize(
         ("method", "args", "match"),
@@ -1847,7 +1862,7 @@ class TestS3Core:
         }
         stubber.add_response(
             "copy_object",
-            {},
+            {"VersionId": "v2", "CopyObjectResult": {"ETag": '"e2"'}},
             {
                 **request,
                 "ContentType": "text/csv",
@@ -1864,7 +1879,9 @@ class TestS3Core:
             {**request, "ContentType": "text/plain", "SSECustomerAlgorithm": "AES256"},
         )
         with stubber:
-            core.replace_object_metadata(S3Path("bucket", "key"), head, {"new": "2"})
+            # GH-1383: the result of the copy.
+            copied = core.replace_object_metadata(S3Path("bucket", "key"), head, {"new": "2"})
+            assert (copied.version_id, copied.etag) == ("v2", '"e2"')
             core.replace_object_metadata(
                 S3Path("bucket", "key"),
                 head,
@@ -1989,11 +2006,21 @@ class TestS3DeleteBatch:
             S3DeleteBatch("bucket", objects)
 
 
-class TestS3DeleteError:
-    def test_from_response(self):
-        error = S3DeleteError.from_response(
-            "bucket", {"Key": "a", "VersionId": "v1", "Code": "InternalError", "Message": "Error"}
-        )
-        assert error == S3DeleteError(S3Path("bucket", "a", "v1"), "InternalError", "Error")
-        assert str(error) == "bucket/a?versionId=v1 (InternalError: Error)"
-        assert str(S3DeleteError.from_response("bucket", {"Key": "a"})) == "bucket/a (None: None)"
+@pytest.mark.parametrize(
+    "name",
+    [
+        "S3ObjectSummary",
+        "S3ObjectVersion",
+        "S3CommonPrefix",
+        "S3Bucket",
+        "S3ListObjectsPage",
+        "S3ListObjectVersionsPage",
+        "S3ListBucketsPage",
+        "S3ListMultipartUploadsPage",
+        "S3DeleteResult",
+        "S3DeleteError",
+    ],
+)
+def test_models_importable_from_s3_core(name):
+    # GH-1383: the response models moved to s3_object keep their names here.
+    assert getattr(s3_core, name) is getattr(s3_object, name)

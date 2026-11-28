@@ -6,24 +6,30 @@
 # SPDX-License-Identifier: MIT
 
 import copy
+import dataclasses
 import pickle
 from datetime import datetime
 from types import MappingProxyType
 
 import pytest
 
-from pyathena.filesystem.s3_core import S3ObjectSummary
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
+    S3CopyObject,
+    S3DeleteError,
+    S3DeleteObject,
     S3Metadata,
     S3MultipartUpload,
     S3MultipartUploadPart,
     S3Object,
+    S3ObjectSummary,
     S3ObjectType,
     S3ObjectVersion,
+    S3Owner,
     S3PutObject,
     S3StorageClass,
 )
+from pyathena.filesystem.s3_path import S3Path
 
 
 class TestS3Object:
@@ -309,6 +315,38 @@ class TestS3Metadata:
         assert actual != {"attr1": "value1"}
         # System-defined metadata is not part of the mapping.
         assert "content_type" not in actual
+        # GH-1383: the truth value and the equality are those of the
+        # user-defined metadata, whatever the system-defined metadata.
+        empty = S3Metadata({"ContentType": "text/plain", "ETag": '"e"'})
+        assert not empty
+        assert empty == {}
+        assert empty == S3Metadata({"ContentType": "application/json"})
+        assert actual == S3Metadata({"Metadata": {"attr1": "value1", "attr-2": "value2"}})
+
+
+class TestS3ObjectSummary:
+    def test_from_response(self):
+        actual = S3ObjectSummary.from_response(
+            "bucket",
+            {
+                "Key": "key",
+                "Size": 1,
+                "ETag": '"e"',
+                "StorageClass": "STANDARD",
+                "ChecksumAlgorithm": ["CRC32"],
+                "ChecksumType": "FULL_OBJECT",
+            },
+        )
+        assert actual == S3ObjectSummary(
+            "bucket",
+            "key",
+            size=1,
+            etag='"e"',
+            storage_class="STANDARD",
+            checksum_algorithm=("CRC32",),
+            checksum_type="FULL_OBJECT",
+        )
+        assert S3ObjectSummary.from_response("bucket", {"Key": "key"}).checksum_algorithm == ()
 
 
 class TestS3ObjectVersion:
@@ -324,13 +362,18 @@ class TestS3ObjectVersion:
                 "ETag": '"test_etag"',
                 "Size": 100,
                 "StorageClass": "STANDARD",
+                "ChecksumAlgorithm": ["CRC32"],
+                "ChecksumType": "FULL_OBJECT",
                 "Owner": {"DisplayName": "test_owner", "ID": "test_owner_id"},
             },
         )
+        assert actual.checksum_algorithm == ("CRC32",)
+        assert actual.checksum_type == "FULL_OBJECT"
         assert actual.bucket == "test_bucket"
         assert actual.key == "test_key"
         assert actual.name == "test_bucket/test_key"
         assert actual.version_id == "test_version_id"
+        assert actual.path == S3Path("test_bucket", "test_key", "test_version_id")
         assert actual.is_latest is True
         assert actual.is_delete_marker is False
         assert actual.last_modified == datetime(2015, 1, 1, 0, 0, 0)
@@ -376,6 +419,37 @@ class TestS3PutObject:
         assert actual.sse_kms_encryption_context == "test_sse_kms_encryption_context"
         assert actual.bucket_key_enabled is True
         assert actual.request_charged == "requester"
+
+    def test_to_dict(self):
+        # GH-1383: keyed as before the dataclass, with a leading underscore,
+        # and with the keys of the added checksums.
+        actual = S3PutObject({"ETag": '"e"', "VersionId": "v"}).to_dict()
+        assert actual["_etag"] == '"e"'
+        assert actual["_version_id"] == "v"
+        assert actual["_checksum_sha256"] is None
+        assert actual.keys() >= {
+            "_expiration",
+            "_version_id",
+            "_etag",
+            "_checksum_crc32",
+            "_checksum_crc32c",
+            "_checksum_sha1",
+            "_checksum_sha256",
+            "_server_side_encryption",
+            "_sse_customer_algorithm",
+            "_sse_customer_key_md5",
+            "_sse_kms_key_id",
+            "_sse_kms_encryption_context",
+            "_bucket_key_enabled",
+            "_request_charged",
+        }
+
+    def test_equality(self):
+        # GH-1383: the results compare and hash by their fields.
+        assert S3PutObject({"ETag": '"a"'}) == S3PutObject({"ETag": '"a"'})
+        assert S3PutObject({"ETag": '"a"'}) != S3PutObject({"ETag": '"b"'})
+        assert hash(S3PutObject({"ETag": '"a"'})) == hash(S3PutObject({"ETag": '"a"'}))
+        assert len({S3PutObject({"ETag": '"a"'}), S3PutObject({"ETag": '"a"'})}) == 1
 
 
 class TestS3MultipartUpload:
@@ -550,3 +624,140 @@ class TestS3CompleteMultipartUpload:
         assert actual.sse_kms_key_id == "test_sse_kms_key_id"
         assert actual.bucket_key_enabled is False
         assert actual.request_charged == "requester"
+
+    def test_to_dict(self):
+        # GH-1383: keyed as before the dataclass, with a leading underscore,
+        # and with the keys of the added checksums.
+        actual = S3CompleteMultipartUpload({"ETag": '"e"', "VersionId": "v"}).to_dict()
+        assert actual["_etag"] == '"e"'
+        assert actual["_version_id"] == "v"
+        assert actual["_location"] is None
+        assert actual.keys() >= {
+            "_location",
+            "_bucket",
+            "_key",
+            "_expiration",
+            "_version_id",
+            "_etag",
+            "_checksum_crc32",
+            "_checksum_crc32c",
+            "_checksum_sha1",
+            "_checksum_sha256",
+            "_server_side_encryption",
+            "_sse_kms_key_id",
+            "_bucket_key_enabled",
+            "_request_charged",
+        }
+
+
+class TestS3CopyObject:
+    def test_init(self):
+        actual = S3CopyObject(
+            {
+                "VersionId": "test_version_id",
+                "CopySourceVersionId": "test_copy_source_version_id",
+                "CopyObjectResult": {
+                    "ETag": '"test_etag"',
+                    "LastModified": datetime(2015, 1, 1, 0, 0, 0),
+                },
+            }
+        )
+        assert actual.version_id == "test_version_id"
+        assert actual.copy_source_version_id == "test_copy_source_version_id"
+        assert actual.etag == '"test_etag"'
+        assert actual.last_modified == datetime(2015, 1, 1, 0, 0, 0)
+
+        # An unversioned copy.
+        actual = S3CopyObject({"CopyObjectResult": {"ETag": '"test_etag"'}})
+        assert actual.version_id is None
+        assert actual.copy_source_version_id is None
+        assert actual.etag == '"test_etag"'
+
+
+class TestS3DeleteObject:
+    @pytest.mark.parametrize(
+        ("response", "version_id", "delete_marker"),
+        [
+            pytest.param({}, None, False, id="unversioned"),
+            pytest.param({"VersionId": "v1"}, "v1", False, id="version"),
+            pytest.param({"VersionId": "m1", "DeleteMarker": True}, "m1", True, id="marker"),
+        ],
+    )
+    def test_init(self, response, version_id, delete_marker):
+        actual = S3DeleteObject(response)
+        assert actual.version_id == version_id
+        assert actual.delete_marker is delete_marker
+
+
+class TestS3DeleteError:
+    def test_from_response(self):
+        error = S3DeleteError.from_response(
+            "bucket", {"Key": "a", "VersionId": "v1", "Code": "InternalError", "Message": "Error"}
+        )
+        assert error == S3DeleteError(S3Path("bucket", "a", "v1"), "InternalError", "Error")
+        assert str(error) == "bucket/a?versionId=v1 (InternalError: Error)"
+        assert str(S3DeleteError.from_response("bucket", {"Key": "a"})) == "bucket/a (None: None)"
+
+
+# The checksum fields of the responses and their names in the models.
+_CHECKSUMS = {
+    "ChecksumCRC32": "checksum_crc32",
+    "ChecksumCRC32C": "checksum_crc32c",
+    "ChecksumCRC64NVME": "checksum_crc64nvme",
+    "ChecksumSHA1": "checksum_sha1",
+    "ChecksumSHA256": "checksum_sha256",
+    "ChecksumSHA512": "checksum_sha512",
+    "ChecksumMD5": "checksum_md5",
+    "ChecksumXXHASH64": "checksum_xxhash64",
+    "ChecksumXXHASH3": "checksum_xxhash3",
+    "ChecksumXXHASH128": "checksum_xxhash128",
+}
+
+
+@pytest.mark.parametrize(
+    ("model", "result_key"),
+    [
+        pytest.param(S3Metadata, None, id="head_object"),
+        pytest.param(S3PutObject, None, id="put_object"),
+        pytest.param(S3CopyObject, "CopyObjectResult", id="copy_object"),
+        pytest.param(S3CompleteMultipartUpload, None, id="complete_multipart_upload"),
+    ],
+)
+def test_checksums(model, result_key):
+    # GH-1383: the checksums and the checksum type that botocore defines for
+    # the response of each operation.
+    result = {key: f"value of {key}" for key in _CHECKSUMS}
+    result["ChecksumType"] = "FULL_OBJECT"
+    actual = model({result_key: result} if result_key else result)
+    assert {name: getattr(actual, name) for name in _CHECKSUMS.values()} == {
+        name: f"value of {key}" for key, name in _CHECKSUMS.items()
+    }
+    assert actual.checksum_type == "FULL_OBJECT"
+
+
+@pytest.mark.parametrize(
+    ("model", "args"),
+    [
+        pytest.param(S3Metadata, ({"ETag": '"e"', "Metadata": {"a": "b"}},), id="S3Metadata"),
+        pytest.param(S3ObjectVersion, ("bucket", False, {"Key": "key"}), id="S3ObjectVersion"),
+        pytest.param(S3PutObject, ({},), id="S3PutObject"),
+        pytest.param(S3CopyObject, ({},), id="S3CopyObject"),
+        pytest.param(S3DeleteObject, ({},), id="S3DeleteObject"),
+        pytest.param(
+            S3MultipartUpload, ({"Owner": {"DisplayName": "o", "ID": "i"}},), id="S3MultipartUpload"
+        ),
+        pytest.param(S3Owner, ({"DisplayName": "o", "ID": "i"},), id="S3Owner"),
+        pytest.param(S3MultipartUploadPart, (1, {}), id="S3MultipartUploadPart"),
+        pytest.param(S3CompleteMultipartUpload, ({},), id="S3CompleteMultipartUpload"),
+    ],
+)
+def test_models_set_every_field(model, args):
+    # GH-1383: the constructors read a response into every field, so that the
+    # fields compare, hash and convert.
+    actual = model(*args)
+    assert {f.name for f in dataclasses.fields(actual)} <= vars(actual).keys()
+    assert actual == model(*args)
+    # Compared by their fields, which the equality of S3Metadata ignores.
+    for restored in (copy.copy(actual), pickle.loads(pickle.dumps(actual))):
+        assert type(restored) is model
+        assert vars(restored) == vars(actual)
