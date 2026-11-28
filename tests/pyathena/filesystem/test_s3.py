@@ -5541,18 +5541,26 @@ class TestS3FileSystem:
 
     @pytest.mark.parametrize(
         "interruption",
-        ["invalidate_path", "invalidate_all", "replace_dircache", "evict_then_invalidate"],
+        [
+            "invalidate_path",
+            "invalidate_all",
+            "replace_dircache",
+            "evict_then_invalidate",
+            "evict_then_delete_bucket",
+        ],
     )
     def test_cache_lookup_invalidated_during_lookup(self, interruption):
         # GH-1459: a lookup with other parameters that stores the cached
         # lookups after an invalidation does not make the results cached
         # before the invalidation usable again.
         fs = self._make_fs()
+        fs.allow_bucket_deletion = True
         etags = iter(['"old"', '"other"', '"new"'])
-        fs.core.call.side_effect = lambda method, **request: {
-            "ContentLength": 2,
-            "ETag": next(etags),
-        }
+        fs.core.call.side_effect = lambda method, **request: (
+            {}
+            if method is fs.core.client.delete_bucket
+            else {"ContentLength": 2, "ETag": next(etags)}
+        )
         path = "s3://bucket/key"
         other_key = {**self.LOOKUP_KWARGS, "SSECustomerKey": "j" * 32}
 
@@ -5588,6 +5596,10 @@ class TestS3FileSystem:
                         # eviction, before the invalidation.
                         del self[key]
                         fs.invalidate_cache(path)
+                    elif interruption == "evict_then_delete_bucket":
+                        # GH-1460: the same, before the bucket is deleted.
+                        del self[key]
+                        fs.rmdir("s3://bucket")
                 super().__setitem__(key, value)
 
         cache = InterruptedDirCache()
