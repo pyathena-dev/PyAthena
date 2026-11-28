@@ -58,6 +58,10 @@ class TestS3PathPairing:
             ("s3://bucket/a*", "s3://bucket/b", False),
             (["s3://bucket/a"], "s3://bucket/b", False),
             ("s3://bucket/a", ["s3://bucket/b"], False),
+            # GH-1469: nor is the slash that ends a version ID a separator,
+            # unless the query names no version without it.
+            ("s3://bucket/a?versionId=v1/", "s3://bucket/b", True),
+            ("s3://bucket/a?versionId=/", "s3://bucket/b", False),
         ],
     )
     def test_looks_up_destination(self, path1, path2, expected):

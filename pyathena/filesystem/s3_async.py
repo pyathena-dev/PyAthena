@@ -1612,6 +1612,15 @@ class AioS3FileSystem(AsyncFileSystem):
         Returns:
             The matching paths, or a dict of their info with ``detail=True``.
         """
+        stripped = self._strip_protocol(path)
+        if stripped.endswith("/"):
+            # As in S3FileSystem.glob(): the slashes that _strip_protocol()
+            # keeps end a pattern that matches directories.
+            detail = kwargs.pop("detail", False)
+            found = await super()._glob(
+                stripped.rstrip("/"), maxdepth=maxdepth, detail=True, **kwargs
+            )
+            return S3FileSystem._glob_directories(found, detail)
         return await super()._glob(stringify_path(path), maxdepth=maxdepth, **kwargs)
 
     def walk(self, path, maxdepth=None, topdown=True, on_error="omit", **kwargs):
@@ -1849,6 +1858,43 @@ class AioS3FileSystem(AsyncFileSystem):
             create=create,
             missing_exceptions=missing_exceptions,
         )
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        """Remove the protocol and the trailing slashes from a path.
+
+        As :meth:`S3FileSystem._strip_protocol`, which keeps the slashes that
+        end a version ID.
+
+        Args:
+            path: The path, an ``os.PathLike``, or a list of them.
+
+        Returns:
+            The path without the protocol, or a list of them.
+        """
+        if isinstance(path, list):
+            return [cls._strip_protocol(p) for p in path]
+        # fsspec strips the slashes of a version ID too.
+        return super()._strip_protocol(path) + S3Path.version_separators(stringify_path(path))
+
+    @classmethod
+    def _parent(cls, path):
+        """Return the parent of a path, as :meth:`S3FileSystem._parent` does.
+
+        Args:
+            path: The path.
+
+        Returns:
+            The parent path, without the protocol.
+        """
+        stripped = cls._strip_protocol(path)
+        name, version_id = S3Path.split_version_id(stripped)
+        if version_id is None:
+            return super()._parent(path)
+        if "/" not in name:
+            return cls.root_marker
+        # As fsspec joins the parent to the root marker.
+        return cls.root_marker + name.rsplit("/", 1)[0].lstrip(cls.root_marker)
 
     def unstrip_protocol(self, name: str | os.PathLike[str]) -> str:
         """Add the protocol to a path, as fsspec's ``unstrip_protocol()`` does.

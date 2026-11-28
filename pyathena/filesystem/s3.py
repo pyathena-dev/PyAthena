@@ -1040,7 +1040,7 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError(
                 "Cannot list the object versions unless the filesystem is version aware."
             )
-        path = self._strip_protocol(path).rstrip("/")
+        path = self._strip_protocol(path)
         if path in ["", "/"]:
             files = self._ls_buckets(refresh)
         else:
@@ -1761,7 +1761,7 @@ class S3FileSystem(AbstractFileSystem):
             if name.startswith(path + "/"):
                 (dirs if is_directory else files)[name[len(path) + 1 :]] = info
                 continue
-            pathname = name.rstrip("/")
+            pathname = S3Path.split_trailing_separators(name)[0]
             if is_directory and pathname != path:
                 dirs[pathname.rsplit("/", 1)[-1]] = info
             elif pathname == path:
@@ -1821,7 +1821,34 @@ class S3FileSystem(AbstractFileSystem):
         stem = stripped[: min(wildcards)].rpartition("/")[2] if wildcards else ""
         if stem and "prefix" not in kwargs:
             kwargs["prefix"] = stem
+        if stripped.endswith("/"):
+            # The slashes that _strip_protocol() keeps after what looks like a
+            # version ID query end a pattern, which matches directories, as
+            # fsspec matches a pattern that ends in a slash.
+            detail = kwargs.pop("detail", False)
+            found = super().glob(stripped.rstrip("/"), maxdepth=maxdepth, detail=True, **kwargs)
+            return self._glob_directories(found, detail)
         return super().glob(stringify_path(path), maxdepth=maxdepth, **kwargs)
+
+    @staticmethod
+    def _glob_directories(found: dict[str, Any], detail: bool) -> dict[str, Any] | list[str]:
+        """Return the directories among the paths that a glob found.
+
+        As fsspec's ``glob()`` returns them for a pattern that ends in a slash.
+
+        Args:
+            found: The paths that the glob found and their objects.
+            detail: Whether to return the objects too.
+
+        Returns:
+            The directories and their objects with ``detail``, or their paths.
+        """
+        directories = {
+            name: info
+            for name, info in found.items()
+            if info["type"] == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
+        }
+        return directories if detail else list(directories)
 
     def tree(
         self,
@@ -1887,6 +1914,51 @@ class S3FileSystem(AbstractFileSystem):
             create=create,
             missing_exceptions=missing_exceptions,
         )
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        """Remove the protocol and the trailing slashes from a path, as fsspec does.
+
+        Unlike fsspec, the slashes that end a version ID are kept (see
+        :meth:`S3Path.split_trailing_separators`), so that
+        ``s3://bucket/key?versionId=v1/`` names the version ``v1/``, also
+        when fsspec reopens a file of that version by its path.
+
+        Args:
+            path: The path, an ``os.PathLike``, or a list of them.
+
+        Returns:
+            The path without the protocol, or a list of them.
+        """
+        if isinstance(path, list):
+            return [cls._strip_protocol(p) for p in path]
+        # fsspec strips the slashes of a version ID too.
+        return super()._strip_protocol(path) + S3Path.version_separators(stringify_path(path))
+
+    @classmethod
+    def _parent(cls, path):
+        """Return the parent of a path, as fsspec's ``_parent()`` does.
+
+        A path with a version ID is split at the last slash before its version
+        ID query, also when the version ID contains slashes:
+        ``bucket/a/key?versionId=x/y`` is in ``bucket/a``, and the version
+        ``bucket/a/dir/?versionId=v1`` of a folder marker in ``bucket/a/dir``,
+        as fsspec splits it.
+
+        Args:
+            path: The path.
+
+        Returns:
+            The parent path, without the protocol.
+        """
+        stripped = cls._strip_protocol(path)
+        name, version_id = S3Path.split_version_id(stripped)
+        if version_id is None:
+            return super()._parent(path)
+        if "/" not in name:
+            return cls.root_marker
+        # As fsspec joins the parent to the root marker.
+        return cls.root_marker + name.rsplit("/", 1)[0].lstrip(cls.root_marker)
 
     def unstrip_protocol(self, name: str | os.PathLike[str]) -> str:
         """Add the protocol to a path, as fsspec's ``unstrip_protocol()`` does.
@@ -2653,7 +2725,7 @@ class S3FileSystem(AbstractFileSystem):
                 filesystem instance.
             OSError: If the bucket is not empty.
         """
-        path = self._strip_protocol(path).rstrip("/")
+        path = self._strip_protocol(path)
         s3_path = S3Path.parse(path)
         if s3_path.key:
             if self.exists(path):
@@ -2916,7 +2988,10 @@ class S3FileSystem(AbstractFileSystem):
             )
             if not (
                 pairing.skips_directories
-                and (trailing_sep(name) or (not versioned and self.isdir(target)))
+                and (
+                    S3PathPairing.names_directory(name, target)
+                    or (not versioned and self.isdir(target))
+                )
             )
         ]
         isdir = LocalFileSystem().isdir if local else self.isdir
@@ -4774,7 +4849,7 @@ class S3FileSystem(AbstractFileSystem):
             return
         raw = stringify_path(path)
         self._listing_cache.invalidate_path(
-            self._strip_protocol(raw), len(raw) - len(raw.rstrip("/"))
+            self._strip_protocol(raw), len(S3Path.split_trailing_separators(raw)[1])
         )
 
     def _invalidate(self, path: S3Path) -> None:
@@ -5099,8 +5174,8 @@ class S3FileTarget:
             # so that a reopened (e.g., unpickled) file reads the same version.
             path = f"{path}?versionId={version_id}"
         if version_id:
-            # A version is looked up by its bucket, key and version, also one
-            # that ends in a slash, which the lookup of a path string drops.
+            # A version is looked up by its bucket, key and version, without
+            # parsing the path again.
             target = s3_path.with_version_id(version_id)
         if "r" not in mode and not (
             fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE

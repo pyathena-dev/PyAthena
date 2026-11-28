@@ -151,6 +151,47 @@ class S3Path:
         """
         return cls.split_version_id(os.fspath(path))[1] is not None
 
+    @classmethod
+    def split_trailing_separators(cls, path: str) -> tuple[str, str]:
+        """Split the trailing slashes that end the name of a directory from a path string.
+
+        Slashes that follow a version ID query belong to the version ID, which
+        may end in slashes: ``bucket/key?versionId=v1/`` names the version
+        ``v1/`` of ``bucket/key``, and its slashes are not split. A query that
+        names no version without the slashes, such as ``?versionId=/``, is
+        part of the key, whose slashes are split. As with
+        :meth:`split_version_id`, any string is accepted.
+
+        Args:
+            path: The path string.
+
+        Returns:
+            Tuple of the string without the trailing slashes and the slashes,
+            or of the string itself and ``""`` if it ends in no slash or in
+            the slashes of a version ID.
+        """
+        name = path.rstrip("/")
+        if name != path and cls.has_version_id(name):
+            return path, ""
+        return name, path[len(name) :]
+
+    @classmethod
+    def version_separators(cls, path: str) -> str:
+        """Return the trailing slashes of a path string that end its version ID.
+
+        See :meth:`split_trailing_separators`.
+
+        Args:
+            path: The path string.
+
+        Returns:
+            The trailing slashes, or ``""`` if the path ends in no slash or
+            in the slashes of a directory.
+        """
+        if not path.endswith("/") or cls.split_trailing_separators(path)[1]:
+            return ""
+        return path[len(path.rstrip("/")) :]
+
     @property
     def is_bucket(self) -> bool:
         """Whether the path names the bucket: it has no key, or a key of only slashes."""
