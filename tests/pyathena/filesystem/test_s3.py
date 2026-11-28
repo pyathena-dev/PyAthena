@@ -54,7 +54,6 @@ from pyathena.filesystem.s3 import (
     S3FileSystem,
     _handed_over_closes,
 )
-from pyathena.filesystem.s3_cache import S3ListingCache
 from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch, S3MultipartCopyPlan
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool, _S3Batch, _S3PoolScope
@@ -111,7 +110,6 @@ class TestS3FileSystem:
         # __init__ which would require a boto3 client.
         fs = S3FileSystem.__new__(S3FileSystem)
         fs.dircache = DirCache()
-        fs._listing_cache = S3ListingCache(fs)
         client = mock.MagicMock()
         client.meta.method_to_api_mapping = S3_CLIENT.meta.method_to_api_mapping
         client.meta.service_model = S3_CLIENT.meta.service_model
@@ -201,7 +199,7 @@ class TestS3FileSystem:
 
     def test_unused_filesystem_is_freed_without_the_cycle_collector(self):
         # GH-1384: the result sets release their filesystem, and its
-        # dircache, with them. The listing cache refers to it weakly.
+        # dircache, with them. The listing cache does not refer to it.
         fs = S3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
@@ -214,6 +212,32 @@ class TestS3FileSystem:
         finally:
             if enabled:
                 gc.enable()
+
+    def test_collected_filesystem_cache_in_finalizers(self):
+        # GH-1384: a finalizer that the cyclic garbage collector runs, as that
+        # of an unclosed file, invalidates the cache of a filesystem collected
+        # with it. CPython clears the weak references to the collected objects
+        # before it runs their finalizers.
+        invalidated = []
+
+        class Finalized:
+            def __init__(self, fs):
+                self.fs = fs
+                self.cycle = self
+
+            def __del__(self):
+                self.fs.invalidate_cache("s3://bucket/key")
+                invalidated.append(self.fs.dircache)
+
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            Finalized(self._make_fs())
+            gc.collect()
+        finally:
+            if enabled:
+                gc.enable()
+        assert len(invalidated) == 1
 
     def test_get_client_compatible_with_s3fs(self):
         # Only constructs a boto3 client; no AWS access.
@@ -5202,15 +5226,18 @@ class TestS3FileSystem:
         fs.info(path, **lookup_kwargs)
 
         class InterleavedDirCache(DirCache):
-            reads = 0
+            first = None
+            interleaved = False
 
             def get(self, key, default=None):
                 value = super().get(key, default)
-                self.reads += 1
-                if self.reads == 2:
+                if self.first is None:
+                    # The read of the cached lookups by the lookup.
+                    self.first = key
+                elif key == self.first and not self.interleaved:
                     # Another thread refreshes the lookup between the read
-                    # and the write of the cached lookups, the second read,
-                    # after that of the lookup.
+                    # and the write of the cached lookups.
+                    self.interleaved = True
                     fs.info(path, refresh=True, **lookup_kwargs)
                 return value
 

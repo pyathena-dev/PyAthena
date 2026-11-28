@@ -33,6 +33,7 @@ from fsspec.callbacks import _DEFAULT_CALLBACK, Callback
 from fsspec.compression import compr
 from fsspec.config import apply_config
 from fsspec.core import get_compression
+from fsspec.dircache import DirCache
 from fsspec.implementations.local import LocalFileSystem, make_path_posix, trailing_sep
 from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import check_contained, isfilelike, other_paths, stringify_path, tokenize
@@ -516,9 +517,6 @@ class S3FileSystem(AbstractFileSystem):
                 fsspec's configuration supplies.
         """
         super().__init__(*args, **kwargs)
-        # The lookups and listings, kept in the dircache, which an
-        # AioS3FileSystem shares with its internal S3FileSystem.
-        self._listing_cache = S3ListingCache(self)
         self.batch_size = self._check_batch_size(batch_size)
         self._client_injected = client is not None or connection is not None
         client, retry_config = self._resolve_injected_client(
@@ -641,6 +639,25 @@ class S3FileSystem(AbstractFileSystem):
     def core(self) -> S3Core:
         """The typed S3 operations that the filesystem sends its requests with."""
         return self._core
+
+    @property
+    def dircache(self) -> DirCache:
+        """The fsspec ``DirCache`` that holds the cached lookups and listings."""
+        return self._listing_cache.dircache
+
+    @dircache.setter
+    def dircache(self, value: DirCache) -> None:
+        """Replace the ``DirCache`` that holds the cached lookups and listings.
+
+        Args:
+            value: The new ``DirCache``.
+        """
+        listing_cache = self.__dict__.get("_listing_cache")
+        if listing_cache is None:
+            # fsspec's __init__ assigns the first one.
+            self._listing_cache = S3ListingCache(value)
+        else:
+            listing_cache.dircache = value
 
     @property
     def _client(self) -> BaseClient:
@@ -1334,7 +1351,7 @@ class S3FileSystem(AbstractFileSystem):
         if (page.key_count or 0) > 0 or page.objects or page.common_prefixes:
             # Nothing caches the key prefix, and the cached listing of the
             # parent may predate it.
-            self._listing_cache.evict_listing(S3ListingCache.listing_name(path), "/")
+            self._listing_cache.evict_parent_listing(path)
             return self._directory_object(
                 path.bucket, path.key.rstrip("/") if path.key else None, version_id
             )

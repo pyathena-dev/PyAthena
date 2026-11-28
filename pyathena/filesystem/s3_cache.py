@@ -12,14 +12,12 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import time
-import weakref
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from pyathena.filesystem.s3_path import S3Path
 
 if TYPE_CHECKING:
-    from fsspec import AbstractFileSystem
     from fsspec.dircache import DirCache
 
     from pyathena.filesystem.s3_object import S3Object
@@ -39,51 +37,41 @@ _VERSION_QUERIES = ("versionId", "versionID", "versionid", "version_id")
 class S3ListingCache:
     """The lookups and listings that an S3 filesystem caches in its ``dircache``.
 
-    The cache owns the keys under which it stores the entries in the fsspec
-    ``DirCache`` of the filesystem, which are private to it:
+    The cache holds the fsspec ``DirCache`` that the filesystem exposes as its
+    ``dircache``, and owns the keys under which it stores the entries, which
+    are private to it:
 
     - the bucket listing (ListBuckets) under ``""``;
     - a listing (ListObjectsV2) under ``(name, delimiter)``, with the name of
-      the directory, as :meth:`listing_name` names it;
+      the directory, as :meth:`_listing_name` names it;
     - the lookup (HeadObject or HeadBucket) of a path without a version under
       its name, and that of an explicit version under
       ``(name, "versionId", version_id)``;
     - the lookups made with lookup request parameters under
       ``(lookup key, "lookups")``, each with the time at which it was cached.
 
-    The ``dircache`` of the filesystem is read at each access, so that a
-    ``dircache`` assigned to the filesystem is used from then on, and its
-    ``use_listings_cache``, ``listings_expiry_time`` and ``max_paths`` apply.
-    The cache returns the stored entries without copying them, so callers
-    must not change them, and copy those that they return.
+    The ``use_listings_cache``, ``listings_expiry_time`` and ``max_paths`` of
+    the ``DirCache`` apply. The cache returns the stored entries without
+    copying them, so callers must not change them, and copy those that they
+    return.
+
+    Attributes:
+        dircache: The ``DirCache`` that stores the entries, which the
+            filesystem replaces when its ``dircache`` is assigned.
     """
 
-    __slots__ = ("_filesystem",)
+    __slots__ = ("dircache",)
 
-    def __init__(self, filesystem: AbstractFileSystem) -> None:
-        """Create the cache of a filesystem.
+    def __init__(self, dircache: DirCache) -> None:
+        """Create a cache that stores its entries in a ``DirCache``.
 
         Args:
-            filesystem: The filesystem whose ``dircache`` stores the entries.
-                It is referenced weakly, so that the filesystem that owns the
-                cache is freed as soon as it is no longer used.
+            dircache: The ``DirCache`` that stores the entries.
         """
-        self._filesystem = weakref.ref(filesystem)
-
-    @property
-    def _dircache(self) -> DirCache:
-        """The current ``dircache`` of the filesystem.
-
-        Raises:
-            ReferenceError: If the filesystem has been freed.
-        """
-        filesystem = self._filesystem()
-        if filesystem is None:
-            raise ReferenceError("The filesystem of the listing cache has been freed.")
-        return cast("DirCache", filesystem.dircache)
+        self.dircache = dircache
 
     @staticmethod
-    def listing_name(path: S3Path) -> str:
+    def _listing_name(path: S3Path) -> str:
         """Return the name of the directory whose listing holds the key of a path.
 
         The name of the key is cut at its last slash, without parsing it, so
@@ -99,6 +87,19 @@ class S3ListingCache:
             slash.
         """
         return path.name.rpartition("/")[0]
+
+    @classmethod
+    def _parent_listing_key(cls, path: S3Path) -> str | tuple[str, str]:
+        """Return the key of the listing that holds a path.
+
+        Args:
+            path: The path of the bucket or the object.
+
+        Returns:
+            The key of the bucket listing for a bucket, and otherwise that of
+            the listing of the directory that holds the key.
+        """
+        return (cls._listing_name(path), "/") if path.key else ""
 
     @staticmethod
     def _lookup_key(path: S3Path) -> str | tuple[str, str, str]:
@@ -159,7 +160,7 @@ class S3ListingCache:
         Returns:
             The cached object, or None if there is none.
         """
-        dircache = self._dircache
+        dircache = self.dircache
         key = self._lookup_key(path)
         if not lookup_kwargs:
             return cast("S3Object | None", dircache.get(key))
@@ -192,7 +193,7 @@ class S3ListingCache:
         """
         if path.version_id == "null":
             return
-        dircache = self._dircache
+        dircache = self.dircache
         key = self._lookup_key(path)
         if not lookup_kwargs:
             dircache[key] = file
@@ -222,10 +223,18 @@ class S3ListingCache:
         self._evict_lookup(self._lookup_key(path))
         if path.version_id:
             return
-        key = (self.listing_name(path), "/") if path.key else ""
-        files = self._dircache.get(key)
+        key = self._parent_listing_key(path)
+        files = self.dircache.get(key)
         if files and any(f.name == path.name for f in files):
             self._evict(key)
+
+    def evict_parent_listing(self, path: S3Path) -> None:
+        """Remove the cached listing that would hold a path.
+
+        Args:
+            path: The path of the bucket or the object.
+        """
+        self._evict(self._parent_listing_key(path))
 
     def get_buckets(self) -> list[S3Object] | None:
         """Get the cached bucket listing.
@@ -233,7 +242,7 @@ class S3ListingCache:
         Returns:
             The buckets, or None if the listing is not cached.
         """
-        return cast("list[S3Object] | None", self._dircache.get(""))
+        return cast("list[S3Object] | None", self.dircache.get(""))
 
     def put_buckets(self, buckets: list[S3Object]) -> None:
         """Cache the bucket listing.
@@ -241,7 +250,7 @@ class S3ListingCache:
         Args:
             buckets: The buckets that ListBuckets listed.
         """
-        self._dircache[""] = buckets
+        self.dircache[""] = buckets
 
     def evict_buckets(self) -> None:
         """Remove the cached bucket listing."""
@@ -260,7 +269,7 @@ class S3ListingCache:
             The listed directories and files, or None if the listing is not
             cached.
         """
-        return cast("list[S3Object] | None", self._dircache.get((name, delimiter)))
+        return cast("list[S3Object] | None", self.dircache.get((name, delimiter)))
 
     def put_listing(self, name: str, delimiter: str, files: list[S3Object]) -> None:
         """Cache the listing of a directory.
@@ -272,7 +281,7 @@ class S3ListingCache:
                 one.
             files: The complete listing of the directory.
         """
-        self._dircache[(name, delimiter)] = files
+        self.dircache[(name, delimiter)] = files
 
     def evict_listing(self, name: str, delimiter: str) -> None:
         """Remove the cached listing of a directory.
@@ -303,15 +312,12 @@ class S3ListingCache:
             FileNotFoundError: If a cached listing of the parent directory of
                 a key path does not contain the path.
         """
-        cache = self._dircache.get(self._lookup_key(path))
+        cache = self.dircache.get(self._lookup_key(path))
         if cache is not None:
             return cast("list[S3Object] | S3Object", cache)
         if path.version_id:
             return None
-        if path.key:
-            parent_cache = self.get_listing(self.listing_name(path), "/")
-        else:
-            parent_cache = self.get_buckets()
+        parent_cache = self.dircache.get(self._parent_listing_key(path))
         if parent_cache is not None:
             files = [f for f in parent_cache if f["name"] == path.name]
             if files:
@@ -324,7 +330,7 @@ class S3ListingCache:
 
     def clear(self) -> None:
         """Remove every cached entry."""
-        self._dircache.clear()
+        self.dircache.clear()
 
     def invalidate_path(self, name: str) -> None:
         """Remove the cached entries of a path and of the directories above it.
@@ -416,4 +422,4 @@ class S3ListingCache:
             key: The key of the entry.
         """
         with contextlib.suppress(KeyError):
-            del self._dircache[key]
+            del self.dircache[key]
