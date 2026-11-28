@@ -433,8 +433,11 @@ class TestS3PutObject:
         assert actual["etag"] == '"e"'
         assert actual["version_id"] == "v"
         assert actual["checksum_sha256"] is None
-        assert {*_CHECKSUMS.values(), "checksum_type"} <= actual.keys()
-        assert {
+        assert actual.keys() == {
+            *_CHECKSUMS.values(),
+            "checksum_type",
+            "etag",
+            "version_id",
             "expiration",
             "server_side_encryption",
             "sse_customer_algorithm",
@@ -443,8 +446,7 @@ class TestS3PutObject:
             "sse_kms_encryption_context",
             "bucket_key_enabled",
             "request_charged",
-        } <= actual.keys()
-        assert not any(key.startswith("_") for key in actual)
+        }
 
     def test_equality(self):
         # GH-1383: the results compare and hash by their fields.
@@ -632,8 +634,12 @@ class TestS3CompleteMultipartUpload:
         assert actual["etag"] == '"e"'
         assert actual["version_id"] == "v"
         assert actual["location"] is None
-        assert {*_CHECKSUMS.values(), "checksum_type"} <= actual.keys()
-        assert {
+        assert actual.keys() == {
+            *_CHECKSUMS.values(),
+            "checksum_type",
+            "location",
+            "etag",
+            "version_id",
             "bucket",
             "key",
             "expiration",
@@ -641,8 +647,7 @@ class TestS3CompleteMultipartUpload:
             "sse_kms_key_id",
             "bucket_key_enabled",
             "request_charged",
-        } <= actual.keys()
-        assert not any(key.startswith("_") for key in actual)
+        }
 
 
 class TestS3CopyObject:

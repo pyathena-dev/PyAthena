@@ -7832,10 +7832,12 @@ class TestS3FileSystem:
         }
         try:
             with (
-                pytest.raises(OSError, match=r"BadDigest|crc32"),
+                pytest.raises(OSError, match=r"(?i)crc32") as error,
                 fs.open(path, "wb", block_size=block_size, s3_additional_kwargs=kwargs) as file,
             ):
                 file.write(b"x" * (block_size + 1))
+            # The parts did not carry the checksum: the completion failed.
+            assert error.value.__cause__.operation_name == "CompleteMultipartUpload"
             assert not fs.exists(path)
         finally:
             fs.clear_multipart_uploads(path)

@@ -4585,6 +4585,7 @@ class TestAioS3StreamedFile:
         for call in fs.core.get_object.call_args_list:
             assert call.args[0] == S3Path("bucket", "key")
             assert call.kwargs == {"RequestPayer": "requester"}
+        assert [call.args[1] for call in fs.core.get_object.call_args_list] == [(0, 2)]
 
     @pytest.mark.asyncio
     async def test_garbage_collected_unclosed(self, fs):

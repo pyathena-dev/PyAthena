@@ -357,9 +357,10 @@ of `S3FileSystem`. The parameters of a call take precedence over those of the
 filesystem. A file sends each of its requests only the parameters that the S3 operation
 accepts, so, for example, `ServerSideEncryption` for writes is not sent with reads. The
 parameters yield to the fields that a request sets itself, such as `Bucket`, `Key` and
-`Body`. A `pipe` of data up to the block size sends the parameters of the call with a
-single PutObject request as given, except those fields. `put` sets `ContentType` from
-the file extension unless the call or the filesystem gives one.
+`Body`. Outside a transaction, a `pipe` of data up to the block size sends the
+parameters of the call with a single PutObject request as given, except those fields.
+`put` sets `ContentType` from the file extension unless the call or the filesystem
+gives one.
 
 The parameters in the `s3_additional_kwargs` argument of `S3FileSystem` that authorize
 the access to the objects, `RequestPayer`, `ExpectedBucketOwner`, and the `SSECustomer*`
@@ -922,7 +923,7 @@ Both planners accept `first_part_number` to include previously copied or uploade
 The writer filters inherited and per-request parameters by operation; per-request parameters take precedence.
 The inherited parameters yield to the fields that a request sets, such as `Key`, `UploadId` and `PartNumber`.
 The parts inherit neither the checksum values, `ContentMD5` nor `ContentLength` of the whole object, nor `ChecksumAlgorithm` when the upload has one, and the completion does not inherit `ChecksumType` when the upload has one; the upload's are sent instead.
-The completion inherits the checksum values of the whole object only when its checksum type is `FULL_OBJECT`, the type for which S3 can check them; S3 ignores them for an upload created without a checksum algorithm.
+The completion inherits the checksum values of the whole object only when its checksum type is `FULL_OBJECT`, the type for which S3 can check them.
 It retains the upload identity after completion and after an abort failure, and clears it only after a successful abort.
 The caller can therefore retry a failed abort.
 The writer does not invalidate the filesystem cache; call `fs.invalidate_cache()` after a direct write.
