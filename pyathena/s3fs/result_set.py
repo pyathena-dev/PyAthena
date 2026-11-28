@@ -142,9 +142,10 @@ class AthenaS3FSResultSet(AthenaResultSet):
     def _create_s3_file_system(self) -> AbstractFileSystem:
         """Create the filesystem that reads the results with the connection's S3 client.
 
-        PyAthena's ``S3FileSystem`` and ``AioS3FileSystem`` are created with
-        ``s3_filesystem()``. Another ``filesystem_class``, including a subclass,
-        still receives ``connection`` until the next major version.
+        The ``filesystem_class`` is created with ``s3_filesystem()``, which
+        passes it the connection's S3 client and retry policy as ``client`` and
+        ``retry_config``, with ``default_block_size`` and
+        ``skip_instance_cache=True``.
 
         Returns:
             The filesystem.
@@ -155,9 +156,7 @@ class AthenaS3FSResultSet(AthenaResultSet):
             "default_block_size": self._block_size or self.DEFAULT_BLOCK_SIZE,
             "skip_instance_cache": True,
         }
-        if self._filesystem_class in (S3FileSystem, AioS3FileSystem):
-            return s3_filesystem(self.connection, self._filesystem_class, **kwargs)
-        return self._filesystem_class(connection=self.connection, **kwargs)
+        return s3_filesystem(self.connection, self._filesystem_class, **kwargs)
 
     def _get_csv_open_options(self) -> dict[str, Any]:
         """Get the options to open the CSV result file with the filesystem.

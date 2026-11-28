@@ -21,10 +21,9 @@ from datetime import datetime
 from glob import has_magic
 from io import BufferedRandom, BufferedReader, BufferedWriter, BytesIO, FileIO
 from stat import S_ISREG
-from typing import TYPE_CHECKING, Any, BinaryIO, ClassVar, Protocol, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, ClassVar, cast
 from urllib.parse import unquote_plus
 
-import fsspec
 from boto3 import Session
 from botocore import UNSIGNED
 from botocore.client import BaseClient, Config
@@ -75,33 +74,19 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-class _Connection(Protocol):
-    """The attributes of a PyAthena connection that the deprecated ``connection`` reads."""
-
-    @property
-    def s3_client(self) -> BaseClient:
-        """The S3 client of the connection."""
-        ...
-
-    @property
-    def retry_config(self) -> RetryPolicy:
-        """The retry policy of the connection."""
-        ...
-
-
 # The message of the TypeError that a filesystem with an injected client, and
 # the files that it opens for reading, raise when they are pickled.
 _UNPICKLABLE_CLIENT_MESSAGE = (
-    "{cls} built with client= or connection= cannot be pickled, as its boto3 client "
+    "{cls} built with client= cannot be pickled, as its boto3 client "
     "cannot be. To pickle it, for example to send it to Dask, Ray, or multiprocessing "
     "workers, build it from s3fs-style arguments such as profile=, region_name=, or "
     "key=, secret=, and token=."
 )
-# The DeprecationWarning of the connection argument of the filesystems.
-_CONNECTION_DEPRECATION_MESSAGE = (
-    "The connection argument of {cls} is deprecated and will be removed in the next "
-    "major version. Use pyathena.fs.s3_filesystem(connection), or pass "
-    "client=connection.s3_client and retry_config=connection.retry_config."
+# The TypeError of the connection argument, which the filesystems no longer take.
+_CONNECTION_REMOVED_MESSAGE = (
+    "{cls} no longer takes the connection argument. Use "
+    "pyathena.fs.s3_filesystem(connection), or pass client=connection.s3_client and "
+    "retry_config=connection.retry_config."
 )
 
 # Whether the cyclic garbage collector runs in a thread, and the closes of
@@ -409,7 +394,7 @@ class S3FileSystem(AbstractFileSystem):
         }
     )
     # The arguments from which the filesystem builds its client, which an
-    # injected client (``client`` or ``connection``) does not take.
+    # injected client (``client``) does not take.
     _CLIENT_BUILDING_ARGS: ClassVar[frozenset[str]] = _SESSION_PASSING_ARGS | {
         "key",
         "username",
@@ -428,7 +413,7 @@ class S3FileSystem(AbstractFileSystem):
 
     def __init__(
         self,
-        connection: _Connection | None = None,
+        *,
         default_block_size: int | None = None,
         default_cache_type: str | None = None,
         max_workers: int | None = None,
@@ -436,7 +421,6 @@ class S3FileSystem(AbstractFileSystem):
         allow_bucket_creation: bool = False,
         allow_bucket_deletion: bool = False,
         version_aware: bool = False,
-        *args,
         batch_size: int | None = None,
         client: BaseClient | None = None,
         retry_config: RetryPolicy | None = None,
@@ -448,13 +432,9 @@ class S3FileSystem(AbstractFileSystem):
         ``client``, or with a client that it builds from s3fs-compatible
         arguments in ``kwargs``. :func:`pyathena.fs.s3_filesystem`
         creates one with the S3 client and retry policy of a PyAthena
-        connection.
+        connection. All arguments are keyword arguments.
 
         Args:
-            connection: Deprecated; use ``client`` and ``retry_config``, or
-                :func:`pyathena.fs.s3_filesystem`. A PyAthena connection
-                whose S3 client (``Connection.s3_client``) and retry policy the
-                filesystem uses, with a ``DeprecationWarning``.
             default_block_size: The block size for reads and writes; defaults to
                 ``DEFAULT_BLOCK_SIZE``.
             default_cache_type: The fsspec cache type for reads, the name of a
@@ -489,7 +469,6 @@ class S3FileSystem(AbstractFileSystem):
             allow_bucket_deletion: Whether ``rmdir`` may delete a bucket.
             version_aware: Whether reads pin the object version observed at open
                 time.
-            *args: Passed to ``fsspec.AbstractFileSystem``.
             batch_size: The number of per-object calls of a batch operation
                 (``cat``, ``get``, ``put``, ``copy``, and the like) that run at
                 once, and of DeleteObjects requests of ``rm``, unless the call
@@ -504,25 +483,22 @@ class S3FileSystem(AbstractFileSystem):
                 also retries the transient S3 error codes
                 (:attr:`~pyathena.filesystem.s3_core.S3Core.RETRY_ERROR_CODES`).
             **kwargs: Passed to ``fsspec.AbstractFileSystem``; without
-                ``client`` or ``connection``, also s3fs-compatible client
-                arguments. ``requester_pays=True`` sends requester-pays
-                requests with the operations that accept ``RequestPayer``.
+                ``client``, also s3fs-compatible client arguments.
+                ``requester_pays=True`` sends requester-pays requests with the
+                operations that accept ``RequestPayer``.
 
         Raises:
             ValueError: If ``batch_size`` is neither positive, -1, nor None.
-            TypeError: If ``connection`` is given with ``client`` or
-                ``retry_config``, or ``client`` or ``connection`` with an
+            TypeError: If ``connection`` is given, or ``client`` with an
                 argument from which the filesystem builds a client, such as
                 ``key``, ``profile``, ``anon``, ``endpoint_url``,
                 ``client_kwargs``, or ``region_name``, other than one that
                 fsspec's configuration supplies.
         """
-        super().__init__(*args, **kwargs)
+        self._check_injected_client(type(self), client, kwargs)
+        super().__init__(**kwargs)
         self.batch_size = self._check_batch_size(batch_size)
-        self._client_injected = client is not None or connection is not None
-        client, retry_config = self._resolve_injected_client(
-            type(self), connection, client, retry_config, kwargs
-        )
+        self._client_injected = client is not None
         if client is None:
             client = self._get_client_compatible_with_s3fs(max_workers=max_workers, **kwargs)
         self.default_block_size = (
@@ -553,55 +529,32 @@ class S3FileSystem(AbstractFileSystem):
         )
 
     @classmethod
-    def _resolve_injected_client(
+    def _check_injected_client(
         cls,
         filesystem_class: type[AbstractFileSystem],
-        connection: _Connection | None,
         client: BaseClient | None,
-        retry_config: RetryPolicy | None,
         kwargs: Mapping[str, Any],
-    ) -> tuple[BaseClient | None, RetryPolicy | None]:
-        """Check the injected client of a filesystem and resolve it from a connection.
+    ) -> None:
+        """Reject the arguments that conflict with an injected client, or that were removed.
 
-        Warns that ``connection`` is deprecated, and rejects the arguments that
-        conflict with an injected client before the client of the connection is
-        used. ``AioS3FileSystem`` resolves its arguments with it too.
+        ``AioS3FileSystem`` checks its arguments with it too.
 
         Args:
             filesystem_class: The class of the filesystem being created, whose
-                name the warning shows and whose fsspec configuration applies.
-            connection: The deprecated ``connection`` argument.
+                name the error shows and whose fsspec configuration applies.
             client: The ``client`` argument.
-            retry_config: The ``retry_config`` argument.
             kwargs: The other keyword arguments of the filesystem, merged with
                 fsspec's configuration for the protocol.
 
-        Returns:
-            The injected client and retry policy, or the given ones if
-            ``connection`` is None.
-
         Raises:
-            TypeError: If the arguments conflict with an injected client.
+            TypeError: If ``connection`` is given, or ``client`` with an
+                argument from which the filesystem builds a client.
         """
-        if connection is not None:
-            message = _CONNECTION_DEPRECATION_MESSAGE.format(cls=filesystem_class.__name__)
-            if sys.version_info >= (3, 12):
-                # Attributed to the first caller outside fsspec and the filesystems,
-                # such as through fsspec.filesystem() or a subclass.
-                warnings.warn(
-                    message,
-                    DeprecationWarning,
-                    skip_file_prefixes=(
-                        os.path.dirname(fsspec.__file__) + os.sep,
-                        os.path.dirname(__file__) + os.sep,
-                    ),
-                )
-            else:
-                # Past this method, __init__, and fsspec's metaclass.
-                warnings.warn(message, DeprecationWarning, stacklevel=4)
-            if client is not None or retry_config is not None:
-                raise TypeError("connection cannot be combined with client or retry_config.")
-        if client is not None or connection is not None:
+        if "connection" in kwargs:
+            # Unknown arguments are passed to fsspec without an error, so the
+            # filesystem would build its own client in place of the connection's.
+            raise TypeError(_CONNECTION_REMOVED_MESSAGE.format(cls=filesystem_class.__name__))
+        if client is not None:
             # The settings of fsspec's configuration for the protocol, such as
             # the FSSPEC_S3_* environment variables, apply to every filesystem
             # and are ignored instead.
@@ -613,12 +566,9 @@ class S3FileSystem(AbstractFileSystem):
             )
             if building_args:
                 raise TypeError(
-                    f"{', '.join(building_args)} cannot be combined with client or "
-                    "connection, whose client the filesystem uses as it is."
+                    f"{', '.join(building_args)} cannot be combined with client, which the "
+                    "filesystem uses as it is."
                 )
-        if connection is not None:
-            return connection.s3_client, connection.retry_config
-        return client, retry_config
 
     @override
     def __reduce__(self) -> tuple[Any, ...]:
@@ -629,8 +579,8 @@ class S3FileSystem(AbstractFileSystem):
             filesystem again from its arguments.
 
         Raises:
-            TypeError: If the filesystem was built with ``client`` or
-                ``connection``, whose boto3 client cannot be pickled.
+            TypeError: If the filesystem was built with ``client``, whose
+                boto3 client cannot be pickled.
         """
         if self._client_injected:
             raise TypeError(_UNPICKLABLE_CLIENT_MESSAGE.format(cls=type(self).__name__))

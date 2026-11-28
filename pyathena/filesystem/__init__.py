@@ -10,59 +10,12 @@
 from __future__ import annotations
 
 import logging
-import warnings
-from typing import Any, TypeVar, overload
 
 import fsspec
-from fsspec import AbstractFileSystem
 
-from pyathena.filesystem.s3 import S3FileSystem, _Connection
+from pyathena.filesystem.s3 import S3FileSystem
 
 _logger = logging.getLogger(__name__)
-
-_FileSystemT = TypeVar("_FileSystemT", bound=AbstractFileSystem)
-
-
-@overload
-def s3_filesystem(connection: _Connection, **kwargs: Any) -> S3FileSystem: ...
-
-
-@overload
-def s3_filesystem(
-    connection: _Connection, filesystem_class: type[_FileSystemT], **kwargs: Any
-) -> _FileSystemT: ...
-
-
-def s3_filesystem(
-    connection: _Connection,
-    filesystem_class: type[AbstractFileSystem] = S3FileSystem,
-    **kwargs: Any,
-) -> AbstractFileSystem:
-    """Create an S3 filesystem with the S3 client and retry policy of a connection.
-
-    Deprecated; use :func:`pyathena.fs.s3_filesystem`, which this function
-    matches apart from a ``DeprecationWarning``. It will be removed in the
-    next major version.
-
-    Args:
-        connection: The PyAthena connection.
-        filesystem_class: ``S3FileSystem``, ``AioS3FileSystem``, or a subclass of
-            either.
-        **kwargs: The other arguments of the filesystem, except the arguments
-            from which it builds a client.
-
-    Returns:
-        The filesystem.
-    """
-    warnings.warn(
-        "pyathena.filesystem.s3_filesystem is deprecated and will be removed in the next "
-        "major version. Use pyathena.fs.s3_filesystem.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return filesystem_class(
-        client=connection.s3_client, retry_config=connection.retry_config, **kwargs
-    )
 
 
 def register_s3_filesystem() -> None:
