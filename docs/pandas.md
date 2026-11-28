@@ -61,11 +61,14 @@ df.to_sql("YOUR_TABLE", engine, schema="YOUR_SCHEMA", index=False, if_exists="re
 ```
 
 The location of the Amazon S3 table is specified by the `location` parameter in the connection string.
-If `location` is not specified, `s3_staging_dir` parameter will be used. The following rules apply.
+If `location` is not specified, the S3 staging directory (`s3_staging_dir`) is used. The following rules apply.
 
 ```text
-s3://{location or s3_staging_dir}/{schema}/{table}/
+{location or s3_staging_dir}/{schema}/{table}/
 ```
+
+`{schema}` is the `schema` argument of `to_sql`, or without it, the cursor's `schema_name`.
+The `location` table option in {ref}`sqlalchemy` describes these rules in full.
 
 The file format, row format, and compression settings are specified in the connection string.
 
