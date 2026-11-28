@@ -383,7 +383,6 @@ class S3FileSystem(AbstractFileSystem):
     DEFAULT_BLOCK_SIZE: int = 5 * 2**20  # 5MiB
 
     protocol = ("s3", "s3a")
-    _extra_tokenize_attributes = ("default_block_size",)
     # The boto3 session arguments of the client that the filesystem builds.
     _SESSION_PASSING_ARGS: ClassVar[frozenset[str]] = frozenset(
         {
@@ -660,16 +659,6 @@ class S3FileSystem(AbstractFileSystem):
             self._listing_cache = S3ListingCache(value)
         else:
             listing_cache.dircache = value
-
-    @property
-    def _client(self) -> BaseClient:
-        """The boto3 S3 client of the filesystem (``core.client``)."""
-        return self._core.client
-
-    @property
-    def _retry_config(self) -> RetryPolicy:
-        """The retry policy of the requests (``core.retry_config``)."""
-        return self._core.retry_config
 
     @property
     def request_kwargs(self) -> dict[str, Any]:
@@ -1322,10 +1311,6 @@ class S3FileSystem(AbstractFileSystem):
                         refresh = True
                     else:
                         return cache
-                else:
-                    return self._directory_object(
-                        path.bucket, path.key.rstrip("/") if path.key else None, version_id
-                    )
         if path.key:
             object_info = self._head_object(path, refresh=refresh, lookup_kwargs=lookup_kwargs)
             if object_info:
@@ -4188,8 +4173,6 @@ class S3FileSystem(AbstractFileSystem):
                 s3_additional_kwargs=s3_additional_kwargs,
             )._write_file_and_close(local, callback)
 
-        self._invalidate(s3_path)
-
     def get_file(
         self,
         rpath: str | os.PathLike[str] | S3Path,
@@ -4905,18 +4888,6 @@ class S3FileSystem(AbstractFileSystem):
             s3_additional_kwargs=s3_additional_kwargs,
             **kwargs,
         )
-
-    def _call(self, method: str | Callable[..., Any], **kwargs) -> dict[str, Any]:
-        """Send a request with the core (see :meth:`S3Core.call`).
-
-        Args:
-            method: The name of the client method, or the method itself.
-            **kwargs: The request parameters.
-
-        Returns:
-            The response.
-        """
-        return self._core.call(method, **kwargs)
 
 
 # The parameters of the encryption of a written object, kept from an appended

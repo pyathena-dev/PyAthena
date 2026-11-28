@@ -115,8 +115,8 @@ class TestS3FileSystem:
         client.meta.method_to_api_mapping = S3_CLIENT.meta.method_to_api_mapping
         client.meta.service_model = S3_CLIENT.meta.service_model
         fs._core = S3Core(client, retry_config=RetryConfig())
-        # The requests of the core and of the filesystem go to one mock.
-        fs._call = fs._core.call = mock.MagicMock()
+        # The requests of the core go to a mock.
+        fs.core.call = mock.MagicMock()
         fs.max_workers = 4
         fs._request_pool = S3ThreadPool(fs.max_workers)
         fs.default_block_size = S3FileSystem.DEFAULT_BLOCK_SIZE
@@ -241,8 +241,8 @@ class TestS3FileSystem:
             skip_instance_cache=True,
         )
         # use_ssl=False is honored (previously dropped by a truthiness check).
-        assert fs._client.meta.endpoint_url.startswith("http://")
-        assert pyathena.user_agent_extra in fs._client.meta.config.user_agent_extra
+        assert fs.core.client.meta.endpoint_url.startswith("http://")
+        assert pyathena.user_agent_extra in fs.core.client.meta.config.user_agent_extra
 
         fs = S3FileSystem(
             key="test_access_key",
@@ -251,7 +251,7 @@ class TestS3FileSystem:
             endpoint_url="http://localhost:9000",
             skip_instance_cache=True,
         )
-        assert fs._client.meta.endpoint_url == "http://localhost:9000"
+        assert fs.core.client.meta.endpoint_url == "http://localhost:9000"
 
     @pytest.mark.parametrize(
         ("kwargs", "expected"),
@@ -284,34 +284,34 @@ class TestS3FileSystem:
         monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(credentials))
 
         fs = S3FileSystem(region_name="us-east-1", skip_instance_cache=True, **kwargs)
-        assert fs._client._request_signer._credentials.access_key == expected
+        assert fs.core.client._request_signer._credentials.access_key == expected
 
     def test_cached_object_is_not_a_listing_of_its_children(self):
         fs = self._make_fs()
         obj = self._file_object("key")
         fs._listing_cache.put_lookup(S3Path("bucket", "key"), {}, obj)
-        fs._call.side_effect = FileNotFoundError
+        fs.core.call.side_effect = FileNotFoundError
 
         assert fs.info("s3://bucket/key") == obj
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
         # A child path of a cached object entry is looked up with requests
         # (fsspec's implementation assumes every cache value is a listing and
         # raises TypeError here).
         assert not fs.exists("s3://bucket/key/child")
-        assert fs._call.call_args_list[0] == mock.call(
-            fs._client.head_object, Bucket="bucket", Key="key/child"
+        assert fs.core.call.call_args_list[0] == mock.call(
+            fs.core.client.head_object, Bucket="bucket", Key="key/child"
         )
 
     def test_info_uses_cached_listings(self):
         # GH-965: listings cached under (path, delimiter) answer info() and
         # exists() without HeadObject or ListObjectsV2 requests.
         fs = self._make_fs()
-        fs._call.return_value = {
+        fs.core.call.return_value = {
             "CommonPrefixes": [{"Prefix": "d/sub/"}],
             "Contents": [{"Key": "d/direct", "Size": 4, "ETag": '"etag"'}],
         }
         fs.ls("s3://bucket/d")
-        fs._call.reset_mock()
+        fs.core.call.reset_mock()
 
         file = fs.info("s3://bucket/d/direct")
         assert (file.type, file.size, file.etag) == (S3ObjectType.S3_OBJECT_TYPE_FILE, 4, '"etag"')
@@ -319,7 +319,7 @@ class TestS3FileSystem:
         with pytest.raises(FileNotFoundError):
             fs.info("s3://bucket/d/missing")
         assert not fs.exists("s3://bucket/d/missing")
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_info_prefers_listed_object_to_prefix_of_same_name(self):
         # A key that is both an object and a key prefix is an object, as the
@@ -330,17 +330,17 @@ class TestS3FileSystem:
         )
 
         assert fs.isfile("s3://bucket/d")
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_info_does_not_use_listing_of_path(self):
         # The listing of the path cannot tell whether an object of the same
         # name exists.
         fs = self._make_fs()
         fs._listing_cache.put_listing("bucket/d", "/", [self._file_object("d/direct")])
-        fs._call.return_value = {"ContentLength": 4}
+        fs.core.call.return_value = {"ContentLength": 4}
 
         assert fs.isfile("s3://bucket/d")
-        fs._call.assert_called_once_with(fs._client.head_object, Bucket="bucket", Key="d")
+        fs.core.call.assert_called_once_with(fs.core.client.head_object, Bucket="bucket", Key="d")
 
     @pytest.mark.parametrize(
         ("version_aware", "lookup"),
@@ -367,11 +367,11 @@ class TestS3FileSystem:
         fs._listing_cache.put_listing("bucket/d", "/", [self._file_object("d/key")])
 
         def call(method, **kwargs):
-            if method == fs._client.head_object:
+            if method == fs.core.client.head_object:
                 raise FileNotFoundError
             return {}
 
-        fs._call.side_effect = call
+        fs.core.call.side_effect = call
 
         lookup(fs)
         assert fs._listing_cache.get_listing("bucket/d", "/") is None
@@ -384,11 +384,11 @@ class TestS3FileSystem:
         fs._listing_cache.put_listing("bucket/d", "/", [self._file_object("d/key")])
 
         def call(method, **kwargs):
-            if method == fs._client.head_object:
+            if method == fs.core.client.head_object:
                 raise FileNotFoundError
             return {"KeyCount": 1}
 
-        fs._call.side_effect = call
+        fs.core.call.side_effect = call
 
         assert fs.isdir("s3://bucket/d/new") is False
         assert (
@@ -399,13 +399,13 @@ class TestS3FileSystem:
     def test_missing_object_keeps_cached_parent_listing_without_it(self):
         fs = self._make_fs()
         fs._listing_cache.put_listing("bucket/d", "/", [self._file_object("d/key")])
-        fs._call.side_effect = FileNotFoundError
+        fs.core.call.side_effect = FileNotFoundError
 
         assert not fs.exists("s3://bucket/d/other", refresh=True)
         # The listed key is still answered from the cached listing.
-        fs._call.reset_mock()
+        fs.core.call.reset_mock()
         assert fs.exists("s3://bucket/d/key")
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize("version_aware", [False, True])
     def test_info_version_aware_heads_listed_file(self, version_aware):
@@ -415,14 +415,14 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.version_aware = version_aware
         fs._listing_cache.put_listing("bucket/d", "/", [self._file_object("d/direct")])
-        fs._call.return_value = {"ContentLength": 4, "VersionId": "v1"}
+        fs.core.call.return_value = {"ContentLength": 4, "VersionId": "v1"}
         expected = "v1" if version_aware else None
 
         assert fs.info("s3://bucket/d/direct").version_id == expected
         assert fs.info("s3://bucket/other").version_id == expected
         looked_up = ["d/direct", "other"] if version_aware else ["other"]
-        assert fs._call.call_args_list == [
-            mock.call(fs._client.head_object, Bucket="bucket", Key=key) for key in looked_up
+        assert fs.core.call.call_args_list == [
+            mock.call(fs.core.client.head_object, Bucket="bucket", Key=key) for key in looked_up
         ]
 
     def test_exists_version_ignores_cached_parent_listing(self):
@@ -430,26 +430,28 @@ class TestS3FileSystem:
         # from it is looked up with HeadObject.
         fs = self._make_fs()
         fs._listing_cache.put_listing("bucket/d", "/", [self._file_object("d/other")])
-        fs._call.return_value = {"ContentLength": 4}
+        fs.core.call.return_value = {"ContentLength": 4}
 
         assert fs.exists("s3://bucket/d/direct?versionId=v1")
-        fs._call.assert_called_once_with(
-            fs._client.head_object, Bucket="bucket", Key="d/direct", VersionId="v1"
+        fs.core.call.assert_called_once_with(
+            fs.core.client.head_object, Bucket="bucket", Key="d/direct", VersionId="v1"
         )
 
     def test_info_bucket_missing_from_bucket_listing(self):
         # GH-980: the bucket listing holds only the buckets of the caller.
         fs = self._make_fs()
         fs._listing_cache.put_buckets([fs._directory_object("mine", None)])
-        fs._call.return_value = {}
+        fs.core.call.return_value = {}
 
         info = fs.info("s3://other-account-bucket")
         assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_BUCKET
-        fs._call.assert_called_once_with(fs._client.head_bucket, Bucket="other-account-bucket")
-        fs._call.reset_mock()
+        fs.core.call.assert_called_once_with(
+            fs.core.client.head_bucket, Bucket="other-account-bucket"
+        )
+        fs.core.call.reset_mock()
         assert fs.isdir("s3://other-account-bucket")
         assert fs.isdir("s3://mine")
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize("path", ["", "/", "s3://"])
     def test_info_root(self, path):
@@ -460,7 +462,7 @@ class TestS3FileSystem:
         assert fs.isdir(path)
         assert not fs.isfile(path)
         assert fs.size(path) == 0
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize("path", ["", "/", "s3://"])
     def test_invalidate_cache_root_drops_bucket_listing(self, path):
@@ -475,14 +477,14 @@ class TestS3FileSystem:
         # GH-980: HeadBucket answers 403 for a bucket that exists but that
         # the caller may not access.
         fs = self._make_fs()
-        fs._call.side_effect = PermissionError
+        fs.core.call.side_effect = PermissionError
 
         assert fs.exists("s3://not-my-bucket")
         fs.makedirs("s3://not-my-bucket/prefix", exist_ok=True)
         assert (
-            fs._call.call_args_list
+            fs.core.call.call_args_list
             == [
-                mock.call(fs._client.head_bucket, Bucket="not-my-bucket"),
+                mock.call(fs.core.client.head_bucket, Bucket="not-my-bucket"),
             ]
             * 2
         )
@@ -546,13 +548,13 @@ class TestS3FileSystem:
         fs._listing_cache.put_lookup(S3Path("bucket", "a/c.txt"), {}, self._file_object("a/c.txt"))
 
         fs.rm_file("s3://bucket/a/c.txt?versionId=v1")
-        fs._call.assert_called_once_with(
-            fs._client.delete_object, Bucket="bucket", Key="a/c.txt", VersionId="v1"
+        fs.core.call.assert_called_once_with(
+            fs.core.client.delete_object, Bucket="bucket", Key="a/c.txt", VersionId="v1"
         )
 
         # The deleted version was the only one: HeadObject and the prefix
         # listing find nothing, instead of the cached object answering.
-        fs._call.side_effect = [FileNotFoundError("bucket/a/c.txt"), {}]
+        fs.core.call.side_effect = [FileNotFoundError("bucket/a/c.txt"), {}]
         assert not fs.exists("s3://bucket/a/c.txt")
 
     # GH-1372: also as the parameters of DeleteObject, which rm_file passes.
@@ -564,35 +566,35 @@ class TestS3FileSystem:
 
         with pytest.raises(TypeError, match=f"multiple values for keyword argument '{name}'"):
             fs.rm_file("s3://bucket/a", **{name: "v1"})
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @staticmethod
     def _sent_delete_objects(fs):
         return sorted(
             (c.kwargs["Bucket"], c.kwargs["Delete"]["Objects"])
-            for c in fs._call.call_args_list
-            if c.args == (fs._client.delete_objects,)
+            for c in fs.core.call.call_args_list
+            if c.args == (fs.core.client.delete_objects,)
         )
 
     def test_rm_paths_across_buckets(self):
         # GH-971: a list of paths was rejected, and every request went to the
         # bucket of one path.
         fs = self._make_fs()
-        fs._call.return_value = {}
+        fs.core.call.return_value = {}
 
         fs.rm(["s3://b1/a", "s3://b2/b", "s3://b1/c"], ExpectedBucketOwner="111122223333")
         assert self._sent_delete_objects(fs) == [
             ("b1", [{"Key": "a"}, {"Key": "c"}]),
             ("b2", [{"Key": "b"}]),
         ]
-        for c in fs._call.call_args_list:
+        for c in fs.core.call.call_args_list:
             assert c.kwargs["ExpectedBucketOwner"] == "111122223333"
             assert c.kwargs["Delete"]["Quiet"] is True
 
     def test_rm_version(self):
         # GH-971: expand_path treated "?" in the version query as a wildcard.
         fs = self._make_fs()
-        fs._call.return_value = {}
+        fs.core.call.return_value = {}
         fs._listing_cache.put_lookup(S3Path("bucket", "a.csv"), {}, self._file_object("a.csv"))
 
         fs.rm("s3://bucket/a.csv?versionId=v1", recursive=True)
@@ -601,7 +603,7 @@ class TestS3FileSystem:
         ]
         assert fs._listing_cache.get_lookup(S3Path("bucket", "a.csv"), {}) is None
 
-        fs._call.reset_mock()
+        fs.core.call.reset_mock()
         fs.rm(["s3://bucket/a.csv?versionId=v1", "s3://bucket/b.csv"])
         assert self._sent_delete_objects(fs) == [
             ("bucket", [{"Key": "a.csv", "VersionId": "v1"}, {"Key": "b.csv"}]),
@@ -620,23 +622,23 @@ class TestS3FileSystem:
     )
     def test_rm_bucket(self, path):
         fs = self._make_fs()
-        fs._call.return_value = {}
+        fs.core.call.return_value = {}
 
         with pytest.raises(ValueError, match="Cannot delete the bucket"):
             fs.rm(path, recursive=True)
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_rm_errors(self):
         # GH-971: S3 reports the objects it could not delete in a successful
         # response, which rm() ignored.
         fs = self._make_fs()
-        fs._call.return_value = {
+        fs.core.call.return_value = {
             "Errors": [{"Key": "locked", "Code": "AccessDenied", "Message": "Access Denied"}]
         }
         with pytest.raises(OSError, match=r"bucket/locked \(AccessDenied: Access Denied\)"):
             fs.rm("s3://bucket/locked")
 
-        fs._call.return_value = {
+        fs.core.call.return_value = {
             "Errors": [
                 {"Key": "locked", "Code": "AccessDenied", "Message": "Access Denied"},
                 {"Key": "a", "VersionId": "v1", "Code": "InternalError", "Message": "Error"},
@@ -660,7 +662,7 @@ class TestS3FileSystem:
 
         with pytest.raises(TypeError, match=f"unexpected keyword argument '{name}'"):
             fs.rm("s3://bucket/a", **{name: "other"})
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_rm_request_error_keeps_errors(self):
         fs = self._make_fs()
@@ -670,7 +672,7 @@ class TestS3FileSystem:
                 raise PermissionError("Access Denied")
             return {"Errors": [{"Key": "b", "Code": "AccessDenied", "Message": "Access Denied"}]}
 
-        fs._call.side_effect = call
+        fs.core.call.side_effect = call
         with pytest.raises(PermissionError, match="Access Denied") as exc_info:
             fs.rm(["s3://b1/a", "s3://b2/b"])
         assert exc_info.value.__notes__ == [
@@ -698,7 +700,7 @@ class TestS3FileSystem:
             time.sleep(0.2)
             return {}
 
-        fs._call.side_effect = call
+        fs.core.call.side_effect = call
         if operation == "rm":
             run = functools.partial(fs.rm, ["s3://b1/a", "s3://b2/b"])
         else:
@@ -761,14 +763,14 @@ class TestS3FileSystem:
         # once. DirCache.pop() reads before it deletes, so the second delete
         # raised KeyError when both threads had read the entry.
         fs = self._make_fs()
-        fs._call.return_value = {}
+        fs.core.call.return_value = {}
         fs.dircache = self._barrier_dircache()
         entry = ("lookup", S3Path("bucket", "dir"))
         self._cache(fs, entry)
 
         with mock.patch.object(S3DeleteBatch, "MAX_KEYS", 1):
             fs.rm(["s3://bucket/dir/a", "s3://bucket/dir/b"])
-        assert fs._call.call_count == 2
+        assert fs.core.call.call_count == 2
         assert self._cached(fs, [entry]) == []
 
     @pytest.mark.parametrize(
@@ -812,12 +814,12 @@ class TestS3FileSystem:
         else:
             cached = self._file_object("key")
         self._cache(fs, entry, value=cached)
-        fs._call.return_value = {}
+        fs.core.call.return_value = {}
 
         assert read(fs) == cached
-        methods = [c.args[0] for c in fs._call.call_args_list]
-        assert fs._client.head_bucket not in methods
-        assert fs._client.head_object not in methods
+        methods = [c.args[0] for c in fs.core.call.call_args_list]
+        assert fs.core.client.head_bucket not in methods
+        assert fs.core.client.head_object not in methods
 
     @pytest.mark.parametrize(
         ("key", "call", "evict"),
@@ -846,7 +848,7 @@ class TestS3FileSystem:
         # before it deletes, so the second delete raised KeyError when both
         # threads had read the entry.
         fs = self._make_fs()
-        fs._call.configure_mock(**call)
+        fs.core.call.configure_mock(**call)
         fs.dircache = self._barrier_dircache()
         self._cache(fs, key)
 
@@ -858,7 +860,7 @@ class TestS3FileSystem:
 
     def test_rm_request_error_invalidates_cache(self):
         fs = self._make_fs()
-        fs._call.side_effect = PermissionError("Access Denied")
+        fs.core.call.side_effect = PermissionError("Access Denied")
         fs._listing_cache.put_lookup(S3Path("bucket", "a"), {}, self._file_object("a"))
 
         with pytest.raises(PermissionError, match="Access Denied"):
@@ -868,13 +870,13 @@ class TestS3FileSystem:
     def test_find_prefix_bypasses_cached_listing(self):
         fs = self._make_fs()
         fs._listing_cache.put_listing("bucket/dir", "", [self._file_object("dir/cached")])
-        fs._call.return_value = {"Contents": [{"Key": "dir/test_1"}]}
+        fs.core.call.return_value = {"Contents": [{"Key": "dir/test_1"}]}
 
         assert fs.find("s3://bucket/dir", prefix="test_") == ["bucket/dir/test_1"]
         # A complete listing of the path is still served from the cache.
-        fs._call.reset_mock()
+        fs.core.call.reset_mock()
         assert fs.find("s3://bucket/dir") == ["bucket/dir/cached"]
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_ls_empty_refresh_evicts_cached_listing(self):
         fs = self._make_fs()
@@ -886,10 +888,10 @@ class TestS3FileSystem:
             fs.ls("s3://bucket/dir", refresh=True)
         # The next listing is requested again instead of returning the
         # deleted object from the cache.
-        fs._call.reset_mock()
+        fs.core.call.reset_mock()
         with pytest.raises(FileNotFoundError):
             fs.ls("s3://bucket/dir")
-        assert fs._call.call_args_list[0].args[0] is fs._client.list_objects_v2
+        assert fs.core.call.call_args_list[0].args[0] is fs.core.client.list_objects_v2
 
     @pytest.mark.parametrize("path", ["s3://bucket", "s3://bucket/?versionId=v1"])
     def test_ls_empty_bucket(self, path):
@@ -913,32 +915,32 @@ class TestS3FileSystem:
         # the listing cached before.
         fs = self._make_fs()
         fs._listing_cache.put_listing(*cache_key, [self._file_object("dir/deleted")])
-        fs._call.side_effect = FileNotFoundError("NoSuchBucket")
+        fs.core.call.side_effect = FileNotFoundError("NoSuchBucket")
 
         with pytest.raises(FileNotFoundError):
             getattr(fs, method)(path, refresh=True)
-        fs._call.reset_mock()
+        fs.core.call.reset_mock()
         with pytest.raises(FileNotFoundError):
             getattr(fs, method)(path)
-        assert fs._call.call_args_list[0].args[0] is fs._client.list_objects_v2
+        assert fs.core.call.call_args_list[0].args[0] is fs.core.client.list_objects_v2
 
     @staticmethod
     def _serve_versions(fs, keys, versions):
         # Answer as _serve_keys, except that a HeadObject request of a version
         # finds only the versions in the given set of (key, version ID).
         TestS3FileSystem._serve_keys(fs, keys)
-        serve = fs._call.side_effect
+        serve = fs.core.call.side_effect
 
         def call(method, **kwargs):
             if (
-                method is fs._client.head_object
+                method is fs.core.client.head_object
                 and "VersionId" in kwargs
                 and (kwargs["Key"], kwargs["VersionId"]) not in versions
             ):
                 raise FileNotFoundError(kwargs["Key"])
             return serve(method, **kwargs)
 
-        fs._call.side_effect = call
+        fs.core.call.side_effect = call
 
     @pytest.mark.parametrize(
         ("method", "kwargs"),
@@ -956,7 +958,7 @@ class TestS3FileSystem:
 
         actual = getattr(fs, method)("s3://bucket/key?versionId=v2", **kwargs)
         assert actual == ["bucket/key?versionId=v2"]
-        assert [c.args[0] for c in fs._call.call_args_list] == [fs._client.head_object]
+        assert [c.args[0] for c in fs.core.call.call_args_list] == [fs.core.client.head_object]
         # Only the lookup of the version is cached: nothing as a listing of
         # the version-qualified path, nor as the current object.
         listings = [
@@ -979,7 +981,7 @@ class TestS3FileSystem:
             fs.ls("s3://bucket/key?versionId=v1")
         assert fs.find("s3://bucket/key?versionId=v1") == []
         assert fs.find("s3://bucket/key?versionId=v1", maxdepth=1, withdirs=True) == []
-        assert {c.args[0] for c in fs._call.call_args_list} == {fs._client.head_object}
+        assert {c.args[0] for c in fs.core.call.call_args_list} == {fs.core.client.head_object}
 
     @pytest.mark.parametrize("maxdepth", [None, 10])
     @pytest.mark.parametrize(
@@ -1037,7 +1039,7 @@ class TestS3FileSystem:
         assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
         assert sorted(fs.find("s3://bucket/dir", withdirs=True)) == expected
         assert fs.find("s3://bucket/dir") == ["bucket/dir/sub/file"]
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize("method", ["info", "ls", "find", "glob", "walk", "details"])
     def test_returned_entries_are_copies(self, method):
@@ -1077,14 +1079,14 @@ class TestS3FileSystem:
                 entry["metadata"]["k"] = "changed"
         assert file == expected
         assert [e for e in entries() if e["name"] == "bucket/dir/a"] == [expected]
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_walk_detail_lists_the_listed_directories(self):
         # GH-1382: changing a yielded directory entry does not change what
         # the walk lists below it.
         fs = self._make_fs()
         # A listing of another prefix fails, which the walk skips.
-        fs._call.side_effect = FileNotFoundError
+        fs.core.call.side_effect = FileNotFoundError
         fs._listing_cache.put_listing(
             "bucket/dir", "/", [fs._directory_object("bucket", "dir/sub")]
         )
@@ -1096,7 +1098,7 @@ class TestS3FileSystem:
             for entry in dirs.values():
                 entry["name"] = entry["key"] = "changed"
         assert walked == [("bucket/dir", []), ("bucket/dir/sub", ["b"])]
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_find_refresh_bypasses_cached_listings(self):
         fs = self._make_fs()
@@ -1108,7 +1110,7 @@ class TestS3FileSystem:
             ("dir/", "/"): {"CommonPrefixes": [{"Prefix": "dir/sub/"}]},
             ("dir/sub/", "/"): {"Contents": [{"Key": "dir/sub/new"}]},
         }
-        fs._call.side_effect = lambda method, **kwargs: responses[
+        fs.core.call.side_effect = lambda method, **kwargs: responses[
             (kwargs["Prefix"], kwargs["Delimiter"])
         ]
 
@@ -1129,30 +1131,30 @@ class TestS3FileSystem:
         keys = set(keys)
 
         def call(method, **kwargs):
-            if method is fs._client.get_bucket_versioning:
+            if method is fs.core.client.get_bucket_versioning:
                 if isinstance(versioning, BaseException):
                     raise versioning
                 status = (versioning or {}).get(kwargs["Bucket"])
                 return {"Status": status} if status else {}
-            if method is fs._client.head_object:
+            if method is fs.core.client.head_object:
                 if kwargs["Key"] not in keys:
                     raise FileNotFoundError(kwargs["Key"])
                 return {"ContentLength": 0}
-            if method is fs._client.copy_object:
+            if method is fs.core.client.copy_object:
                 if kwargs["CopySource"]["Key"] not in keys:
                     raise FileNotFoundError(kwargs["CopySource"]["Key"])
                 keys.add(kwargs["Key"])
                 return {}
-            if method is fs._client.delete_object:
+            if method is fs.core.client.delete_object:
                 keys.discard(kwargs["Key"])
                 return {}
-            if method is fs._client.put_object_acl:
+            if method is fs.core.client.put_object_acl:
                 if kwargs["Key"] not in keys:
                     raise FileNotFoundError(kwargs["Key"])
                 return {}
-            if method is fs._client.put_bucket_acl:
+            if method is fs.core.client.put_bucket_acl:
                 return {}
-            if method is fs._client.delete_objects:
+            if method is fs.core.client.delete_objects:
                 keys.difference_update(o["Key"] for o in kwargs["Delete"]["Objects"])
                 return {}
             prefix, delimiter = kwargs["Prefix"], kwargs["Delimiter"]
@@ -1171,7 +1173,7 @@ class TestS3FileSystem:
                 "KeyCount": len(contents) + len(prefixes),
             }
 
-        fs._call.side_effect = call
+        fs.core.call.side_effect = call
         return keys
 
     @staticmethod
@@ -1213,7 +1215,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         with pytest.raises(ValueError, match="maxdepth"):
             fs.find("s3://bucket/dir", maxdepth=0)
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize(
         ("pattern", "maxdepth"),
@@ -1245,7 +1247,7 @@ class TestS3FileSystem:
         self._serve_keys(fs, self.FIND_KEYS)
 
         assert fs.glob("s3://bucket/dir/s*") == ["bucket/dir/sub"]
-        assert [c.kwargs["Prefix"] for c in fs._call.call_args_list] == ["dir/s"]
+        assert [c.kwargs["Prefix"] for c in fs.core.call.call_args_list] == ["dir/s"]
 
     def test_find_withdirs_omits_bucket(self):
         fs = self._make_fs()
@@ -1342,7 +1344,7 @@ class TestS3FileSystem:
                 "Versions": [{"Key": "a/dir?versionId=v1/z", "VersionId": "v2", "IsLatest": True}]
             },
         }
-        fs._call.side_effect = lambda method, **kwargs: listings[kwargs["Prefix"]]
+        fs.core.call.side_effect = lambda method, **kwargs: listings[kwargs["Prefix"]]
 
         assert list(fs.walk("s3://bucket/a", versions=True)) == [
             ("bucket/a", ["dir?versionId=v1"], []),
@@ -1354,14 +1356,14 @@ class TestS3FileSystem:
         # path, and a directory below it whose listing fails is skipped.
         fs = self._make_fs()
         self._serve_keys(fs, ("a/b/c", "a/d/e"))
-        serve = fs._call.side_effect
+        serve = fs.core.call.side_effect
 
         def call(method, **kwargs):
-            if method is fs._client.list_objects_v2 and kwargs["Prefix"] == "a/b/":
+            if method is fs.core.client.list_objects_v2 and kwargs["Prefix"] == "a/b/":
                 raise PermissionError("a/b/")
             return serve(method, **kwargs)
 
-        fs._call.side_effect = call
+        fs.core.call.side_effect = call
         assert list(fs.walk("s3://bucket/a", on_error="raise")) == [
             ("bucket/a", ["b", "d"], []),
             ("bucket/a/d", [], ["e"]),
@@ -1737,15 +1739,15 @@ class TestS3FileSystem:
         self._serve_keys(fs, self.FIND_KEYS)
 
         assert "bucket/dir" in fs.find("s3://bucket/dir", withdirs=True)
-        assert fs._call.call_count == 1
-        fs._call.reset_mock()
+        assert fs.core.call.call_count == 1
+        fs.core.call.reset_mock()
         assert "bucket/dir" in fs.find("s3://bucket/dir", maxdepth=1, withdirs=True)
-        assert fs._call.call_count == 1
+        assert fs.core.call.call_count == 1
         # Only a subdirectory is listed; it is dropped without withdirs, but
         # the path is a directory, so it is not looked up as an object.
-        fs._call.reset_mock()
+        fs.core.call.reset_mock()
         assert fs.find("s3://bucket/dir", maxdepth=1, prefix="s") == []
-        assert fs._call.call_count == 1
+        assert fs.core.call.call_count == 1
 
     def test_find_maxdepth_listings_follow_invalidation(self):
         fs = self._make_fs()
@@ -1808,11 +1810,11 @@ class TestS3FileSystem:
         fs._listing_cache.put_buckets([bucket])
 
         def call(method, **kwargs):
-            if method in (fs._client.head_object, fs._client.head_bucket):
+            if method in (fs.core.client.head_object, fs.core.client.head_bucket):
                 raise FileNotFoundError
             return {}
 
-        fs._call.side_effect = call
+        fs.core.call.side_effect = call
 
         with pytest.raises(FileNotFoundError):
             fs.ls("s3://bucket/key", refresh=True)
@@ -1832,15 +1834,15 @@ class TestS3FileSystem:
         fs._listing_cache.put_buckets([bucket])
 
         def call(method, **kwargs):
-            if method in (fs._client.head_object, fs._client.head_bucket):
+            if method in (fs.core.client.head_object, fs.core.client.head_bucket):
                 raise FileNotFoundError
             return {}
 
-        fs._call.side_effect = call
+        fs.core.call.side_effect = call
 
         assert fs.exists("s3://bucket/key")
         assert fs.exists("s3://bucket")
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
         assert not fs.exists("s3://bucket/key", refresh=True)
         assert not fs.exists("s3://bucket", refresh=True)
@@ -1848,13 +1850,13 @@ class TestS3FileSystem:
     def test_missing_bucket_keeps_bucket_listing_without_it(self):
         fs = self._make_fs()
         fs._listing_cache.put_buckets([fs._directory_object("bucket", None)])
-        fs._call.side_effect = FileNotFoundError
+        fs.core.call.side_effect = FileNotFoundError
 
         assert not fs.exists("s3://missing")
         # Other buckets are still answered from the cached bucket listing.
-        fs._call.reset_mock()
+        fs.core.call.reset_mock()
         assert fs.exists("s3://bucket")
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize(
         ("client_region", "kwargs", "expected"),
@@ -1892,11 +1894,11 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.allow_bucket_creation = True
         fs.exists = mock.MagicMock(return_value=False)
-        fs._client.meta.region_name = client_region
+        fs.core.client.meta.region_name = client_region
         fs._listing_cache.put_buckets(["stale-bucket-listing"])
 
         fs.mkdir("s3://new-bucket", **kwargs)
-        fs._call.assert_called_once_with(fs._client.create_bucket, **expected)
+        fs.core.call.assert_called_once_with(fs.core.client.create_bucket, **expected)
         # The cached bucket listing must be evicted.
         assert fs._listing_cache.get_buckets() is None
 
@@ -1907,14 +1909,14 @@ class TestS3FileSystem:
 
         with pytest.raises(ValueError, match="ACL"):
             fs.mkdir("s3://new-bucket", acl="invalid-acl")
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_mkdir_keeps_bucket_listing_on_failure(self):
         fs = self._make_fs()
         fs.allow_bucket_creation = True
         fs.exists = mock.MagicMock(return_value=False)
-        fs._client.meta.region_name = "us-east-1"
-        fs._call.side_effect = ValueError("Parameter validation failed")
+        fs.core.client.meta.region_name = "us-east-1"
+        fs.core.call.side_effect = ValueError("Parameter validation failed")
         fs._listing_cache.put_buckets(["stale-bucket-listing"])
 
         with pytest.raises(ValueError, match="Parameter validation failed"):
@@ -1929,7 +1931,7 @@ class TestS3FileSystem:
 
         with pytest.raises(PermissionError, match="Bucket creation is disabled"):
             fs.mkdir("s3://new-bucket")
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_rmdir_deletes_bucket(self):
         fs = self._make_fs()
@@ -1937,7 +1939,7 @@ class TestS3FileSystem:
         fs._listing_cache.put_buckets(["stale-bucket-listing"])
 
         fs.rmdir("s3://bucket")
-        fs._call.assert_called_once_with(fs._client.delete_bucket, Bucket="bucket")
+        fs.core.call.assert_called_once_with(fs.core.client.delete_bucket, Bucket="bucket")
         # The cached bucket listing must be evicted.
         assert fs._listing_cache.get_buckets() is None
 
@@ -1947,18 +1949,18 @@ class TestS3FileSystem:
 
         with pytest.raises(PermissionError, match="Bucket deletion is disabled"):
             fs.rmdir("s3://bucket")
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_touch_put_object(self):
         fs = self._make_fs()
-        fs._call.return_value = {"ETag": '"e"'}
+        fs.core.call.return_value = {"ETag": '"e"'}
 
         assert fs.touch("s3://bucket/key", ContentType="text/plain")["_etag"] == '"e"'
-        fs._call.assert_called_once_with(
-            fs._client.put_object, Bucket="bucket", Key="key", ContentType="text/plain"
+        fs.core.call.assert_called_once_with(
+            fs.core.client.put_object, Bucket="bucket", Key="key", ContentType="text/plain"
         )
         # touch() writes no data, so a body is rejected.
-        fs._call.reset_mock()
+        fs.core.call.reset_mock()
         with pytest.raises(TypeError, match="body"):
             fs.touch("s3://bucket/key", body=b"data")
         # GH-1372: also as the parameter of PutObject.
@@ -1967,7 +1969,7 @@ class TestS3FileSystem:
         # A version of an object cannot be written.
         with pytest.raises(ValueError):  # noqa: PT011
             fs.touch("s3://bucket/key?versionId=v1")
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_touch_no_truncate_lookup(self):
         # GH-1372: the existence check of touch(truncate=False) sends the
@@ -2151,7 +2153,7 @@ class TestS3FileSystem:
             skip_instance_cache=True,
         )
         head_object = {"ContentLength": 1, "ETag": '"e"'}
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stubber.add_response("head_bucket", {}, {"Bucket": "bucket"})
             stubber.add_response(
                 "head_object",
@@ -2200,7 +2202,7 @@ class TestS3FileSystem:
             requests.append((operation, params))
             return responses[operation]
 
-        fs._client._make_api_call = call
+        fs.core.client._make_api_call = call
         fs.cat_file("s3://bucket/key")
         fs.ls("s3://bucket/dir")
         # The expansion and pairing of the paths are sent with them too.
@@ -2326,7 +2328,7 @@ class TestS3FileSystem:
 
         with (
             mock.patch.object(fs, "open", wraps=fs.open) as open_,
-            Stubber(fs._client) as stubber,
+            Stubber(fs.core.client) as stubber,
         ):
             stubber.add_response(
                 "put_object",
@@ -2411,7 +2413,7 @@ class TestS3FileSystem:
                 return {"Bucket": request["Bucket"], "Key": request["Key"], "UploadId": "uploadid"}
             return {"ETag": '"e"'}
 
-        fs._call.side_effect = call
+        fs.core.call.side_effect = call
         return requests
 
     @pytest.mark.parametrize(
@@ -2455,7 +2457,7 @@ class TestS3FileSystem:
 
         with pytest.raises(FileExistsError):
             fs.open("s3://bucket/key", "xb")
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize(
         ("size", "expected"),
@@ -2520,7 +2522,7 @@ class TestS3FileSystem:
 
         with pytest.raises(FileExistsError):
             fs.put_file(str(lpath), "s3://bucket/key", mode="create")
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize(
         ("size", "conditional"),
@@ -2569,7 +2571,7 @@ class TestS3FileSystem:
                 "ETag": '"e"',
             }
 
-        fs._call.side_effect = call
+        fs.core.call.side_effect = call
         block_size = fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE
 
         with (
@@ -2605,7 +2607,7 @@ class TestS3FileSystem:
 
         fs.cp_file("s3://bucket/src", "s3://bucket/dst")
         fs.core.copy_object.assert_not_called()
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize(
         ("path1", "path2"),
@@ -2628,15 +2630,15 @@ class TestS3FileSystem:
         # at their keys raise before anything is copied.
         fs = self._make_fs()
         fs._info_entry = mock.MagicMock()
-        fs._call.return_value = {}
+        fs.core.call.return_value = {}
 
         with pytest.raises(ValueError, match="Cannot move"):
             fs.mv(path1, path2, recursive=True)
         fs._info_entry.assert_not_called()
-        expected = {fs._client.head_object}
+        expected = {fs.core.client.head_object}
         if any(S3Path.parse(p).version_id == "null" for p in path1):
-            expected.add(fs._client.get_bucket_versioning)
-        assert {c.args[0] for c in fs._call.call_args_list} == expected
+            expected.add(fs.core.client.get_bucket_versioning)
+        assert {c.args[0] for c in fs.core.call.call_args_list} == expected
 
     def test_mv_conflicting_destinations_of_listed_sources(self):
         # A list of sources is mapped without looking up the destination;
@@ -2650,9 +2652,9 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="same destination"):
             fs.mv(["s3://bucket/x/a", "s3://bucket/y/a"], "s3://bucket/out", recursive=True)
         fs.isdir.assert_not_called()
-        assert sorted((c.args[0], c.kwargs["Key"]) for c in fs._call.call_args_list) == [
-            (fs._client.head_object, "x/a"),
-            (fs._client.head_object, "y/a"),
+        assert sorted((c.args[0], c.kwargs["Key"]) for c in fs.core.call.call_args_list) == [
+            (fs.core.client.head_object, "x/a"),
+            (fs.core.client.head_object, "y/a"),
         ]
 
     def test_mv_skipped_directory_does_not_conflict(self):
@@ -2674,7 +2676,9 @@ class TestS3FileSystem:
 
         fs.mv(["s3://bucket/src"], ["s3://bucket/dst/"], MetadataDirective="REPLACE")
         assert store == {"dst/"}
-        copies = [c.kwargs for c in fs._call.call_args_list if c.args[0] is fs._client.copy_object]
+        copies = [
+            c.kwargs for c in fs.core.call.call_args_list if c.args[0] is fs.core.client.copy_object
+        ]
         assert [c["MetadataDirective"] for c in copies] == ["REPLACE"]
 
     @pytest.mark.parametrize(
@@ -2727,9 +2731,9 @@ class TestS3FileSystem:
                 recursive=True,
             )
         assert store == keys
-        methods = {c.args[0] for c in fs._call.call_args_list}
-        assert fs._client.copy_object not in methods
-        assert fs._client.delete_objects not in methods
+        methods = {c.args[0] for c in fs.core.call.call_args_list}
+        assert fs.core.client.copy_object not in methods
+        assert fs.core.client.delete_objects not in methods
 
     def test_mv_version_with_keys_below_conflicts(self):
         # A version names an object even with keys below its key, so it is
@@ -2742,9 +2746,9 @@ class TestS3FileSystem:
                 ["s3://bucket/d?versionId=null", "s3://bucket/d/x", "s3://bucket/a"],
                 ["s3://bucket/out", "s3://bucket/x", "s3://bucket/out"],
             )
-        methods = {c.args[0] for c in fs._call.call_args_list}
-        assert fs._client.copy_object not in methods
-        assert fs._client.delete_objects not in methods
+        methods = {c.args[0] for c in fs.core.call.call_args_list}
+        assert fs.core.client.copy_object not in methods
+        assert fs.core.client.delete_objects not in methods
 
     def test_mv_versions_onto_their_key(self):
         fs = self._make_fs()
@@ -2752,16 +2756,18 @@ class TestS3FileSystem:
 
         # In this unversioned bucket, the "null" version names the key and stays in place.
         fs.mv(["s3://bucket/b?versionId=null"], ["s3://bucket/b"])
-        fs._call.assert_called_once_with(fs._client.get_bucket_versioning, Bucket="bucket")
+        fs.core.call.assert_called_once_with(fs.core.client.get_bucket_versioning, Bucket="bucket")
 
         # Another version is copied onto the key, and then deleted.
         fs.mv(["s3://bucket/b?versionId=v1"], ["s3://bucket/b"])
-        copies = [c.kwargs for c in fs._call.call_args_list if c.args[0] is fs._client.copy_object]
+        copies = [
+            c.kwargs for c in fs.core.call.call_args_list if c.args[0] is fs.core.client.copy_object
+        ]
         assert [(c["CopySource"].get("VersionId"), c["Key"]) for c in copies] == [("v1", "b")]
         deletes = [
             c.kwargs["Delete"]["Objects"]
-            for c in fs._call.call_args_list
-            if c.args[0] is fs._client.delete_objects
+            for c in fs.core.call.call_args_list
+            if c.args[0] is fs.core.client.delete_objects
         ]
         assert deletes == [[{"Key": "b", "VersionId": "v1"}]]
 
@@ -2770,17 +2776,19 @@ class TestS3FileSystem:
         # The CopyObject requests, as (CopySource, Key) sorted by Key, since
         # the copies run in parallel, and the objects of the DeleteObjects
         # requests that the filesystem sent.
-        calls = fs._call.call_args_list
+        calls = fs.core.call.call_args_list
         copies = sorted(
             (
                 (c.kwargs["CopySource"], c.kwargs["Key"])
                 for c in calls
-                if c.args[0] is fs._client.copy_object
+                if c.args[0] is fs.core.client.copy_object
             ),
             key=lambda copy: copy[1],
         )
         deletes = [
-            c.kwargs["Delete"]["Objects"] for c in calls if c.args[0] is fs._client.delete_objects
+            c.kwargs["Delete"]["Objects"]
+            for c in calls
+            if c.args[0] is fs.core.client.delete_objects
         ]
         return copies, deletes
 
@@ -2788,7 +2796,7 @@ class TestS3FileSystem:
         fs = S3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stubber.add_response(
                 "get_bucket_versioning", {"Status": "Enabled"}, {"Bucket": "bucket"}
             )
@@ -2898,8 +2906,8 @@ class TestS3FileSystem:
         )
         lookups = [
             c.kwargs
-            for c in fs._call.call_args_list
-            if c.args[0] is fs._client.get_bucket_versioning
+            for c in fs.core.call.call_args_list
+            if c.args[0] is fs.core.client.get_bucket_versioning
         ]
         assert sorted(lookup["Bucket"] for lookup in lookups) == ["enabled", "suspended"]
         # Only with versioning enabled is a "null" version copied onto its key
@@ -2913,11 +2921,11 @@ class TestS3FileSystem:
         )
 
         # Versioning is suspended before the next move.
-        fs._call.reset_mock()
+        fs.core.call.reset_mock()
         self._serve_keys(fs, {"a"}, versioning={"enabled": "Suspended"})
         fs.mv(["s3://enabled/a?versionId=null"], ["s3://enabled/a"])
-        assert fs._call.call_args_list[0] == mock.call(
-            fs._client.get_bucket_versioning, Bucket="enabled"
+        assert fs.core.call.call_args_list[0] == mock.call(
+            fs.core.client.get_bucket_versioning, Bucket="enabled"
         )
         assert self._moves(fs) == ([], [])
 
@@ -2934,14 +2942,14 @@ class TestS3FileSystem:
     def test_mv_null_version_failure_does_not_delete(self, versioning, failing_copy, expected):
         fs = self._make_fs()
         store = self._serve_keys(fs, {"other", "key"}, versioning=versioning)
-        serve = fs._call.side_effect
+        serve = fs.core.call.side_effect
 
         def call(method, **kwargs):
-            if method is fs._client.copy_object and kwargs["Key"] == failing_copy:
+            if method is fs.core.client.copy_object and kwargs["Key"] == failing_copy:
                 raise PermissionError("Access Denied")
             return serve(method, **kwargs)
 
-        fs._call.side_effect = call
+        fs.core.call.side_effect = call
 
         with pytest.raises(PermissionError):
             fs.mv(
@@ -2964,7 +2972,9 @@ class TestS3FileSystem:
         assert fs.info("s3://bucket/dir/what?.txt")["name"] == "bucket/dir/what?.txt"
         fs.invalidate_cache()
         assert fs.exists("s3://bucket/dir/q?version_id")
-        heads = [c.kwargs for c in fs._call.call_args_list if c.args[0] is fs._client.head_object]
+        heads = [
+            c.kwargs for c in fs.core.call.call_args_list if c.args[0] is fs.core.client.head_object
+        ]
         assert heads[-1] == {"Bucket": "bucket", "Key": "dir/q?version_id"}
 
         fs.rm("s3://bucket/dir", recursive=True)
@@ -2999,8 +3009,8 @@ class TestS3FileSystem:
         with pytest.raises(FileNotFoundError):
             fs.info(**kwargs)
         assert not fs.exists("s3://bucket/dir?versionId=v1")
-        methods = {c.args[0] for c in fs._call.call_args_list}
-        assert fs._client.list_objects_v2 not in methods
+        methods = {c.args[0] for c in fs.core.call.call_args_list}
+        assert fs.core.client.list_objects_v2 not in methods
 
     @pytest.mark.parametrize("recursive", [False, True])
     def test_expand_path_version(self, recursive):
@@ -3022,14 +3032,14 @@ class TestS3FileSystem:
         # A failed lookup is raised, not taken for a missing version.
         fs = self._make_fs()
         self._serve_keys(fs, {"a", "b"})
-        serve = fs._call.side_effect
+        serve = fs.core.call.side_effect
 
         def call(method, **kwargs):
-            if method is fs._client.head_object and kwargs["Key"] == "b":
+            if method is fs.core.client.head_object and kwargs["Key"] == "b":
                 raise PermissionError("b")
             return serve(method, **kwargs)
 
-        fs._call.side_effect = call
+        fs.core.call.side_effect = call
         with pytest.raises(PermissionError):
             fs.expand_path(
                 ["s3://bucket/a?versionId=v1", "s3://bucket/b?versionId=v2"], recursive=True
@@ -3074,8 +3084,8 @@ class TestS3FileSystem:
             # A trailing slash makes the destination a directory without a lookup.
             assert not [
                 c
-                for c in fs._call.call_args_list
-                if c.args[0] in (fs._client.head_object, fs._client.list_objects_v2)
+                for c in fs.core.call.call_args_list
+                if c.args[0] in (fs.core.client.head_object, fs.core.client.list_objects_v2)
                 and (c.kwargs.get("Key") or c.kwargs.get("Prefix")).rstrip("/") == "d"
             ]
 
@@ -3145,7 +3155,7 @@ class TestS3FileSystem:
         fs.isdir = mock.MagicMock(return_value=True)
 
         fs.mv("s3://bucket/src", "s3://bucket/dst/", recursive=True, maxdepth=1)
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     # The per-object method that each batch operation calls.
     BATCH_OPERATIONS = {
@@ -3820,14 +3830,14 @@ class TestS3FileSystem:
         # of the wave).
         fs, _ = self._make_object_fs(b"abcdefgh")
         stop = threading.Event()
-        get_object = fs._client.get_object.side_effect
+        get_object = fs.core.client.get_object.side_effect
 
         def stopping(**request):
             # The batch stops while the first wave, of one range, is read.
             stop.set()
             return get_object(**request)
 
-        fs._client.get_object.side_effect = stopping
+        fs.core.client.get_object.side_effect = stopping
         outfile = io.BytesIO()
         with stop_retries_on(stop), pytest.raises(CancelledError):
             fs.get_file("s3://bucket/key", outfile=outfile, block_size=4, max_workers=1)
@@ -3958,7 +3968,7 @@ class TestS3FileSystem:
         # source condition goes to the part copies, and the source's lookups
         # get the source's expected bucket owner.
         fs = self._stubbed_copy_fs()
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stub_multipart_copy(stubber)
             self._multipart_copy(fs, **MULTIPART_COPY_KWARGS)
             stubber.assert_no_pending_responses()
@@ -3968,7 +3978,7 @@ class TestS3FileSystem:
         # a caller without s3:ListObjectAnnotations fails before anything is
         # written.
         fs = self._stubbed_copy_fs()
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stub_multipart_copy(stubber, fail_list=True)
             with pytest.raises(PermissionError):
                 self._multipart_copy(fs, **MULTIPART_COPY_KWARGS)
@@ -3979,7 +3989,7 @@ class TestS3FileSystem:
         # A failed part copy aborts the upload; an abort that fails too does
         # not replace the error of the part.
         fs = self._stubbed_copy_fs()
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stub_multipart_copy(stubber, fail_part=True, fail_abort=abort_fails)
             with pytest.raises(OSError, match="part failed"):
                 self._multipart_copy(fs, **MULTIPART_COPY_KWARGS)
@@ -4027,7 +4037,7 @@ class TestS3FileSystem:
         # GH-973: a failed annotation copy is raised; the completed
         # destination is neither aborted nor deleted.
         fs = self._stubbed_copy_fs()
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stub_multipart_copy(stubber, fail_annotation=True)
             with pytest.raises(PermissionError):
                 self._multipart_copy(fs, **MULTIPART_COPY_KWARGS)
@@ -4052,7 +4062,7 @@ class TestS3FileSystem:
         # reports a size that fits in a single CopyObject request, including
         # an empty object, the reported version is copied with CopyObject.
         fs = self._stubbed_copy_fs()
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stubber.add_response("head_object", {"ContentLength": size, "VersionId": "v1"}, None)
             stubber.add_response(
                 "copy_object",
@@ -4072,7 +4082,7 @@ class TestS3FileSystem:
         # GH-973: REPLACE uses the values of the copy without reading the
         # source, and EXCLUDE skips the annotations.
         fs = self._stubbed_copy_fs()
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             # Read only for the version, which a bucket without versioning
             # does not report.
             stubber.add_response(
@@ -4103,7 +4113,7 @@ class TestS3FileSystem:
         # CreateMultipartUpload, so that botocore rejects it as it does for
         # CopyObject, instead of the copy dropping it. Nothing is written.
         fs = self._stubbed_copy_fs()
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stubber.add_response("head_object", {"ContentLength": MULTIPART_COPY_SIZE}, None)
             # The Stubber checks the parameters before botocore validates
             # them, which then fails before the response would be returned.
@@ -4131,7 +4141,7 @@ class TestS3FileSystem:
     )
     def test_copy_object_with_multipart_upload_invalid_directive(self, directive):
         fs = self._stubbed_copy_fs()
-        with Stubber(fs._client), pytest.raises(ValueError, match="Invalid"):
+        with Stubber(fs.core.client), pytest.raises(ValueError, match="Invalid"):
             self._multipart_copy(fs, **directive)
 
     def test_copy_object_with_multipart_upload_sse_c_source(self):
@@ -4139,7 +4149,7 @@ class TestS3FileSystem:
         # object, which cannot have annotations, is not listed for them.
         fs = self._stubbed_copy_fs()
         sse_c = {"CopySourceSSECustomerAlgorithm": "AES256", "CopySourceSSECustomerKey": "k" * 32}
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stubber.add_response(
                 "head_object",
                 {"ContentLength": MULTIPART_COPY_SIZE, "ContentType": "text/csv"},
@@ -4167,7 +4177,7 @@ class TestS3FileSystem:
         # ListObjectAnnotations.
         fs = self._stubbed_copy_fs()
         bucket = "bucket--usw2-az1--x-s3"
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stubber.add_response(
                 "head_object",
                 {"ContentLength": MULTIPART_COPY_SIZE, "ContentType": "text/csv"},
@@ -4275,7 +4285,7 @@ class TestS3FileSystem:
 
         assert b"".join(c.kwargs["body"] for c in fs.core.upload_part.call_args_list) == b"a" * size
         fs.core.complete_multipart_upload.assert_called_once()
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize("intrans", [False, True])
     def test_pipe_file_failed_write(self, intrans):
@@ -4298,7 +4308,7 @@ class TestS3FileSystem:
             fs.pipe_file("s3://bucket/key", b"a" * (S3FileSystem.DEFAULT_BLOCK_SIZE + 1))
 
         fs.core.put_object.assert_not_called()
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize(
         ("path", "compression", "key"),
@@ -4382,7 +4392,7 @@ class TestS3FileSystem:
 
         with pytest.raises(ValueError, match="not supported"):
             fs.pipe_file("s3://bucket/key", b"a", compression="unknown")
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize("intrans", [False, True])
     def test_pipe_file_compression_failed_write(self, intrans):
@@ -4408,7 +4418,7 @@ class TestS3FileSystem:
         gc.collect()
 
         fs.core.put_object.assert_not_called()
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_pipe_file_failed_write_aborts_multipart_upload(self):
         # GH-997: a write that fails after its multipart upload has started
@@ -4427,8 +4437,8 @@ class TestS3FileSystem:
             fs.pipe_file("s3://bucket/key", b"a" * (3 * S3FileSystem.DEFAULT_BLOCK_SIZE))
 
         fs.core.complete_multipart_upload.assert_not_called()
-        fs._call.assert_called_once_with(
-            fs._client.abort_multipart_upload, Bucket="bucket", Key="key", UploadId="uploadid"
+        fs.core.call.assert_called_once_with(
+            fs.core.client.abort_multipart_upload, Bucket="bucket", Key="key", UploadId="uploadid"
         )
 
     @pytest.mark.parametrize("intrans", [False, True])
@@ -4465,7 +4475,7 @@ class TestS3FileSystem:
             fs.put_file(str(lpath), "s3://bucket/key", callback=callback)
 
         fs.core.put_object.assert_not_called()
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize("intrans", [False, True])
     def test_put_file_failed_write_aborts_multipart_upload(self, tmp_path, intrans):
@@ -4496,8 +4506,8 @@ class TestS3FileSystem:
             fs.put_file(str(lpath), "s3://bucket/key", callback=callback)
 
         fs.core.complete_multipart_upload.assert_not_called()
-        fs._call.assert_called_once_with(
-            fs._client.abort_multipart_upload, Bucket="bucket", Key="key", UploadId="uploadid"
+        fs.core.call.assert_called_once_with(
+            fs.core.client.abort_multipart_upload, Bucket="bucket", Key="key", UploadId="uploadid"
         )
 
     @pytest.mark.parametrize("kwargs", [{"block_size": 4}, {}])
@@ -4514,7 +4524,7 @@ class TestS3FileSystem:
         with pytest.raises(ValueError, match="in 3 parts with a block size of 4 bytes"):
             fs.put_file(str(lpath), "s3://bucket/key", **kwargs)
         fs.open.assert_not_called()
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize(
         ("filesystem_kwargs", "kwargs", "expected"),
@@ -4559,7 +4569,7 @@ class TestS3FileSystem:
             fs.pipe_file("s3://bucket/key", value, **kwargs)
         fs.open.assert_not_called()
         fs.core.put_object.assert_not_called()
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_open_max_workers(self):
         # GH-1158: a file opened without max_workers takes the default of the
@@ -4594,7 +4604,7 @@ class TestS3FileSystem:
         )
         assert fs.max_workers == pool_size
         assert fs._request_pool.max_workers == pool_size
-        assert fs._client.meta.config.max_pool_connections == pool_connections
+        assert fs.core.client.meta.config.max_pool_connections == pool_connections
 
     def test_request_pool_size_of_client(self):
         # GH-1332: with a given client, the request pool takes the connection
@@ -4632,7 +4642,7 @@ class TestS3FileSystem:
             warnings.simplefilter("error", DeprecationWarning)
             fs = s3_filesystem(connection, skip_instance_cache=True)
         assert type(fs) is S3FileSystem
-        assert fs._client is connection.s3_client
+        assert fs.core.client is connection.s3_client
         assert fs.core.retry_config is connection.retry_config
         assert fs.max_workers == 7
 
@@ -4644,7 +4654,7 @@ class TestS3FileSystem:
         with pytest.warns(DeprecationWarning, match="s3_filesystem") as record:
             fs = S3FileSystem(connection=connection, skip_instance_cache=True)
         assert record[0].filename == __file__
-        assert fs._client is connection.s3_client
+        assert fs.core.client is connection.s3_client
         assert fs.core.retry_config is connection.retry_config
 
     @pytest.mark.skipif(sys.version_info < (3, 12), reason="skip_file_prefixes of Python 3.12")
@@ -4728,7 +4738,7 @@ class TestS3FileSystem:
         )
         unpickled = pickle.loads(pickle.dumps(fs))
         assert unpickled.default_block_size == 2**20
-        assert unpickled._client.meta.region_name == "us-east-1"
+        assert unpickled.core.client.meta.region_name == "us-east-1"
 
     def test_client_ignores_fsspec_config(self, monkeypatch):
         # GH-1363: settings of fsspec's configuration, such as the
@@ -4738,7 +4748,7 @@ class TestS3FileSystem:
         monkeypatch.setitem(fsspec.config.conf, "s3", {"endpoint_url": "http://localhost:9000"})
         client = mock_client()
         fs = S3FileSystem(client=client, skip_instance_cache=True)
-        assert fs._client is client
+        assert fs.core.client is client
         with pytest.raises(TypeError, match="endpoint_url cannot be combined"):
             S3FileSystem(
                 client=client, endpoint_url="http://localhost:9001", skip_instance_cache=True
@@ -4834,9 +4844,11 @@ class TestS3FileSystem:
             for use in (lambda: f.write(b"y"), f.flush, f.commit, f.discard, f.read):
                 with pytest.raises(RuntimeError, match="parent of this forked process"):
                     use()
-            requests = fs._call.call_count + len(fs._core.client.method_calls)
+            requests = fs.core.call.call_count + len(fs._core.client.method_calls)
             f.close()
-            return f.closed and fs._call.call_count + len(fs._core.client.method_calls) == requests
+            return (
+                f.closed and fs.core.call.call_count + len(fs._core.client.method_calls) == requests
+            )
 
         try:
             assert run_in_forked_child(child) == 0
@@ -4869,9 +4881,9 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.version_aware = True
         fs.default_cache_type = "bytes"
-        fs._call.side_effect = lambda method, **request: (
+        fs.core.call.side_effect = lambda method, **request: (
             "https://signed"
-            if method is fs._client.generate_presigned_url
+            if method is fs.core.client.generate_presigned_url
             else {"ContentLength": 4, "ETag": '"e"', "VersionId": "v1", "Metadata": {"a": "1"}}
         )
 
@@ -4881,7 +4893,7 @@ class TestS3FileSystem:
             assert f.metadata()["a"] == "1"
             assert f.getxattr("a") == "1"
             assert f.url() == "https://signed"
-        requests = [c.kwargs for c in fs._call.call_args_list]
+        requests = [c.kwargs for c in fs.core.call.call_args_list]
         # The open-time lookup, then metadata(), getxattr() and url().
         assert requests[1:3] == [{"Bucket": "bucket", "Key": "key", "VersionId": "v1"}] * 2
         assert requests[3]["Params"] == {"Bucket": "bucket", "Key": "key", "VersionId": "v1"}
@@ -5054,7 +5066,7 @@ class TestS3FileSystem:
     def test_open_version_id_for_writing(self, mode, path, kwargs):
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs._call.side_effect = AssertionError("No request is expected.")
+        fs.core.call.side_effect = AssertionError("No request is expected.")
 
         with pytest.raises(ValueError, match="version specified"):
             fs.open(path, mode, **kwargs)
@@ -5079,7 +5091,7 @@ class TestS3FileSystem:
         # no half-initialized file, whose garbage collection would close it.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs._call.side_effect = AssertionError("No request is expected.")
+        fs.core.call.side_effect = AssertionError("No request is expected.")
         unraisable = []
         monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
 
@@ -5095,7 +5107,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
         fs._listing_cache.put_listing("bucket", "/", [self._file_object("key")])
-        fs._call.return_value = {
+        fs.core.call.return_value = {
             "ContentLength": 2,
             "ContentType": "text/plain",
             "Metadata": {"k": "v"},
@@ -5105,7 +5117,7 @@ class TestS3FileSystem:
 
         with fs.open("s3://bucket/key", "ab") as f:
             f.write(b"bb")
-        fs._call.assert_called_once_with(fs._client.head_object, Bucket="bucket", Key="key")
+        fs.core.call.assert_called_once_with(fs.core.client.head_object, Bucket="bucket", Key="key")
         (_, body), request = fs.core.put_object.call_args
         assert (body, request["ContentType"], request["Metadata"]) == (
             b"aabb",
@@ -5153,7 +5165,7 @@ class TestS3FileSystem:
         # object that the caller does not give, but not its object lock.
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs._call.return_value = {
+        fs.core.call.return_value = {
             "ContentLength": 2,
             "ContentType": "text/plain",
             "Metadata": {"k": "v"},
@@ -5193,7 +5205,7 @@ class TestS3FileSystem:
         gc.collect()
 
         assert unraisable == []
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     LOOKUP_KWARGS = {
         "ExpectedBucketOwner": "111122223333",
@@ -5252,7 +5264,10 @@ class TestS3FileSystem:
         # result cached in the meantime for other parameters.
         fs = self._make_fs()
         etags = iter(['"stale"', '"other"', '"fresh"'])
-        fs._call.side_effect = lambda method, **request: {"ContentLength": 2, "ETag": next(etags)}
+        fs.core.call.side_effect = lambda method, **request: {
+            "ContentLength": 2,
+            "ETag": next(etags),
+        }
         path = "s3://bucket/key"
         lookup_kwargs = self.LOOKUP_KWARGS
         other_key = {**lookup_kwargs, "SSECustomerKey": "j" * 32}
@@ -5279,10 +5294,10 @@ class TestS3FileSystem:
         fs.dircache = cache
         assert fs.info(path, **other_key).etag == '"other"'
 
-        fs._call.reset_mock()
+        fs.core.call.reset_mock()
         assert fs.info(path, **lookup_kwargs).etag == '"fresh"'
         assert fs.info(path, **other_key).etag == '"other"'
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_cache_lookup_expiry(self, monkeypatch):
         # GH-1004: the cached lookups with parameters expire after the
@@ -5291,7 +5306,7 @@ class TestS3FileSystem:
         fs.dircache = DirCache(listings_expiry_time=60)
         now = [0.0]
         monkeypatch.setattr("fsspec.dircache.time.time", lambda: now[0])
-        fs._call.return_value = {"ContentLength": 2, "ETag": '"e"'}
+        fs.core.call.return_value = {"ContentLength": 2, "ETag": '"e"'}
         path = "s3://bucket/key"
         other_key = {**self.LOOKUP_KWARGS, "SSECustomerKey": "j" * 32}
 
@@ -5300,22 +5315,22 @@ class TestS3FileSystem:
         fs.info(path, refresh=True, **self.LOOKUP_KWARGS)
         now[0] = 61.0
         fs.info(path, **self.LOOKUP_KWARGS)
-        assert fs._call.call_count == 2
+        assert fs.core.call.call_count == 2
 
         # Each result expires on its own, also while the results of other
         # parameters keep renewing the entry of the path.
         fs.info(path, **other_key)
         now[0] = 120.0
         fs.info(path, **other_key)
-        assert fs._call.call_count == 3
+        assert fs.core.call.call_count == 3
         fs.info(path, **self.LOOKUP_KWARGS)
-        assert fs._call.call_count == 4
+        assert fs.core.call.call_count == 4
 
     def test_info_lookup_parameters_cache(self):
         # GH-1004: a cached result serves only lookups with the same lookup
         # parameters, on which the authorization of the requests depends.
         fs = self._make_fs()
-        fs._call.return_value = {"ContentLength": 2, "ETag": '"e"'}
+        fs.core.call.return_value = {"ContentLength": 2, "ETag": '"e"'}
         fs._listing_cache.put_listing("bucket", "/", [self._file_object("key")])
         path = "s3://bucket/key"
         other_key = {**self.LOOKUP_KWARGS, "SSECustomerKey": "j" * 32}
@@ -5327,7 +5342,7 @@ class TestS3FileSystem:
             assert fs.exists(path, **self.LOOKUP_KWARGS)
         # The listing serves only the lookups without the parameters, and the
         # other parameters are not sent.
-        assert [c.kwargs for c in fs._call.call_args_list] == [
+        assert [c.kwargs for c in fs.core.call.call_args_list] == [
             {"Bucket": "bucket", "Key": "key", **self.LOOKUP_KWARGS},
             {"Bucket": "bucket", "Key": "key", **other_key},
         ]
@@ -5337,14 +5352,14 @@ class TestS3FileSystem:
 
         fs.invalidate_cache(path)
         fs.info(path, **self.LOOKUP_KWARGS)
-        assert fs._call.call_count == 3
+        assert fs.core.call.call_count == 3
 
     def test_info_lookup_parameters_missing_object(self):
         # GH-1004: a missing object evicts the cached results of the lookups
         # with parameters, and the request that checks for a key prefix
         # receives those that ListObjectsV2 accepts.
         fs = self._make_fs()
-        fs._call.side_effect = [
+        fs.core.call.side_effect = [
             {"ContentLength": 2, "ETag": '"e"'},
             FileNotFoundError("key"),
             {"KeyCount": 0},
@@ -5356,7 +5371,7 @@ class TestS3FileSystem:
             fs.info(path, refresh=True, **self.LOOKUP_KWARGS)
 
         assert fs.dircache == {}
-        assert fs._call.call_args.kwargs == {
+        assert fs.core.call.call_args.kwargs == {
             "Bucket": "bucket",
             "Prefix": "key/",
             "Delimiter": "/",
@@ -5369,7 +5384,7 @@ class TestS3FileSystem:
         # GH-1004: a bucket lookup with parameters uses neither the cached
         # bucket listing nor the result of a lookup without them.
         fs = self._make_fs()
-        fs._call.return_value = {}
+        fs.core.call.return_value = {}
         fs._listing_cache.put_buckets([fs._directory_object("bucket", None)])
 
         for _ in range(2):
@@ -5378,8 +5393,8 @@ class TestS3FileSystem:
             assert fs.info("s3://bucket", **self.LOOKUP_KWARGS).type == (
                 S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
             )
-        fs._call.assert_called_once_with(
-            fs._client.head_bucket, Bucket="bucket", ExpectedBucketOwner="111122223333"
+        fs.core.call.assert_called_once_with(
+            fs.core.client.head_bucket, Bucket="bucket", ExpectedBucketOwner="111122223333"
         )
 
     def test_pipe_file_create_lookup_parameters(self):
@@ -5445,19 +5460,19 @@ class TestS3FileSystem:
         fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
         fs._info_entry.return_value.size = 10
 
-        fs._call.return_value = {"Body": io.BytesIO(b"data")}
+        fs.core.call.return_value = {"Body": io.BytesIO(b"data")}
         assert fs.cat_file(path, **kwargs) == b"data"
-        fs._call.assert_called_once_with(
-            fs._client.get_object, Bucket="bucket", Key="key", VersionId=expected
+        fs.core.call.assert_called_once_with(
+            fs.core.client.get_object, Bucket="bucket", Key="key", VersionId=expected
         )
 
         # A negative offset is resolved against the size of the same version.
-        fs._call.reset_mock()
-        fs._call.return_value = {"Body": io.BytesIO(b"ta")}
+        fs.core.call.reset_mock()
+        fs.core.call.return_value = {"Body": io.BytesIO(b"ta")}
         assert fs.cat_file(path, start=-8, end=-6, **kwargs) == b"ta"
         fs._info_entry.assert_called_once_with(lookup[0], version_id=lookup[1])
-        fs._call.assert_called_once_with(
-            fs._client.get_object,
+        fs.core.call.assert_called_once_with(
+            fs.core.client.get_object,
             Bucket="bucket",
             Key="key",
             Range="bytes=2-3",
@@ -5497,7 +5512,6 @@ class TestS3FileSystem:
         fs.default_cache_type = "bytes"
         # The real request function, on the client mock.
         fs._core.call = functools.partial(S3Core.call, fs._core)
-        fs._call = functools.partial(S3FileSystem._call, fs)
         fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
         fs._info_entry.return_value.size = len(data)
         ranges = []
@@ -5524,7 +5538,7 @@ class TestS3FileSystem:
                 )
             return {"Body": io.BytesIO(data[first : last + 1])}
 
-        fs._client.get_object.side_effect = get_object
+        fs.core.client.get_object.side_effect = get_object
         return fs, ranges
 
     @pytest.mark.parametrize(
@@ -5582,22 +5596,23 @@ class TestS3FileSystem:
         fs._info_entry.return_value = S3FileSystem._directory_object("bucket", "dir")
 
         assert fs.cat_file("s3://bucket/dir/", start=-2) == b"bc"
-        fs._client.get_object.assert_called_once_with(Bucket="bucket", Key="dir/", Range="bytes=-2")
+        fs.core.client.get_object.assert_called_once_with(
+            Bucket="bucket", Key="dir/", Range="bytes=-2"
+        )
         fs._info_entry.assert_not_called()
 
     def test_cat_file_range_errors(self):
         fs = self._make_fs()
         # The real request function, on the client mock.
         fs._core.call = functools.partial(S3Core.call, fs._core)
-        fs._call = functools.partial(S3FileSystem._call, fs)
-        fs._client.get_object.side_effect = botocore.exceptions.ClientError(
+        fs.core.client.get_object.side_effect = botocore.exceptions.ClientError(
             {"Error": {"Code": "NoSuchKey", "Message": "No such key"}}, "GetObject"
         )
 
         # Errors other than InvalidRange are raised.
         with pytest.raises(FileNotFoundError):
             fs.cat_file("s3://bucket/dir", start=0, end=5)
-        fs._client.get_object.side_effect = botocore.exceptions.ClientError(
+        fs.core.client.get_object.side_effect = botocore.exceptions.ClientError(
             {
                 "Error": {"Code": "InvalidRange", "Message": "Not satisfiable"},
                 "ResponseMetadata": {"HTTPStatusCode": 416},
@@ -5616,7 +5631,7 @@ class TestS3FileSystem:
         # An empty range of a missing object is not read as empty.
         with pytest.raises(FileNotFoundError):
             fs.cat_file("s3://bucket/missing", start=start, end=end)
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize(("start", "end"), [(-5, 3), (0, -1), (5, 5)])
     def test_cat_file_range_directory(self, start, end):
@@ -5628,7 +5643,7 @@ class TestS3FileSystem:
         # A prefix is not read as an empty object.
         with pytest.raises(FileNotFoundError):
             fs.cat_file("s3://bucket/dir", start=start, end=end)
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize(("start", "end"), [(None, None), (-1, None), (0, 5)])
     def test_cat_file_bucket(self, start, end):
@@ -5636,7 +5651,7 @@ class TestS3FileSystem:
 
         with pytest.raises(FileNotFoundError):
             fs.cat_file("s3://bucket/", start=start, end=end)
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize(("start", "end"), [(-2, -1), (0, -1), (5, 5)])
     def test_cat_file_range_key_ending_in_slash(self, start, end):
@@ -5664,7 +5679,7 @@ class TestS3FileSystem:
         # Existing directories are kept.
         fs.get_file(rpath, str(lpath))
         assert lpath.is_dir()
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_get_file_missing(self, tmp_path):
         # A missing object leaves no local file or parent directory.
@@ -5755,13 +5770,13 @@ class TestS3FileSystem:
         fs, _ = self._make_object_fs(b"0123456789")
         fs._request_pool = S3ThreadPool(pool)
         events = []
-        get_object = fs._client.get_object.side_effect
+        get_object = fs.core.client.get_object.side_effect
 
         def record(**request):
             events.append(("read", request["Range"].removeprefix("bytes=")))
             return get_object(**request)
 
-        fs._client.get_object.side_effect = record
+        fs.core.client.get_object.side_effect = record
 
         class Outfile(io.BytesIO):
             def write(self, data):
@@ -5868,7 +5883,7 @@ class TestS3FileSystem:
         # GH-1323: a failed range stops the download: no further wave is
         # read, and nothing of the failed wave is written.
         fs, _ = self._make_object_fs(b"0123456789")
-        get_object = fs._client.get_object.side_effect
+        get_object = fs.core.client.get_object.side_effect
         ranges = []
 
         def failing(**request):
@@ -5880,7 +5895,7 @@ class TestS3FileSystem:
                 raise OSError("failed")
             return get_object(**request)
 
-        fs._client.get_object.side_effect = failing
+        fs.core.client.get_object.side_effect = failing
         outfile = io.BytesIO()
         with pytest.raises(OSError, match="failed"):
             fs.get_file("s3://bucket/key", outfile=outfile, block_size=4, max_workers=2)
@@ -6000,7 +6015,7 @@ class TestS3FileSystem:
             max_workers=2,
             RequestPayer="requester",
         )
-        requests = fs._client.get_object.call_args_list
+        requests = fs.core.client.get_object.call_args_list
         assert len(requests) == 3
         assert {
             (c.kwargs["VersionId"], c.kwargs["IfMatch"], c.kwargs["RequestPayer"]) for c in requests
@@ -6094,7 +6109,7 @@ class TestS3FileSystem:
         # the first range finishes last.
         data = bytes(range(64))
         fs, ranges = self._make_object_fs(data)
-        get_object = fs._client.get_object.side_effect
+        get_object = fs.core.client.get_object.side_effect
         others_done = threading.Semaphore(0)
 
         def answer_first_range_last(**request):
@@ -6107,7 +6122,7 @@ class TestS3FileSystem:
             finally:
                 others_done.release()
 
-        fs._client.get_object.side_effect = answer_first_range_last
+        fs.core.client.get_object.side_effect = answer_first_range_last
         with fs.open("s3://bucket/key", "rb", cache_type="none", block_size=16, max_workers=4) as f:
             assert f.read() == data
         assert sorted(ranges) == ["bytes=0-15", "bytes=16-31", "bytes=32-47", "bytes=48-63"]
@@ -6427,7 +6442,7 @@ class TestS3FileSystem:
         # A prefix is not read as an empty object.
         with pytest.raises(FileNotFoundError):
             fs.open("s3://bucket/dir", "rb", cache_type=cache_type)
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize("max_workers", [1, 4])
     def test_copy_object_with_multipart_upload_part_sizes(self, max_workers):
@@ -6445,7 +6460,7 @@ class TestS3FileSystem:
         )
         fs.core.complete_multipart_upload = mock.MagicMock()
         # The HeadObject of the source.
-        fs._call.return_value = {"ContentLength": 5 * 2**30 + 2**20}
+        fs.core.call.return_value = {"ContentLength": 5 * 2**30 + 2**20}
 
         fs._copy_object_with_multipart_upload(
             S3Path("bucket", "src"),
@@ -6488,7 +6503,7 @@ class TestS3FileSystem:
         fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
         fs.core.upload_part_copy = mock.MagicMock()
         # The HeadObject of the source.
-        fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
+        fs.core.call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
         fs.core.abort_multipart_upload = mock.MagicMock()
         ready = _S3WriteSession.ready
 
@@ -6530,7 +6545,7 @@ class TestS3FileSystem:
         )
         fs.core.upload_part_copy = mock.MagicMock(side_effect=RuntimeError("copy failed"))
         # The HeadObject of the source.
-        fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
+        fs.core.call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
         fs.core.abort_multipart_upload = mock.MagicMock(side_effect=KeyboardInterrupt)
 
         with pytest.raises(KeyboardInterrupt):
@@ -6597,7 +6612,7 @@ class TestS3FileSystem:
 
         fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         # The HeadObject of the source.
-        fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
+        fs.core.call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
         fs.core.abort_multipart_upload = mock.MagicMock()
         handler = UploadIdLogged()
         logger = logging.getLogger("pyathena.filesystem.s3")
@@ -6644,14 +6659,14 @@ class TestS3FileSystem:
             fs._copy_object_with_multipart_upload(
                 S3Path("bucket", "src"), S3Path("bucket", "dst"), block_size=block_size
             )
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_ls_sparse_entries_keep_defaults(self):
         # Listed entries without Size or StorageClass get S3Object's defaults,
         # as they did when they were built from the response.
         fs = self._make_fs()
         fs.version_aware = True
-        fs._call.side_effect = [
+        fs.core.call.side_effect = [
             {"Contents": [{"Key": "k"}]},
             {"Versions": [{"Key": "k", "VersionId": "v1"}]},
         ]
@@ -6669,7 +6684,7 @@ class TestS3FileSystem:
     def test_object_version_info_paginates(self):
         # The versions of every page are returned.
         fs = self._make_fs()
-        fs._call.side_effect = [
+        fs.core.call.side_effect = [
             {
                 "Versions": [
                     {"Key": "key", "VersionId": "v2", "IsLatest": True, "Size": 4},
@@ -6700,13 +6715,13 @@ class TestS3FileSystem:
         # Explicit markers start the listing, and the next page follows the
         # returned markers instead of sending them twice.
         fs = self._make_fs()
-        fs._call.side_effect = [
+        fs.core.call.side_effect = [
             {"IsTruncated": True, "NextKeyMarker": "m", "NextVersionIdMarker": "w"},
             {"IsTruncated": False},
         ]
 
         fs.object_version_info("s3://bucket", KeyMarker="k", VersionIdMarker="v")
-        assert [c.kwargs for c in fs._call.call_args_list] == [
+        assert [c.kwargs for c in fs.core.call.call_args_list] == [
             {"Bucket": "bucket", "Prefix": "", "KeyMarker": "k", "VersionIdMarker": "v"},
             {"Bucket": "bucket", "Prefix": "", "KeyMarker": "m", "VersionIdMarker": "w"},
         ]
@@ -6715,7 +6730,7 @@ class TestS3FileSystem:
         # GH-1059: ListBuckets returns pages, which _ls_buckets() used to
         # ignore beyond the first.
         fs = self._make_fs()
-        fs._call.side_effect = [
+        fs.core.call.side_effect = [
             {"Buckets": [{"Name": "a"}], "ContinuationToken": "t1"},
             {"Buckets": [{"Name": "b"}]},
         ]
@@ -6727,7 +6742,7 @@ class TestS3FileSystem:
         # the response.
         fs = self._make_fs()
         retain_until = datetime(2027, 1, 1, tzinfo=UTC)
-        fs._call.return_value = {
+        fs.core.call.return_value = {
             "ContentLength": 4,
             "ETag": '"e"',
             "ObjectLockMode": "GOVERNANCE",
@@ -6762,7 +6777,7 @@ class TestS3FileSystem:
             "v1": {"ContentLength": 1, "ETag": '"e1"', "VersionId": "v1"},
             "v2": {"ContentLength": 2, "ETag": '"e2"', "VersionId": "v2"},
         }
-        fs._call.side_effect = lambda _, **kwargs: responses[kwargs.get("VersionId")]
+        fs.core.call.side_effect = lambda _, **kwargs: responses[kwargs.get("VersionId")]
 
         for _ in range(2):
             assert fs.info("s3://bucket/key", version_id="v1").size == 1
@@ -6770,7 +6785,7 @@ class TestS3FileSystem:
             assert fs.info("s3://bucket/key?versionId=v1").size == 1
             assert fs.info("s3://bucket/key").size == 3
         # The second round is served from the cache.
-        assert fs._call.call_count == 3
+        assert fs.core.call.call_count == 3
 
     @pytest.mark.parametrize("lookup", [False, True])
     def test_info_version_spellings_share_cache(self, lookup):
@@ -6779,7 +6794,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         kwargs = self.LOOKUP_KWARGS if lookup else {}
         # A missing version is not looked up as a key prefix.
-        fs._call.side_effect = [
+        fs.core.call.side_effect = [
             {"ContentLength": 4, "ETag": '"etag"', "VersionId": "v1"},
             FileNotFoundError("key"),
             FileNotFoundError("key"),
@@ -6788,26 +6803,26 @@ class TestS3FileSystem:
         assert fs.info("s3://bucket/key?versionId=v1", **kwargs).size == 4
         assert fs.info("s3://bucket/key?version_id=v1", **kwargs).size == 4
         assert fs.info("s3://bucket/key", version_id="v1", **kwargs).size == 4
-        assert fs._call.call_count == 1
+        assert fs.core.call.call_count == 1
         with pytest.raises(FileNotFoundError):
             fs.info("s3://bucket/key?version_id=v1", refresh=True, **kwargs)
         with pytest.raises(FileNotFoundError):
             fs.info("s3://bucket/key?versionId=v1", **kwargs)
-        assert fs._call.call_count == 3
+        assert fs.core.call.call_count == 3
 
     def test_info_does_not_cache_null_version(self):
         fs = self._make_fs()
-        fs._call.return_value = {"ContentLength": 4, "ETag": '"etag"', "VersionId": "null"}
+        fs.core.call.return_value = {"ContentLength": 4, "ETag": '"etag"', "VersionId": "null"}
 
         for _ in range(2):
             assert fs.info("s3://bucket/key", version_id="null").size == 4
             assert fs.info("s3://bucket/key?versionId=null").size == 4
         # An overwrite can replace the null version, so it is looked up every time.
-        assert fs._call.call_count == 4
+        assert fs.core.call.call_count == 4
 
     def test_object_version_info_with_delete_markers(self):
         fs = self._make_fs()
-        fs._call.return_value = {
+        fs.core.call.return_value = {
             "Versions": [{"Key": "key", "VersionId": "v1", "IsLatest": False}],
             "DeleteMarkers": [{"Key": "key", "VersionId": "m1", "IsLatest": True}],
             "IsTruncated": False,
@@ -6837,7 +6852,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         keys = ["a.csv", "a.csv.bak", "a.csv/x", "dir/", "dir/x", "dir2/y"]
         # S3 matches Prefix as a plain string prefix.
-        fs._call.side_effect = lambda _, **request: {
+        fs.core.call.side_effect = lambda _, **request: {
             "Versions": [
                 {"Key": k, "VersionId": f"v-{k}", "IsLatest": True}
                 for k in keys
@@ -6870,7 +6885,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         # "dir" is both a deleted object, with only a delete marker left, and
         # a folder.
-        fs._call.return_value = {
+        fs.core.call.return_value = {
             "Versions": [{"Key": "dir/x", "VersionId": "v1", "IsLatest": True}],
             "DeleteMarkers": [{"Key": "dir", "VersionId": "m1", "IsLatest": True}],
             "IsTruncated": False,
@@ -6882,7 +6897,7 @@ class TestS3FileSystem:
     def test_object_version_info_matches_url_encoded_keys(self):
         fs = self._make_fs()
         # With an explicit EncodingType="url", botocore leaves the keys encoded.
-        fs._call.return_value = {
+        fs.core.call.return_value = {
             "Versions": [
                 {"Key": "a+b", "VersionId": "v1", "IsLatest": True},
                 {"Key": "a+b.bak", "VersionId": "v2", "IsLatest": True},
@@ -6901,7 +6916,7 @@ class TestS3FileSystem:
     def test_ls_versions(self):
         fs = self._make_fs()
         fs.version_aware = True
-        fs._call.return_value = {
+        fs.core.call.return_value = {
             "CommonPrefixes": [{"Prefix": "path/dir/"}],
             "Versions": [
                 {"Key": "path/key", "VersionId": "v2", "IsLatest": True, "Size": 4},
@@ -6912,8 +6927,8 @@ class TestS3FileSystem:
         }
 
         actual = fs.ls("s3://bucket/path", detail=True, versions=True)
-        fs._call.assert_called_once_with(
-            fs._client.list_object_versions, Bucket="bucket", Prefix="path/", Delimiter="/"
+        fs.core.call.assert_called_once_with(
+            fs.core.client.list_object_versions, Bucket="bucket", Prefix="path/", Delimiter="/"
         )
         # GH-979: each version is named so that it can be addressed, except
         # the "null" version, which a write to the key replaces.
@@ -6942,7 +6957,7 @@ class TestS3FileSystem:
         # "bucket/path/dir/", as in a listing without versions.
         fs = self._make_fs()
         fs.version_aware = True
-        fs._call.return_value = {
+        fs.core.call.return_value = {
             "CommonPrefixes": [{"Prefix": "path/dir//"}],
             "IsTruncated": False,
         }
@@ -6952,7 +6967,7 @@ class TestS3FileSystem:
     def test_ls_versions_missing_path(self):
         fs = self._make_fs()
         fs.version_aware = True
-        fs._call.return_value = {"IsTruncated": False}
+        fs.core.call.return_value = {"IsTruncated": False}
 
         with pytest.raises(FileNotFoundError):
             fs.ls("s3://bucket/path/missing", versions=True)
@@ -6960,7 +6975,7 @@ class TestS3FileSystem:
     def test_ls_versions_object_path_falls_back_to_the_key(self):
         fs = self._make_fs()
         fs.version_aware = True
-        fs._call.side_effect = [
+        fs.core.call.side_effect = [
             # The prefix listing returns nothing: the path is an object.
             {"IsTruncated": False},
             {
@@ -6975,8 +6990,8 @@ class TestS3FileSystem:
         ]
 
         actual = fs.ls("s3://bucket/path/key", detail=True, versions=True)
-        fs._call.assert_any_call(
-            fs._client.list_object_versions, Bucket="bucket", Prefix="path/key", Delimiter="/"
+        fs.core.call.assert_any_call(
+            fs.core.client.list_object_versions, Bucket="bucket", Prefix="path/key", Delimiter="/"
         )
         assert [(f.name, f.version_id, f.size) for f in actual] == [
             ("bucket/path/key?versionId=v2", "v2", 4),
@@ -6986,7 +7001,7 @@ class TestS3FileSystem:
     def test_dir_filesystem(self):
         # DirFileSystem copies every entry with copy() before renaming it.
         fs = self._make_fs()
-        fs._call.return_value = {
+        fs.core.call.return_value = {
             "CommonPrefixes": [{"Prefix": "path/dir/"}],
             "Contents": [{"Key": "path/key", "Size": 4}],
             "IsTruncated": False,
@@ -7006,23 +7021,23 @@ class TestS3FileSystem:
         ]
         assert fs.info("bucket/path/key").name == "bucket/path/key"
         # info() answers from the cached listing.
-        fs._call.assert_called_once()
+        fs.core.call.assert_called_once()
 
     def test_metadata_with_version_id(self):
         fs = self._make_fs()
-        fs._call.return_value = {"Metadata": {}}
+        fs.core.call.return_value = {"Metadata": {}}
 
         assert fs.metadata("s3://bucket/key?versionId=12345abcde") == {}
-        fs._call.assert_called_once_with(
-            fs._client.head_object, Bucket="bucket", Key="key", VersionId="12345abcde"
+        fs.core.call.assert_called_once_with(
+            fs.core.client.head_object, Bucket="bucket", Key="key", VersionId="12345abcde"
         )
 
     def test_chmod_object(self):
         fs = self._make_fs()
 
         fs.chmod("s3://bucket/key", "bucket-owner-full-control")
-        fs._call.assert_called_once_with(
-            fs._client.put_object_acl,
+        fs.core.call.assert_called_once_with(
+            fs.core.client.put_object_acl,
             Bucket="bucket",
             Key="key",
             ACL="bucket-owner-full-control",
@@ -7032,7 +7047,9 @@ class TestS3FileSystem:
         fs = self._make_fs()
 
         fs.chmod("s3://bucket", "private")
-        fs._call.assert_called_once_with(fs._client.put_bucket_acl, Bucket="bucket", ACL="private")
+        fs.core.call.assert_called_once_with(
+            fs.core.client.put_bucket_acl, Bucket="bucket", ACL="private"
+        )
 
     @pytest.mark.parametrize(
         ("keys", "path", "expected"),
@@ -7061,14 +7078,14 @@ class TestS3FileSystem:
         # The (key, version ID) of the objects updated.
         updated = [
             (c.kwargs["Key"], c.kwargs.get("VersionId"))
-            for c in fs._call.call_args_list
-            if c.args[0] is fs._client.put_object_acl and c.kwargs["Key"] in keys
+            for c in fs.core.call.call_args_list
+            if c.args[0] is fs.core.client.put_object_acl and c.kwargs["Key"] in keys
         ]
         assert sorted(updated) == expected
         assert all(
             (c.kwargs["Bucket"], c.kwargs["ACL"]) == ("bucket", "private")
-            for c in fs._call.call_args_list
-            if c.args[0] is fs._client.put_object_acl
+            for c in fs.core.call.call_args_list
+            if c.args[0] is fs.core.client.put_object_acl
         )
 
     def test_chmod_recursive_failure_stops_running_requests(self):
@@ -7140,17 +7157,17 @@ class TestS3FileSystem:
     def test_put_tags_merge(self):
         # The tags of the given version are read and replaced.
         fs = self._make_fs()
-        fs._call.side_effect = [
+        fs.core.call.side_effect = [
             {"TagSet": [{"Key": "a", "Value": "1"}, {"Key": "b", "Value": "2"}]},
             {},
         ]
 
         fs.put_tags("s3://bucket/key?versionId=v1", {"b": "3", "c": "4"}, mode="m")
         request = {"Bucket": "bucket", "Key": "key", "VersionId": "v1"}
-        assert fs._call.call_args_list == [
-            mock.call(fs._client.get_object_tagging, **request),
+        assert fs.core.call.call_args_list == [
+            mock.call(fs.core.client.get_object_tagging, **request),
             mock.call(
-                fs._client.put_object_tagging,
+                fs.core.client.put_object_tagging,
                 **request,
                 Tagging={
                     "TagSet": [
@@ -7165,7 +7182,7 @@ class TestS3FileSystem:
     def test_list_multipart_uploads_paginates(self):
         # The uploads of every page are returned.
         fs = self._make_fs()
-        fs._call.side_effect = [
+        fs.core.call.side_effect = [
             {
                 "Uploads": [{"Key": "key1", "UploadId": "upload1"}],
                 "IsTruncated": True,
@@ -7198,7 +7215,7 @@ class TestS3FileSystem:
         aborted = []
 
         def call(method, **request):
-            if method is fs._client.abort_multipart_upload:
+            if method is fs.core.client.abort_multipart_upload:
                 aborted.append(request["Key"])
                 return {}
             # S3 matches Prefix as a plain string prefix.
@@ -7211,7 +7228,7 @@ class TestS3FileSystem:
                 "IsTruncated": False,
             }
 
-        fs._call.side_effect = call
+        fs.core.call.side_effect = call
 
         assert [u.key for u in fs.list_multipart_uploads(path)] == expected
         fs.clear_multipart_uploads(path)
@@ -8471,7 +8488,7 @@ class TestS3FileSystem:
     def test_setxattr_omits_unset_system_metadata(self):
         # S3 omits StorageClass for STANDARD objects; unset headers are not sent.
         fs = self._stubbed_fs()
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stubber.add_response(
                 "head_object", {"ContentLength": 1}, {"Bucket": "bucket", "Key": "key"}
             )
@@ -8499,7 +8516,7 @@ class TestS3FileSystem:
         # object with it, so a version path is rejected without requests.
         fs = self._stubbed_fs()
         with (
-            Stubber(fs._client),
+            Stubber(fs.core.client),
             pytest.raises(ValueError, match="Cannot set metadata of a version"),
         ):
             fs.setxattr(path, a="1")
@@ -8526,7 +8543,7 @@ class TestS3FileSystem:
         # SSE-C object without its key, and 403 to one of a requester-pays
         # object without RequestPayer.
         fs = self._stubbed_fs()
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stubber.add_response(
                 "head_object",
                 {"ContentLength": 1},
@@ -8548,7 +8565,7 @@ class TestS3FileSystem:
     def test_mv_source_lookup_and_delete_params(self):
         # GH-1333: see stub_move_with_source_params.
         fs = self._stubbed_fs()
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stub_move_with_source_params(stubber)
             # One copy at a time, in the order of the stubbed responses.
             fs.mv(
@@ -8564,7 +8581,7 @@ class TestS3FileSystem:
         # of the copy, which S3 requires to read an SSE-C object.
         fs = self._stubbed_fs()
         copy_kwargs = {**self.COPY_SOURCE_SSE_C, **self.SOURCE_SSE_C}
-        with Stubber(fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stubber.add_response(
                 "head_object",
                 {"ContentLength": 1},
@@ -8930,7 +8947,7 @@ class TestS3File:
         assert file.closed
         assert file.buffer is None
         assert file.multipart_upload is None
-        fs._call.assert_called_once_with(
+        fs.core.call.assert_called_once_with(
             S3_CLIENT.abort_multipart_upload,
             Bucket="bucket",
             Key="key.txt",
@@ -8940,7 +8957,7 @@ class TestS3File:
         # GH-1211: the discarded write is not committed.
         with pytest.raises(S3MultipartStateError):
             file.commit()
-        fs._call.assert_called_once()
+        fs.core.call.assert_called_once()
         fs.core.upload_part.assert_not_called()
         fs.core.upload_part_copy.assert_not_called()
         fs.core.complete_multipart_upload.assert_not_called()
@@ -8972,7 +8989,7 @@ class TestS3File:
         assert file.multipart_upload is None
         executor.shutdown.assert_called_once()
         fs.core.create_multipart_upload.assert_not_called()
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
         with pytest.raises(S3MultipartStateError):
             file.commit()
         fs.core.put_object.assert_not_called()
@@ -8986,7 +9003,7 @@ class TestS3File:
         # the abort.
         fs = self._make_append_fs(b"a" * 6 if operation == "append" else b"")
         events = []
-        fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
+        fs.core.call.side_effect = lambda *args, **kwargs: events.append("abort")
         executor = S3ThreadPool(max_workers=2)
         submit = executor.submit
         submitted = []
@@ -9072,7 +9089,7 @@ class TestS3File:
         assert file.closed
         assert file.buffer is None
         assert file.multipart_upload is None
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
         with pytest.raises(S3MultipartStateError, match="The first failure: PermissionError"):
             file.commit()
         fs.core.put_object.assert_not_called()
@@ -9115,7 +9132,7 @@ class TestS3File:
             release.set()
             assert await asyncio.to_thread(finished.wait, 5)
         fs.core.complete_multipart_upload.assert_called_once()
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
         assert file.closed
 
     @staticmethod
@@ -9123,11 +9140,10 @@ class TestS3File:
         # A mocked filesystem that selects the request parameters of each
         # operation as the real one does.
         fs = mock.MagicMock(spec=S3FileSystem)
-        fs._client = S3_CLIENT
         fs.core = S3Core(S3_CLIENT)
-        # The requests of the core go to the mocked _call, and the
-        # uploads whose results the tests build are mocked.
-        fs.core.call = fs._call
+        # The requests of the core go to a mock, and the uploads whose
+        # results the tests build are mocked.
+        fs.core.call = mock.MagicMock()
         for name in (
             "put_object",
             "create_multipart_upload",
@@ -9412,7 +9428,7 @@ class TestS3File:
         fs.version_aware = False
         with S3File(fs, "s3://bucket/key.txt", mode="rb") as f:
             f.commit()
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize(
         ("writes", "block_size"),
@@ -9521,7 +9537,7 @@ class TestS3File:
             with pytest.raises(S3MultipartStateError):
                 f.commit()
         assert [n for n, _ in self._parts(fs, existing) if n > 3] == []
-        fs._call.assert_called_once_with(
+        fs.core.call.assert_called_once_with(
             S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
         )
         fs.core.complete_multipart_upload.assert_not_called()
@@ -9632,7 +9648,7 @@ class TestS3File:
         assert all(
             c.kwargs["part_number"] <= max_workers for c in fs.core.upload_part.call_args_list
         )
-        fs._call.assert_called_once_with(
+        fs.core.call.assert_called_once_with(
             S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
         )
         assert f.closed
@@ -9642,7 +9658,7 @@ class TestS3File:
         f.close()
         with pytest.raises(S3MultipartStateError):
             f.commit()
-        fs._call.assert_called_once()
+        fs.core.call.assert_called_once()
         fs.core.complete_multipart_upload.assert_not_called()
 
     @pytest.mark.parametrize("autocommit", [True, False])
@@ -9682,7 +9698,7 @@ class TestS3File:
             with pytest.raises(RuntimeError, match="part failed"):
                 f.commit()
 
-        fs._call.assert_called_once_with(
+        fs.core.call.assert_called_once_with(
             S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
         )
         fs.core.complete_multipart_upload.assert_not_called()
@@ -9732,7 +9748,7 @@ class TestS3File:
         assert events == ([] if max_workers == 1 else ["part 2 ended"])
         # The abort stopped the retries of the part.
         assert part.calls == (0 if max_workers == 1 else 1)
-        fs._call.assert_called_once_with(
+        fs.core.call.assert_called_once_with(
             S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
         )
         fs.core.complete_multipart_upload.assert_not_called()
@@ -9792,7 +9808,7 @@ class TestS3File:
 
         f.discard()
 
-        fs._call.assert_called_once_with(
+        fs.core.call.assert_called_once_with(
             S3_CLIENT.abort_multipart_upload,
             Bucket="bucket",
             Key="key.txt",
@@ -9857,7 +9873,7 @@ class TestS3File:
         f.commit()
         fs.core.put_object.assert_called_once_with(S3Path("bucket", "key.txt"), data)
         fs.core.create_multipart_upload.assert_not_called()
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     def test_upload_chunk_empty_file(self):
         # An intentionally empty file (tell() == 0) is created with a
@@ -9880,10 +9896,10 @@ class TestS3File:
         file.discard()
 
         if multipart:
-            file.fs._call.assert_called_once()
-            assert file.fs._call.call_args.args[0] == S3_CLIENT.abort_multipart_upload
+            file.fs.core.call.assert_called_once()
+            assert file.fs.core.call.call_args.args[0] == S3_CLIENT.abort_multipart_upload
         else:
-            file.fs._call.assert_not_called()
+            file.fs.core.call.assert_not_called()
         assert file.multipart_upload is None
         assert file.completed_parts == ()
         # GH-1211: a discarded write is not committed afterwards. The buffered
@@ -9894,7 +9910,7 @@ class TestS3File:
         file.fs.core.complete_multipart_upload.assert_not_called()
         # Discarding again does nothing.
         file.discard()
-        assert file.fs._call.call_count == int(multipart)
+        assert file.fs.core.call.call_count == int(multipart)
 
     def test_discard_waits_for_running_parts(self):
         # GH-976: a part that is still uploading when the upload is aborted
@@ -9902,7 +9918,7 @@ class TestS3File:
         # parts that have not started are cancelled.
         file = self._make_multipart_write_file(b"x" * 8, autocommit=False)
         events = []
-        file.fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
+        file.fs.core.call.side_effect = lambda *args, **kwargs: events.append("abort")
         started, waited_for, file.fs.core.upload_part.side_effect = (
             self._part_held_until_waited_for(file, events)
         )
@@ -9929,7 +9945,7 @@ class TestS3File:
         file._upload_chunk(final=True)
         file.fs.core.complete_multipart_upload.side_effect = KeyboardInterrupt("complete failed")
         if abort_fails:
-            file.fs._call.side_effect = [PermissionError("abort failed"), None]
+            file.fs.core.call.side_effect = [PermissionError("abort failed"), None]
 
         # The original error propagates, not the failure of the abort.
         with pytest.raises(KeyboardInterrupt, match="complete failed"):
@@ -9947,7 +9963,7 @@ class TestS3File:
         file.fs.core.put_object.assert_not_called()
         file.discard()
 
-        assert file.fs._call.call_args_list == [
+        assert file.fs.core.call.call_args_list == [
             mock.call(
                 S3_CLIENT.abort_multipart_upload,
                 Bucket="bucket",
@@ -9967,7 +9983,7 @@ class TestS3File:
             b"x" * 16, autocommit=False, executor=S3ThreadPool(max_workers=2)
         )
         events = []
-        file.fs._call.side_effect = lambda *args, **kwargs: events.append("abort")
+        file.fs.core.call.side_effect = lambda *args, **kwargs: events.append("abort")
         first, retrying_first = self._retrying_part(events)
         third, retrying_third = self._retrying_part(events)
         fail = threading.Event()
@@ -10014,7 +10030,7 @@ class TestS3File:
         file = self._make_multipart_write_file(b"x" * 16, autocommit=False, executor=executor)
         file._upload_chunk(final=True)
         file.fs.core.complete_multipart_upload.side_effect = RuntimeError("complete failed")
-        file.fs._call.side_effect = [KeyboardInterrupt, None]
+        file.fs.core.call.side_effect = [KeyboardInterrupt, None]
 
         with pytest.raises(KeyboardInterrupt):
             file.commit()
@@ -10027,7 +10043,7 @@ class TestS3File:
         file.fs.core.complete_multipart_upload.assert_called_once()
         file.discard()
 
-        assert file.fs._call.call_count == 2
+        assert file.fs.core.call.call_count == 2
         assert file.multipart_upload is None
         assert file.completed_parts == ()
 
@@ -10274,7 +10290,7 @@ class TestS3File:
         # first is discarded, instead of committed without the buffered data.
         fs = self._make_append_fs(b"")
         aborted = threading.Event()
-        fs._call.side_effect = lambda *args, **kwargs: aborted.set()
+        fs.core.call.side_effect = lambda *args, **kwargs: aborted.set()
         gc.disable()
         try:
             f = S3File(fs, "s3://bucket/key.txt", mode="wb", block_size=4)
@@ -10289,7 +10305,7 @@ class TestS3File:
         finally:
             gc.enable()
             shutdown_bounded(fs._request_pool)
-        fs._call.assert_called_once_with(
+        fs.core.call.assert_called_once_with(
             S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
         )
         fs.core.complete_multipart_upload.assert_not_called()
@@ -10407,7 +10423,7 @@ class TestS3File:
             release.set()
             shutdown_bounded(fs._request_pool)
         if method == "discard":
-            fs._call.assert_called_once_with(
+            fs.core.call.assert_called_once_with(
                 S3_CLIENT.abort_multipart_upload,
                 Bucket="bucket",
                 Key="key.txt",
@@ -10604,7 +10620,7 @@ class TestS3File:
             raise OSError("part failed")
 
         fs.core.upload_part.side_effect = fail_part
-        fs._call.side_effect = lambda *args, **kwargs: aborted.set()
+        fs.core.call.side_effect = lambda *args, **kwargs: aborted.set()
 
         class Writer:
             def __init__(self, file):
@@ -10632,7 +10648,7 @@ class TestS3File:
             gc.enable()
             shutdown_bounded(fs._request_pool)
         assert len(errors) == 1
-        fs._call.assert_called_once_with(
+        fs.core.call.assert_called_once_with(
             S3_CLIENT.abort_multipart_upload, Bucket="bucket", Key="key.txt", UploadId="uploadid"
         )
         fs.core.complete_multipart_upload.assert_not_called()
@@ -10657,7 +10673,7 @@ class TestS3File:
         f.commit()
         assert self._uploaded_object(fs, b"") == b"".join(writes)
         fs.core.put_object.assert_not_called()
-        fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
 
 class TestCompressedBuffer:

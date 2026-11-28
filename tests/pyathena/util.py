@@ -1958,6 +1958,6 @@ def serve_s3_keys(fs, keys):
             requests.append(("generate_presigned_url", {"args": args, **kwargs}))
         return "https://signed"
 
-    fs._call = fs._core.call = call
+    fs.core.call = call
     fs.core.generate_presigned_url = generate_presigned_url
     return store, requests
