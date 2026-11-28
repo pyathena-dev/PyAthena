@@ -601,7 +601,14 @@ With `version_aware=True`, reads pin the object version observed at open time, s
 file handle keeps returning consistent data even if the object is overwritten while
 reading. The file path carries the pinned version as a `?versionId=` suffix, which
 `metadata()`, `getxattr()` and `url()` of the file also use. Explicit versions can
-always be read with the `?versionId=` suffix or the `version_id` argument. Only a
+always be read with the `?versionId=` suffix or the `version_id` argument.
+`open()` in read mode, `get_file()` and `cat_file()` also read the version that a
+non-empty `VersionId` parameter names when the suffix and `version_id` name none;
+`open()` and `get_file()` raise `ValueError` if they name another version. When neither
+names a version, an empty `VersionId` is sent as given, also instead of the version
+that `version_aware` pins. A file opened for writing drops the parameter, which its
+requests do not accept.
+Only a
 `?versionId=` (or `?versionID=`, `?versionid=`, `?version_id=`) query at the end of a
 path is a version; any other `?` is part of the key. A path with a version is not a
 glob pattern: `copy()`, `mv()` and `get()` copy that version to a destination named

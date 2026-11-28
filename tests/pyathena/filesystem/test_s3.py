@@ -3599,6 +3599,26 @@ class TestS3FileSystem:
         expected = {f"{tmp_path}/out/{name}" for name in ("data", "f1", "f2")}
         assert destinations == (set() if conflict else expected)
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"version_id": "v1"},
+            {"VersionId": "v1"},
+            {"s3_additional_kwargs": {"VersionId": "v1"}},
+        ],
+    )
+    def test_get_versions_with_one_destination(self, tmp_path, kwargs):
+        # GH-1437: get_file() reads a version of a source, also one that a
+        # VersionId parameter names, as an object, not as a directory, so
+        # sources with one local path conflict.
+        fs = self._make_fs()
+        self._serve_keys(fs, {"p1/data/f1", "p2/data/f2"})
+        fs.get_file = mock.MagicMock()
+
+        with pytest.raises(ValueError, match="same destination"):
+            fs.get(["s3://bucket/p1/data", "s3://bucket/p2/data"], f"{tmp_path}/out/", **kwargs)
+        fs.get_file.assert_not_called()
+
     def test_put_directories_with_one_destination(self, tmp_path):
         # GH-1398: put_file() uploads nothing for a local directory, so
         # directories with one destination do not conflict. They used to.
@@ -4865,7 +4885,7 @@ class TestS3FileSystem:
             assert f.version_id == "v1"
             # The size is that of the requested version, not the latest one.
             assert f.size == 4
-        fs._info_entry.assert_called_once_with("bucket/key?versionId=v1", version_id="v1")
+        fs._info_entry.assert_called_once_with(S3Path("bucket", "key", "v1"), version_id="v1")
         # The version is carried in the path, which fsspec reopens an
         # unpickled file with.
         assert f.path == "bucket/key?versionId=v1"
@@ -4873,6 +4893,128 @@ class TestS3FileSystem:
         # The argument must match the version in the path.
         with pytest.raises(ValueError, match="do not match"):
             fs.open("s3://bucket/key?versionId=v2", "rb", version_id="v1")
+
+    @staticmethod
+    def _serve_object_version(fs, version, data=b"data"):
+        # Answer HeadObject and GetObject with data at the given version of
+        # s3://bucket/key and an empty current version, recording the
+        # requests by operation name.
+        requests = []
+
+        def call(method, **request):
+            requests.append((method._extract_mock_name().split(".")[-1], request))
+            if request.get("VersionId") == version:
+                if "Range" in request:
+                    return {"Body": io.BytesIO(data)}
+                return {"ContentLength": len(data), "ETag": '"v1"', "VersionId": version}
+            return {"ContentLength": 0, "ETag": '"current"'}
+
+        fs.core.call.side_effect = call
+        return requests
+
+    @pytest.mark.parametrize(
+        ("path", "kwargs", "version"),
+        [
+            ("s3://bucket/key", {"VersionId": "v1"}, "v1"),
+            ("s3://bucket/key", {"VersionId": "v1", "version_id": "v1"}, "v1"),
+            ("s3://bucket/key?versionId=v1", {"VersionId": "v1"}, "v1"),
+            ("s3://bucket/key", {"s3_additional_kwargs": {"VersionId": "v1"}}, "v1"),
+            # A version that ends in a slash is looked up as it is read. The
+            # lookup of the path string dropped the slash.
+            ("s3://bucket/key", {"VersionId": "v1/"}, "v1/"),
+            ("s3://bucket/key", {"version_id": "v1/"}, "v1/"),
+        ],
+    )
+    def test_open_version_id_parameter(self, path, kwargs, version):
+        # GH-1437: a VersionId parameter names the version that is looked up,
+        # as version_id does. The lookup sized the file by the current
+        # version, which is empty here, so the read returned b"".
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        requests = self._serve_object_version(fs, version)
+
+        with fs.open(path, "rb", **kwargs) as f:
+            assert f.read() == b"data"
+        assert requests == [
+            ("head_object", {"Bucket": "bucket", "Key": "key", "VersionId": version}),
+            (
+                "get_object",
+                {
+                    "Bucket": "bucket",
+                    "Key": "key",
+                    "VersionId": version,
+                    "IfMatch": '"v1"',
+                    "Range": "bytes=0-3",
+                },
+            ),
+        ]
+        assert f.path == f"bucket/key?versionId={version}"
+
+    def test_open_version_id_parameter_reopens_the_version(self):
+        # GH-1437: a reopened (e.g., unpickled) file is given the VersionId
+        # parameter again, which takes precedence over one of the filesystem
+        # as when it was opened.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.s3_additional_kwargs = {"VersionId": "v0"}
+        requests = self._serve_object_version(fs, "v1")
+
+        with fs.open("s3://bucket/key", "rb", VersionId="v1") as f:
+            reopen, args = f.__reduce__()
+        requests.clear()
+        with reopen(*args) as reopened:
+            assert reopened.read() == b"data"
+        assert {r["VersionId"] for _, r in requests} == {"v1"}
+
+    def test_open_empty_version_id_parameter_is_sent(self):
+        # GH-1437: an empty VersionId parameter is sent as given, as
+        # cat_file() sends it, instead of the version that version_aware
+        # pins.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        fs.version_aware = True
+        requests = []
+
+        def call(method, **request):
+            requests.append((method._extract_mock_name().split(".")[-1], request))
+            if "Range" in request:
+                return {"Body": io.BytesIO(b"data")}
+            return {"ContentLength": 4, "ETag": '"e"', "VersionId": "v2"}
+
+        fs.core.call.side_effect = call
+
+        with fs.open("s3://bucket/key", "rb", VersionId="") as f:
+            f.read()
+        assert f.path == "bucket/key"
+        assert [r.get("VersionId") for name, r in requests if name == "get_object"] == [""]
+
+    @pytest.mark.parametrize(
+        ("path", "kwargs"),
+        [
+            ("s3://bucket/key", {"VersionId": "v1", "version_id": "v2"}),
+            ("s3://bucket/key?versionId=v2", {"VersionId": "v1"}),
+        ],
+    )
+    def test_open_version_id_parameter_mismatch(self, path, kwargs):
+        # GH-1437: a VersionId parameter must match the other forms of the
+        # version, as version_id must match the path; no request is sent.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+
+        with pytest.raises(ValueError, match="do not match"):
+            fs.open(path, "rb", **kwargs)
+        fs.core.call.assert_not_called()
+
+    def test_open_write_drops_version_id_parameter(self):
+        # GH-1437: the write requests do not accept a VersionId parameter,
+        # which a write drops, as before.
+        fs = self._make_fs()
+        fs.default_cache_type = "bytes"
+        requests = self._serve_object_version(fs, "v1")
+
+        with fs.open("s3://bucket/key", "wb", VersionId="v1") as f:
+            f.write(b"x")
+        assert [(name, "VersionId" in r) for name, r in requests] == [("put_object", False)]
 
     def test_open_version_aware_pins_version_in_path(self):
         # GH-979: the version observed at open time is carried in the path as
@@ -5730,6 +5872,37 @@ class TestS3FileSystem:
         fs.get_file(rpath, str(lpath), **kwargs)
         assert lpath.read_bytes() == b"data"
         assert fs._info_entry.call_count == 1
+
+    @pytest.mark.parametrize(
+        ("rpath", "kwargs", "fs_params"),
+        [
+            # The suffix is kept when the source is opened.
+            ("s3://bucket/key?versionId=v1", {}, {}),
+            ("s3://bucket/key", {"version_id": "v1"}, {}),
+            ("s3://bucket/key", {"VersionId": "v1"}, {}),
+            ("s3://bucket/key", {"s3_additional_kwargs": {"VersionId": "v1"}}, {}),
+            ("s3://bucket/key", {}, {"VersionId": "v1"}),
+        ],
+    )
+    def test_get_file_version_of_a_prefix(self, tmp_path, rpath, kwargs, fs_params):
+        # GH-1437: a requested version is downloaded, also one that a
+        # VersionId parameter of the file names, as open() reads it, when the
+        # latest name is a prefix. get_file() created a local directory.
+        fs, _ = self._make_object_fs(b"data")
+        fs.s3_additional_kwargs = fs_params
+        version = self._file_object("key")
+        version.size = 4
+
+        def info_entry(path, version_id=None, **_kwargs):
+            if version_id or S3Path.of(path).version_id:
+                return version
+            return S3FileSystem._directory_object("bucket", "key")
+
+        fs._info_entry.side_effect = info_entry
+        lpath = tmp_path / "key"
+
+        fs.get_file(rpath, str(lpath), **kwargs)
+        assert lpath.read_bytes() == b"data"
 
     def test_get_file_file_like(self, tmp_path):
         # GH-974: a file-like lpath used to raise TypeError, and outfile was
