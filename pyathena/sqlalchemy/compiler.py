@@ -1019,13 +1019,14 @@ class AthenaStatementCompiler(SQLCompiler):
     def visit_truediv_binary(self, binary, operator, **kw):
         """Render true division with explicit Athena numeric coercions.
 
-        A FLOAT operand makes both operands DOUBLE. Otherwise, in a division with
-        a DECIMAL operand, an operand typed DECIMAL with a precision is cast to
-        ``DECIMAL(38, scale)`` with its own scale, since Athena reads a decimal
-        literal as DOUBLE, and the widest precision keeps the cast from
-        overflowing. Bind parameters, whose formatted values keep their own
-        scale, and other operands are left as they are. An INTEGER divisor of an
-        INTEGER dividend is made DOUBLE.
+        A FLOAT operand makes both operands DOUBLE.
+        Otherwise, in a division with a DECIMAL operand, each operand typed DECIMAL
+        with a precision is cast to ``DECIMAL(38, scale)`` with its own scale.
+        The cast keeps a decimal literal from being read as DOUBLE, and the widest
+        precision keeps it from overflowing.
+        Bind parameters, whose formatted values keep their own scale, and other
+        operands are left as they are.
+        An INTEGER divisor of an INTEGER dividend is made DOUBLE.
 
         Args:
             binary: The division expression.
@@ -1047,8 +1048,16 @@ class AthenaStatementCompiler(SQLCompiler):
             )
 
         if isinstance(left_type, types.Numeric) or isinstance(right_type, types.Numeric):
-            operands = []
-            for operand in (binary.left, binary.right):
+
+            def decimal_operand(operand):
+                """Render an operand, cast to ``DECIMAL(38, scale)`` if it has a precision.
+
+                Args:
+                    operand: The left or right operand of the division.
+
+                Returns:
+                    The operand SQL.
+                """
                 operand_type = operand.type
                 if (
                     isinstance(operand_type, types.Numeric)
@@ -1056,8 +1065,9 @@ class AthenaStatementCompiler(SQLCompiler):
                     and not isinstance(operand, BindParameter)
                 ):
                     operand = Cast(operand, types.DECIMAL(38, operand_type.scale or 0))
-                operands.append(self.process(operand, **kw))
-            return " / ".join(operands)
+                return self.process(operand, **kw)
+
+            return decimal_operand(binary.left) + " / " + decimal_operand(binary.right)
 
         if isinstance(left_type, types.Integer) and isinstance(right_type, types.Integer):
             return (

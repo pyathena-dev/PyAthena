@@ -786,10 +786,9 @@ The `/` operator performs true division.
 |---|---|
 | `Integer` and `Integer` | `a / CAST(b AS DOUBLE)` |
 | A `Float` operand | `CAST(a AS DOUBLE) / CAST(b AS DOUBLE)` |
-| Otherwise, a `Numeric` operand | `CAST(a AS DECIMAL(38, s)) / b` for `a` typed `Numeric(p, s)` |
+| Otherwise, a `Numeric` operand | `CAST(a AS DECIMAL(38, s)) / b` for `a` typed `Numeric(p, s)` or `DECIMAL(p, s)` |
 
-In a `Numeric` division, an operand typed `Numeric` or `DECIMAL` with a precision is cast to `DECIMAL(38, s)` with its own scale `s`.
-Bind parameters keep the scale of their values, such as `DECIMAL '1.2345'`, and other operands are left as they are.
+Bind parameters keep the scale of their values, such as `DECIMAL '1.2345'`, and other operands, such as integers, are left as they are.
 The quotient's scale is the larger scale of the two operands.
 A quotient of two operands with scale 0, such as `DECIMAL '5' / DECIMAL '2'`, is rounded to an integer.
 Athena reads a decimal literal such as `5.52` as `DOUBLE`, so an operand typed `Numeric` without a precision, such as `literal_column("5.52", Numeric())`, divides as `DOUBLE`.

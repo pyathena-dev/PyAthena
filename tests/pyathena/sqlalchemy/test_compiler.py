@@ -280,15 +280,9 @@ class TestAthenaStatementCompiler:
                 "SELECT 15 / CAST(10 AS DOUBLE) AS anon_1",
             ),
             (
-                literal_column("5.52", type_=Numeric(10, 2))
+                literal_column("5.52", type_=types.DECIMAL(10, 2))
                 / literal_column("2.4", type_=Numeric(10, 4)),
                 "SELECT CAST(5.52 AS DECIMAL(38, 2)) / CAST(2.4 AS DECIMAL(38, 4)) AS anon_1",
-            ),
-            (
-                # SQLAlchemy types this division DECIMAL without a precision.
-                literal_column("5.52", type_=types.DECIMAL(10, 2))
-                / literal_column("2.4", type_=types.DECIMAL(10, 2)),
-                "SELECT CAST(5.52 AS DECIMAL(38, 2)) / CAST(2.4 AS DECIMAL(38, 2)) AS anon_1",
             ),
             (
                 literal_column("5.52", type_=Numeric(10, 2)) / literal_column("2", type_=Integer()),
