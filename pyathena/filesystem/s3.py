@@ -2599,10 +2599,8 @@ class S3FileSystem(AbstractFileSystem):
                 region_name=kwargs.pop("region_name", None),
                 **self.core.operation_params("create_bucket", kwargs),
             )
-            # The new bucket is empty, so the entries cached below the bucket
-            # before another client deleted it are stale, and so is the
-            # bucket listing. invalidate_cache() of the bucket evicts neither,
-            # and is still called for the subclasses that override it.
+            # invalidate_cache() is still called for the subclasses that
+            # override it.
             self._listing_cache.evict_bucket(s3_path.bucket)
             self.invalidate_cache(s3_path.bucket)
         else:
@@ -2671,15 +2669,12 @@ class S3FileSystem(AbstractFileSystem):
         try:
             self.core.delete_bucket(s3_path.bucket)
         except FileNotFoundError:
-            # The bucket does not exist, so no entry cached of it or below it
-            # is valid.
+            # NoSuchBucket: the entries cached of the bucket are stale too.
             self._listing_cache.evict_bucket(s3_path.bucket)
             raise
+        # invalidate_cache() is still called for the subclasses that override
+        # it.
         self.invalidate_cache(s3_path.bucket)
-        # S3 deletes only an empty bucket, so the entries cached below the
-        # bucket are stale, and so is the bucket listing. invalidate_cache()
-        # of the bucket, which is called for the subclasses that override
-        # it, evicts neither.
         self._listing_cache.evict_bucket(s3_path.bucket)
 
     def touch(
