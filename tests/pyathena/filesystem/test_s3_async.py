@@ -2712,12 +2712,19 @@ class TestAioS3FileSystem:
             def __init__(self):
                 super().__init__()
                 self.sizes = []
+                self.used = False
 
             def set_size(self, size):
+                self.used = True
                 self.sizes.append(size)
                 super().set_size(size)
 
+            def relative_update(self, inc=1):
+                self.used = True
+                super().relative_update(inc)
+
             def branch_coro(self, fn):
+                self.used = True
                 run = super().branch_coro(fn)
 
                 async def wrapped(path1, path2, **kwargs):
@@ -2729,6 +2736,7 @@ class TestAioS3FileSystem:
         result = await await_bounded(call(fs, tmp_path, callback))
         assert result == expected
         assert callback.sizes == sizes
+        assert callback.used is (expected is not None)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

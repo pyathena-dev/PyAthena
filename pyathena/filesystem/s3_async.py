@@ -880,18 +880,20 @@ class AioS3FileSystem(AsyncFileSystem):
             The results of the downloads in the order of the pairs, as in
             fsspec: those of the ``_get_file()`` calls as the callback's
             ``branch_coro()`` returns them. None, without a use of the
-            callback, when ``rpath`` is one path, a string or an
-            ``os.PathLike`` object used as its string, copied without
-            ``recursive``, or with ``maxdepth``, and names only directories;
-            fsspec returns None there only for a string.
+            callback, when ``rpath`` is one path, a string or an object
+            that fsspec's ``stringify_path`` converts to one, such as an
+            ``os.PathLike`` object, copied without ``recursive``, or with
+            ``maxdepth``, and names only directories; fsspec returns None
+            there only for a string.
 
         Raises:
             ValueError: If a destination named after a source lies outside
                 ``lpath``, or two downloads write the same local file.
         """
         rpath = self._sync_fs._stringify_paths(rpath)
-        # A path-like source is paired as its string, as are those of the
-        # other methods, so it returns what its string returns.
+        # A source converted to a string, such as a path-like one, is paired
+        # as its string, as in the other methods, so it returns what its
+        # string returns.
         source_is_str = isinstance(rpath, str)
         pairs = await self._thread_pool.run(
             self._sync_fs._checked_get_pairs,
@@ -960,10 +962,11 @@ class AioS3FileSystem(AsyncFileSystem):
             The results of the uploads in the order of the local files, as in
             fsspec: those of the ``_put_file()`` calls as the callback's
             ``branch_coro()`` returns them. None, without a use of the
-            callback, when ``lpath`` is one path, a string or an
-            ``os.PathLike`` object used as its string, copied without
-            ``recursive``, or with ``maxdepth``, and names only directories;
-            fsspec returns None there only for a string.
+            callback, when ``lpath`` is one path, a string or an object
+            that fsspec's ``stringify_path`` converts to one, such as an
+            ``os.PathLike`` object, copied without ``recursive``, or with
+            ``maxdepth``, and names only directories; fsspec returns None
+            there only for a string.
 
         Raises:
             ValueError: If two files have the same destination, or the
@@ -971,7 +974,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 ``rpath`` names one and the file is named below it.
         """
         lpath, rpath = self._sync_fs._stringify_paths(lpath), self._sync_fs._stringify_paths(rpath)
-        # As in _get(), a path-like source returns what its string returns.
+        # As in _get(), a converted source returns what its string returns.
         source_is_str = isinstance(lpath, str)
         # The local directories, which upload nothing, are left out in the
         # thread, as fsspec's _put() leaves them out.
