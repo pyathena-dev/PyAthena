@@ -1620,12 +1620,7 @@ class AioS3FileSystem(AsyncFileSystem):
             found = await super()._glob(
                 stripped.rstrip("/"), maxdepth=maxdepth, detail=True, **kwargs
             )
-            directories = {
-                name: info
-                for name, info in found.items()
-                if info["type"] == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
-            }
-            return directories if detail else list(directories)
+            return S3FileSystem._glob_directories(found, detail)
         return await super()._glob(stringify_path(path), maxdepth=maxdepth, **kwargs)
 
     def walk(self, path, maxdepth=None, topdown=True, on_error="omit", **kwargs):
@@ -1879,10 +1874,8 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         if isinstance(path, list):
             return [cls._strip_protocol(p) for p in path]
-        stripped = super()._strip_protocol(path)
-        name, _ = S3Path.split_trailing_separators(stringify_path(path))
-        # The slashes of a version ID, which fsspec strips.
-        return stripped + name[len(name.rstrip("/")) :]
+        # fsspec strips the slashes of a version ID too.
+        return super()._strip_protocol(path) + S3Path.version_separators(stringify_path(path))
 
     @classmethod
     def _parent(cls, path):

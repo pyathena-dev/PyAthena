@@ -1827,13 +1827,28 @@ class S3FileSystem(AbstractFileSystem):
             # fsspec matches a pattern that ends in a slash.
             detail = kwargs.pop("detail", False)
             found = super().glob(stripped.rstrip("/"), maxdepth=maxdepth, detail=True, **kwargs)
-            directories = {
-                name: info
-                for name, info in found.items()
-                if info["type"] == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
-            }
-            return directories if detail else list(directories)
+            return self._glob_directories(found, detail)
         return super().glob(stringify_path(path), maxdepth=maxdepth, **kwargs)
+
+    @staticmethod
+    def _glob_directories(found: dict[str, Any], detail: bool) -> dict[str, Any] | list[str]:
+        """Return the directories among the paths that a glob found.
+
+        As fsspec's ``glob()`` returns them for a pattern that ends in a slash.
+
+        Args:
+            found: The paths that the glob found and their objects.
+            detail: Whether to return the objects too.
+
+        Returns:
+            The directories and their objects with ``detail``, or their paths.
+        """
+        directories = {
+            name: info
+            for name, info in found.items()
+            if info["type"] == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
+        }
+        return directories if detail else list(directories)
 
     def tree(
         self,
@@ -1917,10 +1932,8 @@ class S3FileSystem(AbstractFileSystem):
         """
         if isinstance(path, list):
             return [cls._strip_protocol(p) for p in path]
-        stripped = super()._strip_protocol(path)
-        name, _ = S3Path.split_trailing_separators(stringify_path(path))
-        # The slashes of a version ID, which fsspec strips.
-        return stripped + name[len(name.rstrip("/")) :]
+        # fsspec strips the slashes of a version ID too.
+        return super()._strip_protocol(path) + S3Path.version_separators(stringify_path(path))
 
     @classmethod
     def _parent(cls, path):
@@ -2973,13 +2986,7 @@ class S3FileSystem(AbstractFileSystem):
             if not (
                 pairing.skips_directories
                 and (
-                    # A listed entry is named after its key, whose trailing
-                    # slash names a directory.
-                    (
-                        trailing_sep(name)
-                        if isinstance(target, S3Path)
-                        else S3PathPairing.ends_with_separator(name)
-                    )
+                    S3PathPairing.names_directory(name, target)
                     or (not versioned and self.isdir(target))
                 )
             )

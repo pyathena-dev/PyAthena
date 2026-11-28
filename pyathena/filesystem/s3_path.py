@@ -175,6 +175,23 @@ class S3Path:
             return path, ""
         return name, path[len(name) :]
 
+    @classmethod
+    def version_separators(cls, path: str) -> str:
+        """Return the trailing slashes of a path string that end its version ID.
+
+        See :meth:`split_trailing_separators`.
+
+        Args:
+            path: The path string.
+
+        Returns:
+            The trailing slashes, or ``""`` if the path ends in no slash or
+            in the slashes of a directory.
+        """
+        if not path.endswith("/") or cls.split_trailing_separators(path)[1]:
+            return ""
+        return path[len(path.rstrip("/")) :]
+
     @property
     def is_bucket(self) -> bool:
         """Whether the path names the bucket: it has no key, or a key of only slashes."""

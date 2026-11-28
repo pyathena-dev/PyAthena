@@ -394,9 +394,28 @@ class S3PathPairing:
         Returns:
             Whether the path ends with a separator.
         """
-        if path.endswith("/"):
-            return bool(S3Path.split_trailing_separators(path)[1])
-        return bool(trailing_sep(path))
+        return bool(
+            S3Path.split_trailing_separators(path)[1] if path.endswith("/") else trailing_sep(path)
+        )
+
+    @classmethod
+    def names_directory(cls, name: str, source: str | S3Path) -> bool:
+        """Return whether the name of an expanded source ends with a directory separator.
+
+        A listed entry (an ``S3Path``) is named after its key, whose trailing
+        slash names a directory; a path string as
+        :meth:`ends_with_separator` tells.
+
+        Args:
+            name: The name of the source, as the expansion names it.
+            source: The source: the path string, or the listed entry.
+
+        Returns:
+            Whether the name ends with a separator.
+        """
+        if isinstance(source, S3Path):
+            return bool(trailing_sep(name))
+        return cls.ends_with_separator(name)
 
     @staticmethod
     def _is_glob(path: str) -> bool:
