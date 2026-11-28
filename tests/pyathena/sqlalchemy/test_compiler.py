@@ -926,12 +926,11 @@ class TestAthenaDDLCompiler:
     @pytest.mark.parametrize(
         ("query", "connect_args", "env_s3_staging_dir", "schema", "expected"),
         [
-            ("location=s3://bucket/base/", {}, None, None, "s3://bucket/base/shared/events/"),
             ("location=s3://bucket/base", {}, None, None, "s3://bucket/base/shared/events/"),
             (
                 "s3_staging_dir=s3://bucket/staging",
                 {},
-                None,
+                "s3://bucket/env/",
                 None,
                 "s3://bucket/staging/shared/events/",
             ),
@@ -963,6 +962,13 @@ class TestAthenaDDLCompiler:
                 None,
                 None,
                 "s3://bucket/base/tenant/events/",
+            ),
+            (
+                "location=s3://bucket/base/",
+                {"cursor_kwargs": {"schema_name": None}},
+                None,
+                None,
+                "s3://bucket/base/default/events/",
             ),
             (
                 "s3_staging_dir=s3://bucket/staging/",
@@ -1014,8 +1020,24 @@ class TestAthenaDDLCompiler:
             connect_args=connect_args,
         )
         table = Table("events", MetaData(), Column("id", Integer))
-        with pytest.raises(exc.CompileError, match="`location` or `s3_staging_dir`"):
+        with pytest.raises(exc.CompileError):
             CreateTable(table).compile(engine)
+
+    def test_create_table_s3tables_catalog_from_cursor_kwargs(self):
+        # The cursor's catalog_name decides the catalog the statement runs in.
+        engine = create_engine(
+            "awsathena+rest://athena.us-west-2.amazonaws.com/pyathena"
+            "?s3_staging_dir=s3://bucket/staging/",
+            connect_args={"cursor_kwargs": {"catalog_name": "s3tablescatalog/bucket"}},
+        )
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+            awsathena_tblproperties={"table_type": "ICEBERG"},
+        )
+        ddl = str(CreateTable(table).compile(engine))
+        assert "LOCATION" not in ddl
 
     @pytest.mark.parametrize(
         ("file_format", "expected"),

@@ -1312,7 +1312,27 @@ class AthenaDDLCompiler(DDLCompiler):
         return "\n".join(text)
 
     @staticmethod
-    def _is_s3_tables_catalog(connect_opts: Mapping[str, Any]) -> bool:
+    def _get_cursor_option(
+        connect_opts: Mapping[str, Any], name: str, connection_value: Any
+    ) -> Any:
+        """Return an option of the cursor that runs the statement.
+
+        The connection's ``cursor_kwargs`` override the connection's value, as
+        they do for the cursors that run SQLAlchemy statements.
+
+        Args:
+            connect_opts: The dialect connection options.
+            name: The cursor option name.
+            connection_value: The connection's value of the option.
+
+        Returns:
+            The value from ``cursor_kwargs``, or ``connection_value`` without one.
+        """
+        cursor_kwargs = cast(Mapping[str, Any], connect_opts.get("cursor_kwargs") or {})
+        return cursor_kwargs.get(name, connection_value)
+
+    @classmethod
+    def _is_s3_tables_catalog(cls, connect_opts: Mapping[str, Any]) -> bool:
         """Return whether the connection targets an Amazon S3 Tables catalog.
 
         S3 Tables are queried by setting the connection ``catalog_name`` to
@@ -1326,11 +1346,15 @@ class AthenaDDLCompiler(DDLCompiler):
             connect_opts: The dialect connection options.
 
         Returns:
-            True if ``catalog_name`` names an S3 Tables catalog.
+            True if the cursor's ``catalog_name``, which ``cursor_kwargs`` can
+            override, names an S3 Tables catalog.
         """
         if not connect_opts:
             return False
-        catalog = connect_opts.get("catalog_name") or ""
+        catalog = (
+            cls._get_cursor_option(connect_opts, "catalog_name", connect_opts.get("catalog_name"))
+            or ""
+        )
         # Athena resolves catalog names case-insensitively.
         return catalog.lower().startswith(S3_TABLES_CATALOG_PREFIX)
 
@@ -1389,30 +1413,27 @@ class AthenaDDLCompiler(DDLCompiler):
                 "remove the dialect keyword argument `awsathena_location`"
             )
 
-    @staticmethod
-    def _get_s3_staging_dir(
-        connect_opts: Mapping[str, Any], cursor_kwargs: Mapping[str, Any]
-    ) -> str | None:
-        """Return the S3 staging directory of the statement's cursor.
+    @classmethod
+    def _get_s3_staging_dir(cls, connect_opts: Mapping[str, Any]) -> str | None:
+        """Return the S3 staging directory of the cursor that runs the statement.
 
-        The cursor takes ``s3_staging_dir`` from ``cursor_kwargs`` over the
-        connection, and the connection falls back to the
-        ``AWS_ATHENA_S3_STAGING_DIR`` environment variable when the option is
-        not given.
+        The connection falls back to the ``AWS_ATHENA_S3_STAGING_DIR``
+        environment variable when ``s3_staging_dir`` is not given, and
+        ``cursor_kwargs`` override the connection's value.
 
         Args:
             connect_opts: The dialect connection options.
-            cursor_kwargs: The connection's default cursor keyword arguments.
 
         Returns:
             The staging directory, or ``None`` when the cursor has none.
         """
-        if "s3_staging_dir" in cursor_kwargs:
-            return cast(str | None, cursor_kwargs["s3_staging_dir"]) or None
         s3_staging_dir = connect_opts.get("s3_staging_dir")
         if s3_staging_dir is None:
             s3_staging_dir = os.getenv(Connection._ENV_S3_STAGING_DIR)
-        return cast(str | None, s3_staging_dir) or None
+        return (
+            cast(str | None, cls._get_cursor_option(connect_opts, "s3_staging_dir", s3_staging_dir))
+            or None
+        )
 
     def _get_table_location(
         self, table: Table, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
@@ -1423,7 +1444,8 @@ class AthenaDDLCompiler(DDLCompiler):
         Without it, the location is ``<base>/<schema>/<table>/``, where the base
         is the ``location`` connection option or the S3 staging directory, and
         the schema of an unqualified table is the database of the statement's
-        cursor, taken from ``cursor_kwargs`` over the connection.
+        cursor, taken from ``cursor_kwargs`` over the connection. Without a
+        database, the cursor runs in Athena's ``default`` database.
 
         Args:
             table: The table being created.
@@ -1437,14 +1459,19 @@ class AthenaDDLCompiler(DDLCompiler):
             location = cast(str, dialect_opts["location"])
             location += "/" if not location.endswith("/") else ""
         elif connect_opts:
-            cursor_kwargs = cast(Mapping[str, Any], connect_opts.get("cursor_kwargs") or {})
             base_location = cast(str | None, connect_opts.get("location")) or (
-                self._get_s3_staging_dir(connect_opts, cursor_kwargs)
+                self._get_s3_staging_dir(connect_opts)
             )
             if not base_location:
                 return None
             base_location += "/" if not base_location.endswith("/") else ""
-            schema = table.schema or cursor_kwargs.get("schema_name", connect_opts["schema_name"])
+            schema = (
+                table.schema
+                or self._get_cursor_option(
+                    connect_opts, "schema_name", connect_opts.get("schema_name")
+                )
+                or "default"
+            )
             location = f"{base_location}{schema}/{table.name}/"
         else:
             location = None
