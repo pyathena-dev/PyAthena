@@ -3125,12 +3125,12 @@ class TestS3FileSystem:
 
         def put_file(lpath, rpath, **kwargs):
             with lock:
-                windows[os.path.relpath(lpath, tmp_path)] = kwargs.get("max_workers")
+                windows[os.path.basename(lpath)] = kwargs.get("max_workers")
 
         fs.put_file = put_file
         fs.put(f"{tmp_path}/src/", "s3://bucket/dst/", recursive=True)
         # The single file keeps the window of the filesystem.
-        assert windows["src/sub/a"] is None
+        assert windows["a"] is None
 
     def test_batch_failure_stops_the_batch(self):
         # GH-1322 (B2): a failed call starts no further call and stops the

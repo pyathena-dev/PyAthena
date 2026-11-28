@@ -3625,7 +3625,11 @@ class S3FileSystem(AbstractFileSystem):
                 version, if the compression is not supported, or if the data
                 takes more than ``S3Core.MULTIPART_UPLOAD_MAX_PARTS`` blocks.
         """
-        self._pipe_file_with(path, value, mode, None, **kwargs)
+        # In a transaction, through the buffered open() path, which keeps the
+        # deferred-commit semantics of fsspec transactions.
+        self._pipe_file_with(
+            path, value, mode, self._open_path if self._intrans else None, **kwargs
+        )
 
     def _pipe_file_with(
         self,
@@ -3646,9 +3650,9 @@ class S3FileSystem(AbstractFileSystem):
             value: The bytes to write.
             mode: "overwrite" or "create", as in :meth:`pipe_file`.
             open_file: Opens the file, with the arguments of ``open()``,
-                and then takes the write whatever its size. None writes as
-                :meth:`pipe_file` does: with a single PutObject request
-                when the data fits in one, and with ``open()`` otherwise.
+                and then takes the write whatever its size. None writes
+                with a single PutObject request when the data fits in one,
+                and with ``open()`` otherwise.
             **kwargs: As in :meth:`pipe_file`.
 
         Raises:
@@ -3672,18 +3676,11 @@ class S3FileSystem(AbstractFileSystem):
         # The size in bytes; the length of a memoryview counts its items.
         size = memoryview(value).nbytes
         self.core.check_multipart_upload_size(size, block_size)
-        if (
-            open_file is not None
-            or self._intrans
-            or size > min(block_size, self.core.MULTIPART_UPLOAD_MAX_PART_SIZE)
-        ):
-            # Defer to the buffered open() path, which keeps the
-            # deferred-commit semantics of fsspec transactions and uploads
-            # large data as a parallel multipart upload.
-            file = (open_file or self._open_path)(
-                path, "xb" if mode == "create" else "wb", **kwargs
-            )
-            file._write_and_close(value)
+        if open_file is None and size > min(block_size, self.core.MULTIPART_UPLOAD_MAX_PART_SIZE):
+            # Large data is uploaded as a parallel multipart upload.
+            open_file = self._open_path
+        if open_file is not None:
+            open_file(path, "xb" if mode == "create" else "wb", **kwargs)._write_and_close(value)
             return
         s3_path = S3Path.parse(path)
         if s3_path.version_id:

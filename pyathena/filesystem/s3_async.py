@@ -511,17 +511,16 @@ class AioS3FileSystem(AsyncFileSystem):
         **kwargs,
     ) -> None:
         _S3BatchTasks.track()
-        target: str | S3Path = rpath if isinstance(rpath, S3Path) else stringify_path(rpath)
         if self._intrans:
             # See _pipe_file.
             await self._write_in_transaction(
                 functools.partial(
-                    self._sync_fs._put_file_with, lpath, target, callback, mode, **kwargs
+                    self._sync_fs._put_file_with, lpath, rpath, callback, mode, **kwargs
                 )
             )
             return
         await self._thread_pool.run(
-            self._sync_fs.put_file, lpath, target, callback=callback, mode=mode, **kwargs
+            self._sync_fs.put_file, lpath, rpath, callback=callback, mode=mode, **kwargs
         )
 
     async def _get_file(
@@ -661,14 +660,15 @@ class AioS3FileSystem(AsyncFileSystem):
         finally:
             executor.shutdown(wait=False)
 
-    async def _mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
+    async def _mv(
+        self, path1, path2, recursive=False, maxdepth=None, batch_size=None, **kwargs
+    ) -> None:
         """Move files from one S3 location to another.
 
-        See :meth:`S3FileSystem.mv`. The copies run in parallel with
-        ``asyncio.gather``, whose cancellation cancels them and waits for
-        them, and the deletions in the request pool. Each multipart copy
-        gets its share of ``max_workers`` (see :meth:`_transfer_kwargs`), with
-        all the copies counted.
+        See :meth:`S3FileSystem.mv`. The copies run as in :meth:`_copy`,
+        ``batch_size`` of them at once as tasks, which a cancellation cancels
+        and waits for, and the deletions in the request pool. Each multipart
+        copy gets its share of ``max_workers`` (see :meth:`_transfer_kwargs`).
 
         Args:
             path1: Source S3 path, glob pattern, or list of paths.
@@ -676,6 +676,7 @@ class AioS3FileSystem(AsyncFileSystem):
                 list.
             recursive: Whether to move the directories with their contents.
             maxdepth: Maximum depth of a recursive move.
+            batch_size: Number of copies to run at the same time.
             **kwargs: Additional S3 copy parameters, as for ``_cp_file()``.
 
         Raises:
@@ -700,12 +701,31 @@ class AioS3FileSystem(AsyncFileSystem):
             maxdepth=maxdepth,
             source_params=source_params,
         )
-        # All the copies run at once.
-        kwargs = self._transfer_kwargs(len(pairs), None, kwargs)
+        # As fsspec's _copy() resolves the batch size.
+        batch_size = batch_size or self.batch_size
+        copy_kwargs = self._transfer_kwargs(len(pairs), batch_size, kwargs)
+
+        async def copy_pair(pair: tuple[str | S3Path, str | S3Path]) -> bool:
+            """Copy a pair of the move as a task of the batch.
+
+            Args:
+                pair: The source and its destination.
+
+            Returns:
+                Whether the source was copied, as ``_copy_file()`` returns it.
+            """
+            _S3BatchTasks.track()
+            return await self._copy_file(*pair, **copy_kwargs)
+
         # Every copy finishes before a failure is raised, as in fsspec's
         # _copy(), and nothing is deleted after a failure.
-        results = await asyncio.gather(
-            *[self._copy_file(p1, p2, **kwargs) for p1, p2 in pairs], return_exceptions=True
+        results = await _S3BatchTasks().run(
+            _run_coros_in_chunks(
+                [copy_pair(pair) for pair in pairs],
+                batch_size=batch_size,
+                return_exceptions=True,
+                nofiles=True,
+            )
         )
         for result in results:
             if isinstance(result, BaseException):
@@ -715,7 +735,7 @@ class AioS3FileSystem(AsyncFileSystem):
             **self.core.operation_params("delete_objects", source_params),
         )
 
-    def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs) -> None:
+    def mv(self, path1, path2, recursive=False, maxdepth=None, batch_size=None, **kwargs) -> None:
         """Move files from one S3 location to another.
 
         Runs :meth:`_mv`; fsspec does not provide the synchronous wrapper of
@@ -727,13 +747,23 @@ class AioS3FileSystem(AsyncFileSystem):
                 list.
             recursive: Whether to move the directories with their contents.
             maxdepth: Maximum depth of a recursive move.
+            batch_size: Number of copies to run at the same time.
             **kwargs: Additional S3 copy parameters.
 
         Raises:
             ValueError: If the move has conflicting paths.
             OSError: If bucket versioning cannot be read.
         """
-        sync(self.loop, self._mv, path1, path2, recursive=recursive, maxdepth=maxdepth, **kwargs)
+        sync(
+            self.loop,
+            self._mv,
+            path1,
+            path2,
+            recursive=recursive,
+            maxdepth=maxdepth,
+            batch_size=batch_size,
+            **kwargs,
+        )
 
     async def _copy(
         self,

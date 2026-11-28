@@ -343,15 +343,16 @@ cancellation is raised, also when the shutdown of the event loop at the end of
 `asyncio.run()` cancels the coroutine; a second cancellation stops that wait.
 
 `_cat()`, `_cat_ranges()`, `_pipe()`, `_put()`, `_get()`, `_copy()`, and `_mv()` run the
-coroutines of their objects as tasks, `batch_size` of them at a time as in fsspec, except
-`_mv()`, which runs all its copies at once. Cancelling one of them cancels those tasks
-and waits for them before the cancellation is raised, also when the shutdown of the
-event loop cancels them together with the coroutine.
+coroutines of their objects as tasks, `batch_size` of them at a time as in fsspec.
+Cancelling one of them cancels those tasks and waits for them before the cancellation
+is raised, also when the shutdown of the event loop cancels them together with the
+coroutine.
 As with `S3FileSystem`, each download of `_get()` gets `max(1, max_workers // n)` range
-reads, and each upload of `_put()`, write of `_pipe()`, and copy of `_copy()` and `_mv()`
-as many parts or part copies, `n` being the number of files, or `batch_size` when it is
-positive and smaller. Pairs of `_get()`, `_put()`, `_copy()`, and `_pipe()` whose result would depend
-on the order of the transfers raise `ValueError` before anything is transferred, as with
+reads, and each upload of `_put()`, write of `_pipe()`, and copy of `_copy()` and
+`_mv()` as many parts or part copies. `n` is the number of paired paths, or `batch_size`
+when it is positive and smaller; for `_put()`, it counts the local files only. Pairs of
+`_get()`, `_put()`, `_copy()`, and `_pipe()` whose result would depend on the order of
+the transfers raise `ValueError` before anything is transferred, as with
 `S3FileSystem` (see {ref}`filesystem`), and `_get()` with `outfile` writes the objects
 into it one after another, in order, with `n` = 1.
 A recursive `_put()` sends no request for the local directories. `_rm()` sends

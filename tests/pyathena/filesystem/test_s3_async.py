@@ -2214,8 +2214,6 @@ class TestAioS3FileSystem:
             (method, cancellation)
             for method in ["_cat", "_cat_ranges", "_pipe", "_put", "_get", "_copy", "_mv"]
             for cancellation in ["batch", "calls_first", "shutdown"]
-            # asyncio.gather() cancels the copies of _mv() again.
-            if (method, cancellation) != ("_mv", "calls_first")
         ],
     )
     def test_batch_cancelled_waits_for_calls(self, tmp_path, method, cancellation):
@@ -2755,10 +2753,9 @@ class TestAioS3FileSystem:
                 (2, {"max_workers": 1}, 1),
             )
         ]
-        # _mv() runs all its copies at once.
         + [
             (operation, fs_kwargs, 2, kwargs, None)
-            for operation in ("copy", "pipe")
+            for operation in ("copy", "mv", "pipe")
             for fs_kwargs, kwargs in (({}, {"batch_size": 1}), ({"batch_size": 1}, {}))
         ],
     )
@@ -3316,6 +3313,34 @@ class TestAioS3FileSystem:
             Bucket="bucket",
             Delete={"Objects": [{"Key": "a"}, {"Key": "c"}], "Quiet": True},
         )
+
+    @pytest.mark.asyncio
+    async def test_mv_batch_size(self):
+        # GH-1427: _mv() runs batch_size copies at a time, as
+        # S3FileSystem.mv() does. It used to run all of them at once and send
+        # batch_size to CopyObject.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        store, requests = serve_s3_keys(fs._sync_fs, {"src/0", "src/1", "src/2"})
+        # Waits briefly for a second overlapping copy, which only a batch of
+        # more than one copy runs.
+        overlap, state = overlapping_calls(1, timeout=0.5)
+        copy_object = fs._sync_fs.core.copy_object
+
+        def overlapping_copy_object(*args, **kwargs):
+            overlap()
+            return copy_object(*args, **kwargs)
+
+        fs._sync_fs.core.copy_object = overlapping_copy_object
+        await fs._mv(
+            [f"s3://bucket/src/{i}" for i in range(3)],
+            [f"s3://bucket/dst/{i}" for i in range(3)],
+            batch_size=1,
+        )
+        assert state["peak"] == 1
+        assert store == {"dst/0", "dst/1", "dst/2"}
+        assert all("batch_size" not in r for name, r in requests if name == "copy_object")
 
     @pytest.mark.asyncio
     async def test_mv_copy_failure(self):
