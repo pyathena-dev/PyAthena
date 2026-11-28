@@ -3113,6 +3113,25 @@ class TestS3FileSystem:
         self._batch(fs, "put", count, **kwargs)
         assert windows == [expected] * count
 
+    def test_put_window_counts_files(self, tmp_path):
+        # GH-1427: the local directories of a recursive put(), which upload
+        # nothing, take no share of max_workers. A file used to get a
+        # smaller window for each directory that was paired with it.
+        fs = self._make_fs()
+        (tmp_path / "src" / "sub").mkdir(parents=True)
+        (tmp_path / "src" / "sub" / "a").write_bytes(b"a")
+        windows = {}
+        lock = threading.Lock()
+
+        def put_file(lpath, rpath, **kwargs):
+            with lock:
+                windows[os.path.relpath(lpath, tmp_path)] = kwargs.get("max_workers")
+
+        fs.put_file = put_file
+        fs.put(f"{tmp_path}/src/", "s3://bucket/dst/", recursive=True)
+        # The single file keeps the window of the filesystem.
+        assert windows["src/sub/a"] is None
+
     def test_batch_failure_stops_the_batch(self):
         # GH-1322 (B2): a failed call starts no further call and stops the
         # retries of the running one, whose backoff wait would take at least
