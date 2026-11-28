@@ -366,7 +366,7 @@ These strings, and the `row_format` and `file_format` options, are inserted into
 Within a string literal, escape a backslash or a single quote with a backslash.
 Write `%` as `%%` under the default `pyformat` parameter style, which is `%25%25` when url encoded.
 
-With the `no_parameters` execution option, the cursor does not format the statement.
+Under the `pyformat` parameter style with the `no_parameters` execution option, the cursor does not format the statement.
 Write `%` once in these strings and in dict keys and values; a `%` in a comment or a location reaches Athena doubled.
 
 For example, if you configure a projection setting `'projection.enabled'='true','projection.dt.type'='date','projection.dt.range'='NOW-1YEARS,NOW','projection.dt.format'= 'yyyy-MM-dd'` in tblproperties, it would look like this
