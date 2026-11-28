@@ -93,6 +93,8 @@ class TestS3ClientError:
             (416, errno.EINVAL),
             (500, errno.EIO),
             (501, errno.ENOSYS),
+            # A status code that is not listed.
+            (502, errno.EIO),
             (503, errno.EBUSY),
         ],
     )

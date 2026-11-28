@@ -1545,6 +1545,8 @@ class TestS3Core:
         self._stub_head(stubber, {})
         with stubber, pytest.raises(ValueError):  # noqa: PT011
             core.plan_multipart_copy(S3Path("bucket", "src"), S3Path("bucket", "dst"))
+        # The size is missing from the HeadObject response that was read.
+        stubber.assert_no_pending_responses()
 
     def test_plan_multipart_copy_request_kwargs_sse_c(self):
         # GH-1372: a source whose customer-provided key comes from the
@@ -2021,7 +2023,8 @@ class TestS3DeleteBatch:
         "objects",
         [
             (),
-            tuple(S3Path("bucket", f"k{i}") for i in range(S3DeleteBatch.MAX_KEYS + 1)),
+            # DeleteObjects accepts at most 1,000 keys.
+            tuple(S3Path("bucket", f"k{i}") for i in range(1001)),
             (S3Path("bucket"),),
             (S3Path("bucket", ""),),
             (S3Path("other", "a"),),

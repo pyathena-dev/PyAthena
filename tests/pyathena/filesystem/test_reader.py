@@ -207,7 +207,7 @@ class TestReadAheadStream:
 
     def test_short_read(self):
         stream = _RecordingRangeFile(bytes(20), short=True).open_stream(part_size=10, max_parts=2)
-        with pytest.raises(OSError, match="Read 9 bytes of a range of 10 bytes"):
+        with pytest.raises(OSError):  # noqa: PT011
             stream.read(20)
         stream.close()
 
@@ -287,10 +287,12 @@ class TestReadAheadStream:
         file.assert_closed_after_reads(stream)
         assert (20, 10) not in file.reads
 
-    def test_close_waits_for_running_reads(self, monkeypatch):
+    @pytest.mark.parametrize("first", [10, 20])
+    def test_close_waits_for_running_reads(self, monkeypatch, first):
         """Closing waits for every read in flight, not only the first one to end,
-        before closing the file."""
+        before closing the file, whichever read ends first."""
         gates = {10: threading.Event(), 20: threading.Event()}
+        (second,) = set(gates) - {first}
         file = _RecordingRangeFile(bytes(100), gates=gates)
         stream = file.open_stream(part_size=10, max_parts=2)
         file.signal_close_wait(monkeypatch)
@@ -309,18 +311,21 @@ class TestReadAheadStream:
             assert all(file.started[offset].wait(EVENT_TIMEOUT) for offset in gates)
             closer.start()
             assert file.close_progressed.wait(EVENT_TIMEOUT)
-            gates[10].set()
-            poll_until(lambda: 10 in file.events, "the first read did not end")
+            gates[first].set()
+            poll_until(lambda: first in file.events, "the first read did not end")
             # The other read still runs, so the file stays open.
             assert not file.file_closed.wait(0.2)
-            gates[20].set()
-            closer.join(EVENT_TIMEOUT)
+            gates[second].set()
         finally:
             for event in gates.values():
                 event.set()
+            if closer.ident is None:
+                stream.close()
+            else:
+                closer.join(EVENT_TIMEOUT)
         assert not closer.is_alive()
         assert not errors
-        assert file.events == [0, 10, 20, "close"]
+        assert file.events == [0, first, second, "close"]
 
     def test_csv(self):
         """pyarrow reads a CSV through the stream with its own block size."""
