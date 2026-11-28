@@ -3619,6 +3619,48 @@ class TestS3FileSystem:
             fs.get(["s3://bucket/p1/data", "s3://bucket/p2/data"], f"{tmp_path}/out/", **kwargs)
         fs.get_file.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("pattern", "keys", "kwargs", "sources"),
+        [
+            # A prefix that a glob matches is left out as a directory.
+            ("s3://bucket/k*", {"key/child"}, {}, []),
+            # GH-1467: with a requested version, it is handed to get_file(),
+            # which downloads the version of the object of that name. It was
+            # left out.
+            ("s3://bucket/k*", {"key/child"}, {"version_id": "v1"}, [("bucket/key", "v1")]),
+            # Also the directories of a recursion with maxdepth.
+            (
+                "s3://bucket/p",
+                {"p/sub/leaf"},
+                {"recursive": True, "maxdepth": 1, "version_id": "v1"},
+                [("bucket/p", "v1"), ("bucket/p/sub", "v1")],
+            ),
+            # A listed key that ends in a slash, such as a folder marker,
+            # names a local directory, which no version is downloaded into.
+            ("s3://bucket/**", {"d/"}, {"withdirs": False, "version_id": "v1"}, []),
+        ],
+    )
+    def test_get_glob_version_of_a_prefix(self, tmp_path, pattern, keys, kwargs, sources):
+        fs = self._make_fs()
+        self._serve_keys(fs, keys)
+        fs.get_file = mock.MagicMock()
+
+        fs.get(pattern, f"{tmp_path}/out/", **kwargs)
+        # The downloads run in parallel, in any order.
+        assert (
+            sorted((str(c.args[0]), c.kwargs.get("version_id")) for c in fs.get_file.call_args_list)
+            == sources
+        )
+
+    def test_get_root_is_left_out(self, tmp_path):
+        # The root path is a directory, which get() leaves out without a
+        # recursion: nothing is downloaded and nothing raises.
+        fs = self._make_fs()
+        fs.get_file = mock.MagicMock()
+
+        fs.get("s3://", f"{tmp_path}/out/")
+        fs.get_file.assert_not_called()
+
     def test_put_directories_with_one_destination(self, tmp_path):
         # GH-1398: put_file() uploads nothing for a local directory, so
         # directories with one destination do not conflict. They used to.
@@ -5954,21 +5996,54 @@ class TestS3FileSystem:
         # GH-1437: a requested version is downloaded, also one that a
         # VersionId parameter of the file names, as open() reads it, when the
         # latest name is a prefix. get_file() created a local directory.
+        fs = self._make_version_of_a_prefix_fs(fs_params)
+        lpath = tmp_path / "key"
+
+        fs.get_file(rpath, str(lpath), **kwargs)
+        assert lpath.read_bytes() == b"data"
+
+    @pytest.mark.parametrize(
+        ("kwargs", "fs_params"),
+        [
+            ({"version_id": "v1"}, {}),
+            ({"VersionId": "v1"}, {}),
+            ({"s3_additional_kwargs": {"VersionId": "v1"}}, {}),
+            ({}, {"VersionId": "v1"}),
+        ],
+    )
+    def test_get_version_of_a_prefix(self, tmp_path, kwargs, fs_params):
+        # GH-1467: get() of a source whose version an argument requests
+        # downloads it, as get_file() does, when the latest name is a prefix.
+        # It left the source out as a directory, and downloaded nothing.
+        fs = self._make_version_of_a_prefix_fs(fs_params)
+        lpath = tmp_path / "key"
+
+        fs.get("s3://bucket/key", str(lpath), **kwargs)
+        assert lpath.read_bytes() == b"data"
+
+    def _make_version_of_a_prefix_fs(self, fs_params):
+        # A filesystem whose s3://bucket/key is the 4-byte object b"data" at
+        # the version v1, which GetObject must request, and a directory at
+        # the latest name and at any other version.
         fs, _ = self._make_object_fs(b"data")
         fs.s3_additional_kwargs = fs_params
         version = self._file_object("key")
         version.size = 4
 
         def info_entry(path, version_id=None, **_kwargs):
-            if version_id or S3Path.of(path).version_id:
+            if (version_id or S3Path.of(path).version_id) == "v1":
                 return version
             return S3FileSystem._directory_object("bucket", "key")
 
         fs._info_entry.side_effect = info_entry
-        lpath = tmp_path / "key"
+        get_object = fs.core.client.get_object.side_effect
 
-        fs.get_file(rpath, str(lpath), **kwargs)
-        assert lpath.read_bytes() == b"data"
+        def get_version(**request):
+            assert request.get("VersionId") == "v1", request
+            return get_object(**request)
+
+        fs.core.client.get_object.side_effect = get_version
+        return fs
 
     def test_get_file_file_like(self, tmp_path):
         # GH-974: a file-like lpath used to raise TypeError, and outfile was

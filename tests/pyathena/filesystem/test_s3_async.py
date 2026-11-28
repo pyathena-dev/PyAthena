@@ -3697,6 +3697,21 @@ class TestAioS3FileSystem:
         )
 
     @pytest.mark.asyncio
+    async def test_get_version_argument_of_a_prefix(self, tmp_path):
+        # GH-1467: as with S3FileSystem.get(), a source whose version a
+        # version_id argument requests is downloaded when its name is a
+        # prefix. It was left out as a directory.
+        fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
+        # The latest name is a directory.
+        fs._sync_fs.isdir = mock.MagicMock(return_value=True)
+        fs._get_file = mock.AsyncMock()
+
+        await fs._get("s3://bucket/key", str(tmp_path / "key"), version_id="v1")
+        fs._get_file.assert_awaited_once()
+        assert str(fs._get_file.await_args.args[0]) == "bucket/key"
+        assert fs._get_file.await_args.kwargs["version_id"] == "v1"
+
+    @pytest.mark.asyncio
     async def test_mv(self):
         # GH-1008: the files are copied in parallel, the directories are
         # skipped, and only the copied sources are deleted. GH-1427: each

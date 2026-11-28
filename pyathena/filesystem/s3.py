@@ -2880,6 +2880,8 @@ class S3FileSystem(AbstractFileSystem):
         self,
         pairing: S3PathPairing,
         local: bool = False,
+        versioned: bool = False,
+        /,
         **kwargs: Any,
     ) -> list[tuple[str | S3Path, str | S3Path]]:
         """Expand and pair the paths of a copy (see :meth:`S3PathPairing.s3_copy_pairs`).
@@ -2894,6 +2896,11 @@ class S3FileSystem(AbstractFileSystem):
             local: Whether the destinations are the local paths of ``get()``,
                 which the local filesystem looks up, and which are named as
                 :meth:`S3PathPairing.copy_pairs` names them.
+            versioned: Whether every source names a version of an object,
+                which the ``get_file()`` arguments of a ``get()`` request (see
+                :meth:`_requests_version`), so that only a source whose name
+                ends in a separator, which names a local directory, is left
+                out as a directory.
             **kwargs: Passed to the expansion, as fsspec's ``get()`` passes its
                 keyword arguments to ``expand_path()``.
 
@@ -2907,7 +2914,10 @@ class S3FileSystem(AbstractFileSystem):
             for name, target in self._expand_paths(
                 pairing.path1, recursive=pairing.recursive, maxdepth=pairing.maxdepth, **kwargs
             )
-            if not (pairing.skips_directories and (trailing_sep(name) or self.isdir(target)))
+            if not (
+                pairing.skips_directories
+                and (trailing_sep(name) or (not versioned and self.isdir(target)))
+            )
         ]
         isdir = LocalFileSystem().isdir if local else self.isdir
         destination_is_dir = (
@@ -3054,7 +3064,12 @@ class S3FileSystem(AbstractFileSystem):
         one after another, in order. A sequence of local destinations, such
         as a tuple, is paired as a list is: in order with a list of sources,
         or with the expanded sources, which are sorted. Its paths are made
-        absolute, with ``~`` expanded, as one destination path is.
+        absolute, with ``~`` expanded, as one destination path is. A version
+        that the arguments of ``get_file()`` request (``version_id``, or a
+        ``VersionId`` parameter) names the version of every source, which
+        ``get_file()`` downloads as an object, so only a source whose name
+        ends in a slash, which names a local directory, is left out as a
+        directory.
 
         A failed download starts no further one, the running ones read and
         write no further block, and the error is raised once they have ended.
@@ -3159,7 +3174,7 @@ class S3FileSystem(AbstractFileSystem):
                 :meth:`_local_root`).
             file_kwargs: The arguments of ``get_file()``, whose ``outfile``
                 and requested version (see :meth:`_is_directory_source`) the
-                checks follow.
+                pairing and the checks follow.
             recursive: Whether to copy the directories with their contents.
             maxdepth: Maximum depth of a recursive copy.
             **kwargs: Passed to the expansion of the sources.
@@ -3175,7 +3190,9 @@ class S3FileSystem(AbstractFileSystem):
         pairing = S3PathPairing(
             rpath, self._local_root(lpath), recursive=recursive, maxdepth=maxdepth
         )
-        pairs = self._copy_pairs(pairing, local=True, **kwargs)
+        # Positional, so that the keyword arguments of the expansion cannot
+        # collide with them.
+        pairs = self._copy_pairs(pairing, True, self._requests_version(file_kwargs), **kwargs)
         if isinstance(pairing.path2, str):
             check_contained(pairing.path2, [lp for _, lp in pairs])
         if pairs and file_kwargs.get("outfile") is None:
@@ -3268,6 +3285,22 @@ class S3FileSystem(AbstractFileSystem):
             True if the source has no version and is a directory.
         """
         path = rpath if isinstance(rpath, S3Path) else S3Path.parse(self._strip_protocol(rpath))
+        if path.version_id or self._requests_version(file_kwargs):
+            return False
+        return bool(self.isdir(rpath))
+
+    def _requests_version(self, file_kwargs: Mapping[str, Any] | None) -> bool:
+        """Return whether the arguments of ``get_file()`` request a version.
+
+        Args:
+            file_kwargs: The arguments of ``get_file()``, which ``open()``
+                receives: its ``version_id``, or a non-empty ``VersionId``
+                among the request parameters of the file (see
+                :meth:`S3FileTarget.resolve`), requests a version.
+
+        Returns:
+            Whether a version is requested.
+        """
         file_kwargs = file_kwargs or {}
         # The request parameters of the file, as open() merges them.
         params = {
@@ -3275,9 +3308,7 @@ class S3FileSystem(AbstractFileSystem):
             **(file_kwargs.get("s3_additional_kwargs") or {}),
             **file_kwargs,
         }
-        if path.version_id or file_kwargs.get("version_id") or params.get("VersionId"):
-            return False
-        return bool(self.isdir(rpath))
+        return bool(file_kwargs.get("version_id") or params.get("VersionId"))
 
     def cp_file(
         self,
