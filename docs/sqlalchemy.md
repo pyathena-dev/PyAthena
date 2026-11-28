@@ -2,8 +2,8 @@
 
 # SQLAlchemy
 
-Install SQLAlchemy with `pip install "SQLAlchemy>=2.0.0"` or `pip install PyAthena[sqlalchemy]`.
-Supported SQLAlchemy is 2.0.0 or higher.
+Install SQLAlchemy with `pip install "SQLAlchemy>=2.0.23"` or `pip install PyAthena[sqlalchemy]`.
+Supported SQLAlchemy is 2.0.23 or higher.
 
 For async support (`create_async_engine`), install with `pip install PyAthena[aiosqlalchemy]`.
 
@@ -1233,8 +1233,10 @@ statement = select(func.filter(orders.c.item_ids, bindparam("predicate", type_=S
 result = conn.execute(statement, {"predicate": "x -> x > 1"})
 ```
 
+A statement with a bind parameter lambda can't run with a list of parameter sets (`executemany()`); use `literal_column()` or `text()` for the lambda there.
+
 `str()` of the compiled statement shows a bind parameter lambda as `__[POSTCOMPILE_<name>]`.
-Compile with `compile_kwargs={"literal_binds": True}` or `compile_kwargs={"render_postcompile": True}` to get the lambda text in the SQL.
+Compile with `compile_kwargs={"render_postcompile": True}` to get the lambda text in the SQL; give a lambda that is only an execution parameter its value first, as in `statement.params(predicate="x -> x > 1")`.
 
 #### Partial ARRAY updates
 

@@ -628,9 +628,6 @@ class _AthenaLambda(types.String):
         double_percents = dialect.identifier_preparer._double_percents
 
         def process(value: Any) -> str:
-            # Earlier SQLAlchemy 2.0 releases, such as 2.0.0, pass NULL to the processor.
-            if value is None:
-                return "NULL"
             text = str(value)
             return text.replace("%", "%%") if double_percents else text
 

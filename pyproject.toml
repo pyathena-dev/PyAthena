@@ -73,9 +73,9 @@ awsathena = "pyathena.sqlalchemy.rest:AthenaRestDialect"
 "awsathena.aios3fs" = "pyathena.aio.sqlalchemy.s3fs:AthenaAioS3FSDialect"
 
 [project.optional-dependencies]
-sqlalchemy = ["sqlalchemy>=2.0.0"]
+sqlalchemy = ["sqlalchemy>=2.0.23"]
 aiosqlalchemy = [
-    "sqlalchemy[asyncio]>=2.0.0",
+    "sqlalchemy[asyncio]>=2.0.23",
 ]
 pandas = [
     "pandas>=3.0.0",
@@ -89,7 +89,7 @@ polars = [
 
 [dependency-groups]
 dev = [
-    "sqlalchemy[asyncio]>=2.0.0",
+    "sqlalchemy[asyncio]>=2.0.23",
     "pandas>=3.0.0",
     "pyarrow>=22.0.0",
     "polars>=1.39.0",
