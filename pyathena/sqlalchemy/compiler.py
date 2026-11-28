@@ -1057,7 +1057,7 @@ class AthenaStatementCompiler(SQLCompiler):
                 Returns:
                     The operand SQL.
                 """
-                operand_type = operand.type
+                operand_type = operand.type.dialect_impl(self.dialect)
                 if (
                     isinstance(operand, ColumnClause)
                     and operand.is_literal

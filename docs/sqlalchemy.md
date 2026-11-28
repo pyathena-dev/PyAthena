@@ -791,15 +791,15 @@ The `/` operator performs true division.
 In a `Numeric` division, Athena types the operands.
 Columns, expressions, aggregates, and `cast()` keep their Athena types, and a bind parameter takes its type from its value, such as `DECIMAL '1.2345'` for a `Decimal`.
 Athena reads a decimal literal such as `5.52` as `DOUBLE`, so a `literal_column()` with a precision is cast, and `literal_column("5.52", Numeric())`, without a precision, divides as `DOUBLE`.
-The quotient's scale is the larger scale of the two operands.
-A quotient of two operands with scale 0, such as `DECIMAL '5' / DECIMAL '2'`, is rounded to an integer.
-A SQLAlchemy type that is not in the SQL, such as one given by `type_coerce()` or a column type that differs from the table's Athena type, does not change the division.
-Use `cast()` to divide with a given precision and scale:
+A quotient of two DECIMAL operands has the larger scale of the two, and a quotient of two operands with scale 0, such as `DECIMAL '5' / DECIMAL '2'`, is rounded to an integer.
+A `Numeric` type that is not in the SQL, such as one given by `type_coerce()` or a column type that differs from the table's Athena type, leaves the operands to Athena, so two integer operands divide as integers.
+Use `cast()` on an operand to divide with its precision and scale, and on the quotient to get a given result type:
 
 ```python
 from sqlalchemy import Numeric, cast, select
 
 statement = select(cast(orders.c.quantity, Numeric(10, 2)) / orders.c.boxes)
+statement = select(cast(orders.c.amount / orders.c.boxes, Numeric(10, 2)))
 ```
 
 ## Bulk inserts

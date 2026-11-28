@@ -291,7 +291,7 @@ class TestAthenaStatementCompiler:
             (
                 # SQLAlchemy types the product NUMERIC(10, 2); Athena types it decimal(20, 4).
                 (column("x", type_=Numeric(10, 2)) * column("x", type_=Numeric(10, 2)))
-                / column("y", type_=Numeric(10, 4)),
+                / column("y", type_=Numeric(10, 2)),
                 "SELECT (x * x) / y AS anon_1",
             ),
             (

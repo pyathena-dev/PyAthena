@@ -1423,7 +1423,7 @@ class TestSQLAlchemyAthena:
         decimal = types.DECIMAL(10, 2)
         large = sqlalchemy.cast(literal_column("99999999.99"), types.Numeric(10, 2))
         small = sqlalchemy.cast(literal_column("0.15"), types.Numeric(10, 2))
-        one = sqlalchemy.cast(literal_column("1"), types.Numeric(10, 4))
+        one = sqlalchemy.cast(literal_column("1"), types.Numeric(10, 2))
         row = conn.execute(
             select(
                 literal_column("5.52", decimal) / literal_column("2.4", decimal),
