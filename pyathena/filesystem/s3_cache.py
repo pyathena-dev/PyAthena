@@ -91,9 +91,10 @@ class S3ListingCache:
         # The current dictionary of lookups with parameters of each lookup
         # key. An entry normally goes away when the dictionary is no longer
         # referenced, such as after the DirCache drops it. If garbage
-        # collection cleared the weak references of the cache and a finalizer
-        # resurrected it, dead entries stay until their keys are invalidated
-        # or the cache is cleared.
+        # collection cleared the weak reference that the WeakValueDictionary
+        # keeps to itself for its removal callbacks, and a finalizer
+        # resurrected it, the keys of dead dictionaries stay until a lookup
+        # replaces them, they are invalidated, or the cache is cleared.
         self._lookups: weakref.WeakValueDictionary[str | tuple[str, str, str], _Lookups] = (
             weakref.WeakValueDictionary()
         )
