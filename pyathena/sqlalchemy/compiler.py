@@ -21,6 +21,7 @@ from sqlalchemy.sql.elements import (
     BindParameter,
     Cast,
     CollectionAggregate,
+    ColumnClause,
     Null,
     Slice,
     TextClause,
@@ -1057,7 +1058,23 @@ class AthenaStatementCompiler(SQLCompiler):
 
     @override
     def visit_truediv_binary(self, binary, operator, **kw):
-        """Render true division with explicit Athena numeric coercions."""
+        """Render true division with explicit Athena numeric coercions.
+
+        A FLOAT operand makes both operands DOUBLE.
+        Otherwise, in a division with a DECIMAL operand, Athena types the operands.
+        Only a ``literal_column()`` typed DECIMAL with a precision is cast, to
+        ``DECIMAL(38, scale)`` with its own scale, since Athena reads a decimal
+        literal as DOUBLE; the widest precision keeps the cast from overflowing.
+        An INTEGER divisor of an INTEGER dividend is made DOUBLE.
+
+        Args:
+            binary: The division expression.
+            operator: The division operator.
+            **kw: Compiler keyword arguments.
+
+        Returns:
+            The division SQL.
+        """
         left_type = binary.left.type
         right_type = binary.right.type
 
@@ -1069,14 +1086,11 @@ class AthenaStatementCompiler(SQLCompiler):
                 + self.process(Cast(binary.right, division_type), **kw)
             )
 
-        left_is_numeric = isinstance(left_type, types.Numeric)
-        right_is_numeric = isinstance(right_type, types.Numeric)
-        if left_is_numeric or right_is_numeric:
-            division_type = binary.type
+        if isinstance(left_type, types.Numeric) or isinstance(right_type, types.Numeric):
             return (
-                self.process(Cast(binary.left, division_type), **kw)
+                self.process(self._cast_decimal_literal_column(binary.left), **kw)
                 + " / "
-                + self.process(Cast(binary.right, division_type), **kw)
+                + self.process(self._cast_decimal_literal_column(binary.right), **kw)
             )
 
         if isinstance(left_type, types.Integer) and isinstance(right_type, types.Integer):
@@ -1087,6 +1101,29 @@ class AthenaStatementCompiler(SQLCompiler):
             )
 
         return super().visit_truediv_binary(binary, operator, **kw)
+
+    def _cast_decimal_literal_column(self, operand):
+        """Cast a ``literal_column()`` typed DECIMAL with a precision to ``DECIMAL(38, scale)``.
+
+        Athena reads a decimal literal such as ``5.52`` as DOUBLE, so a literal column
+        keeps its declared DECIMAL type only through a cast. The widest precision keeps
+        the cast from overflowing.
+
+        Args:
+            operand: An operand of an arithmetic expression.
+
+        Returns:
+            The cast operand, or the operand itself if it is not such a literal column.
+        """
+        operand_type = operand.type
+        if (
+            isinstance(operand, ColumnClause)
+            and operand.is_literal
+            and isinstance(operand_type, types.Numeric)
+            and operand_type.precision is not None
+        ):
+            return Cast(operand, types.DECIMAL(38, operand_type.scale or 0))
+        return operand
 
     @override
     def visit_cast(self, cast: Cast[Any], **kwargs):

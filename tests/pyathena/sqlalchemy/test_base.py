@@ -1418,6 +1418,33 @@ class TestSQLAlchemyAthena:
             pytest.skip(f"Athena formatted this view without a blank line: {rows!r}")
         assert definition == "\n".join(row or "" for row in rows)
 
+    def test_truediv_decimal(self, engine):
+        engine, conn = engine
+        decimal = types.DECIMAL(10, 2)
+        large = sqlalchemy.cast(literal_column("99999999.99"), types.Numeric(10, 2))
+        small = sqlalchemy.cast(literal_column("0.15"), types.Numeric(10, 2))
+        one = sqlalchemy.cast(literal_column("1"), types.Numeric(10, 2))
+        row = conn.execute(
+            select(
+                literal_column("5.52", decimal) / literal_column("2.4", decimal),
+                sqlalchemy.literal(Decimal("5.52")) / sqlalchemy.literal(Decimal("2.4")),
+                # SQLAlchemy gives the bind the column's NUMERIC(10, 2).
+                literal_column("5.52", types.Numeric(10, 2)) / Decimal("1.2345"),
+                # SQLAlchemy types the sum NUMERIC(10, 2); Athena types it decimal(11, 2).
+                (large + large) / literal_column("2", types.Integer()),
+                # SQLAlchemy types the product NUMERIC(10, 2); Athena types it decimal(20, 4).
+                (small * small) / one,
+            )
+        ).one()
+        # Each quotient has the larger scale of its operands.
+        assert [str(value) for value in row] == [
+            "2.30",
+            "2.30",
+            "4.4714",
+            "99999999.99",
+            "0.0225",
+        ]
+
     def test_char_length(self, engine):
         engine, conn = engine
         one_row_complex = Table("one_row_complex", MetaData(schema=ENV.schema), autoload_with=conn)

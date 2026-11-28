@@ -323,13 +323,19 @@ class TestAthenaStatementCompiler:
                 "SELECT 15 / CAST(10 AS DOUBLE) AS anon_1",
             ),
             (
-                literal_column("5.52", type_=Numeric(10, 2))
-                / literal_column("2.4", type_=Numeric(10, 2)),
-                "SELECT CAST(5.52 AS DECIMAL(10, 2)) / CAST(2.4 AS DECIMAL(10, 2)) AS anon_1",
+                literal_column("5.52", type_=types.DECIMAL(10, 2))
+                / literal_column("2.4", type_=Numeric(10, 4)),
+                "SELECT CAST(5.52 AS DECIMAL(38, 2)) / CAST(2.4 AS DECIMAL(38, 4)) AS anon_1",
             ),
             (
                 literal_column("5.52", type_=Numeric(10, 2)) / literal_column("2", type_=Integer()),
-                "SELECT CAST(5.52 AS DECIMAL(10, 2)) / CAST(2 AS DECIMAL(10, 2)) AS anon_1",
+                "SELECT CAST(5.52 AS DECIMAL(38, 2)) / 2 AS anon_1",
+            ),
+            (
+                # SQLAlchemy types the product NUMERIC(10, 2); Athena types it decimal(20, 4).
+                (column("x", type_=Numeric(10, 2)) * column("x", type_=Numeric(10, 2)))
+                / column("y", type_=Numeric(10, 4)),
+                "SELECT (x * x) / y AS anon_1",
             ),
             (
                 literal_column("5.52", type_=Float()) / literal_column("2.4", type_=Float()),
@@ -343,6 +349,14 @@ class TestAthenaStatementCompiler:
         )
 
         assert str(compiled) == expected
+
+    def test_visit_truediv_binary_decimal_bind(self):
+        # SQLAlchemy gives the bind the column's NUMERIC(10, 2), but the formatted
+        # value keeps its own scale.
+        statement = select(literal_column("5.52", type_=Numeric(10, 2)) / Decimal("1.2345"))
+        assert executed_sql(statement) == (
+            "SELECT CAST(5.52 AS DECIMAL(38, 2)) / DECIMAL '1.2345' AS anon_1"
+        )
 
     def _compile_sql(self, expression):
         return str(expression.compile(dialect=self.dialect, compile_kwargs={"literal_binds": True}))
