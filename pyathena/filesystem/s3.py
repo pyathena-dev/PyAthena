@@ -1901,19 +1901,21 @@ class S3FileSystem(AbstractFileSystem):
 
     @staticmethod
     def _stringify_paths(path: Any) -> Any:
-        """Convert an ``os.PathLike`` path, or those of a list, to strings.
+        """Convert an ``os.PathLike`` path, or those of a list or tuple, to strings.
 
         The paths are converted with fsspec's ``stringify_path``, as
-        ``_strip_protocol()`` converts them, but their slashes are kept.
+        ``_strip_protocol()`` converts them, but their slashes are kept. A
+        tuple becomes a list, so that the methods pair and expand it as a
+        list.
 
         Args:
-            path: A path or a list of paths.
+            path: A path, or a list or tuple of paths.
 
         Returns:
             The converted path, or a new list of the converted paths.
             Strings are returned unchanged.
         """
-        if isinstance(path, list):
+        if isinstance(path, (list, tuple)):
             return [stringify_path(p) for p in path]
         return stringify_path(path)
 
@@ -3067,11 +3069,11 @@ class S3FileSystem(AbstractFileSystem):
         ``copy()``. The destinations named after the sources are checked to
         lie under ``lpath``. With ``outfile``, the files are written to it
         one after another, in order. A sequence of local destinations, such
-        as a tuple, is paired as a list is: in order with a list of sources,
-        or with the expanded sources, which are sorted. Its paths are made
-        absolute, with ``~`` expanded, as one destination path is. A version
-        that the arguments of ``get_file()`` request (``version_id``, or a
-        ``VersionId`` parameter) names the version of every source, which
+        as a tuple, is paired as a list is: in order with a list or tuple of
+        sources, or with the expanded sources, which are sorted. Its paths
+        are made absolute, with ``~`` expanded, as one destination path is. A
+        version that the arguments of ``get_file()`` request (``version_id``,
+        or a ``VersionId`` parameter) names the version of every source, which
         ``get_file()`` downloads as an object, so only a source whose name
         ends in a slash, which names a local directory, is left out as a
         directory.
@@ -3084,7 +3086,8 @@ class S3FileSystem(AbstractFileSystem):
             lpath: Local destination path, or sequence of paths or file-like
                 objects, one for each source.
             recursive: Whether to copy the directories with their contents.
-            callback: Progress callback. It and its branches for the files
+            callback: Progress callback, advanced by one as each download
+                ends, also a failed one. It and its branches for the files
                 are used from the threads that download them, one at a time.
             maxdepth: Maximum depth of a recursive copy.
             batch_size: Number of downloads to run at the same time, as in
@@ -3119,9 +3122,12 @@ class S3FileSystem(AbstractFileSystem):
                     is named after the source as a string.
             """
             rp, lp = pair
-            with locked.branched(str(rp), lp) as child:
-                self.get_file(rp, lp, callback=child, **call_kwargs)
-            locked.relative_update(1)
+            try:
+                with locked.branched(str(rp), lp) as child:
+                    self.get_file(rp, lp, callback=child, **call_kwargs)
+            finally:
+                # As each download ends, also a failed one, as in _get().
+                locked.relative_update(1)
 
         locked.set_size(len(pairs))
         if outfile:
@@ -3137,7 +3143,9 @@ class S3FileSystem(AbstractFileSystem):
 
         In a sequence, file-like objects are kept, also when they are
         ``os.PathLike``, as ``get_file()`` writes into them. One
-        ``os.PathLike`` destination is a path, as in fsspec's ``_get()``.
+        ``os.PathLike`` destination is a path, as in fsspec's ``_get()``; a
+        list or tuple is a sequence, also when it is ``os.PathLike`` or looks
+        file-like, as the sources are (see :meth:`_stringify_paths`).
 
         Args:
             lpath: Local destination path, or sequence of paths or file-like
@@ -3147,6 +3155,12 @@ class S3FileSystem(AbstractFileSystem):
             The absolute path, ``lpath`` if it is file-like, or a list of
             the destinations.
         """
+        if isinstance(lpath, (list, tuple)):
+            # A sequence, also when it is path-like or file-like.
+            return [
+                make_path_posix(p) if isinstance(p, (str, os.PathLike)) and not isfilelike(p) else p
+                for p in lpath
+            ]
         if isinstance(lpath, (str, os.PathLike)):
             return make_path_posix(lpath)
         if isfilelike(lpath):
@@ -3995,7 +4009,9 @@ class S3FileSystem(AbstractFileSystem):
             rpath: S3 destination path, or list of paths when ``lpath`` is a
                 list.
             recursive: Whether to copy the directories with their contents.
-            callback: Progress callback. It and its branches for the files
+            callback: Progress callback, advanced by one as each upload
+                ends, also a failed one; the local directories, which upload
+                nothing, are not counted. It and its branches for the files
                 are used from the threads that upload them, one at a time.
             maxdepth: Maximum depth of a recursive copy.
             batch_size: Number of uploads to run at the same time, as in
@@ -4004,9 +4020,11 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             ValueError: If two files have the same destination, the
-                destination of a local file names a version, also when
-                ``rpath`` names one and the file is named below it, or
-                ``batch_size`` is neither positive, -1, nor None.
+                destination of a local file is not an S3 path or names a
+                version, also when ``rpath`` names one and the file is named
+                below it, or ``batch_size`` is neither positive, -1, nor
+                None. A destination without a key, to which ``put_file()``
+                writes nothing, is not checked.
         """
         lpath, rpath = self._stringify_paths(lpath), self._stringify_paths(rpath)
         limit = self._batch_limit(batch_size)
@@ -4028,13 +4046,17 @@ class S3FileSystem(AbstractFileSystem):
                 pair: The local source and its S3 destination.
             """
             lp, rp = pair
-            # Named after the destination as a string.
-            with locked.branched(lp, str(rp)) as child:
-                self.put_file(lp, rp, callback=child, **call_kwargs)
-            locked.relative_update(1)
+            try:
+                # Named after the destination as a string.
+                with locked.branched(lp, str(rp)) as child:
+                    self.put_file(lp, rp, callback=child, **call_kwargs)
+            finally:
+                # As each upload ends, also a failed one, as in _put().
+                locked.relative_update(1)
 
-        locked.set_size(len(pairs))
-        self._run_batch(put_pair, pairs, concurrency)
+        # As in _put(), only the files are transferred and counted.
+        locked.set_size(len(files))
+        self._run_batch(put_pair, files, concurrency)
 
     def _put_pairs(
         self, lpath, rpath, recursive=False, maxdepth=None, **kwargs
@@ -4050,7 +4072,9 @@ class S3FileSystem(AbstractFileSystem):
         named, e.g., ``x?versionId=v1`` is written to that key instead of
         naming a version. Any other destination, such as ``rpath`` itself,
         one of a list of destinations, or that of a local directory, is a
-        string without the protocol.
+        string without the protocol, unlike the sources of two lists of
+        :meth:`get`, which are passed to ``get_file()`` with the protocol they
+        are given with, if any.
 
         Args:
             lpath: Local source path, glob pattern, or list of them.
@@ -4067,8 +4091,11 @@ class S3FileSystem(AbstractFileSystem):
             local files among them, which ``put_file()`` uploads.
 
         Raises:
-            ValueError: If two files have the same destination, or ``rpath``
-                names a version and a local file is named below it.
+            ValueError: If two files have the same destination, the
+                destination of a file is not an S3 path or names a version,
+                or ``rpath`` names a version and a local file is named below
+                it. A destination without a key, to which ``put_file()``
+                writes nothing, is not checked.
         """
         if isinstance(lpath, list) and isinstance(rpath, list):
             pairs: list[tuple[str, str | S3Path]] = [
@@ -4115,7 +4142,14 @@ class S3FileSystem(AbstractFileSystem):
             pairs = list(zip(lpaths, rpaths, strict=True))
         # put_file() uploads nothing for a local directory.
         files = [pair for pair, is_dir in zip(pairs, directories, strict=True) if not is_dir]
-        if len({rp for _, rp in files}) != len(files):
+        # Checked as the S3 paths that put_file() parses them into, before
+        # anything is uploaded: one that is not an S3 path or names a version
+        # raises, as put_file() would. put_file() writes nothing to one
+        # without a key.
+        destinations = [d for d in (S3Path.of(rp) for _, rp in files) if d.key]
+        if any(d.version_id for d in destinations):
+            raise ValueError("Cannot write to the file with the version specified.")
+        if len(set(destinations)) != len(destinations):
             raise ValueError("Cannot put several paths to the same destination.")
         return pairs, files
 

@@ -73,6 +73,7 @@ from tests.pyathena.util import (
     MULTIPART_COPY_SIZE,
     BranchRecordingCallback,
     OpaquePath,
+    PathTuple,
     ThrottledOperation,
     call_bounded,
     forking,
@@ -1552,8 +1553,8 @@ class TestS3FileSystem:
                 "",
                 {"recursive": True},
                 [("put_object", "up/x?versionId=v1", None)],
-                # The directory itself is paired with the destination root.
-                ["bucket/up", "bucket/up/x?versionId=v1"],
+                # GH-1482: the directory, which uploads nothing, has no branch.
+                ["bucket/up/x?versionId=v1"],
                 id="dir",
             ),
             pytest.param(
@@ -2151,6 +2152,10 @@ class TestS3FileSystem:
                 id="put_file",
             ),
             pytest.param(lambda fs, p, local: fs.put(p(f"{local}/src"), p("bucket/new")), id="put"),
+            # GH-1482: the paths of a tuple are converted as those of a list.
+            pytest.param(
+                lambda fs, p, local: fs.rm((p("bucket/key"), p("bucket/dir/a"))), id="rm-tuple"
+            ),
             pytest.param(lambda fs, p, local: fs.get(p("bucket/key"), p(f"{local}/dst")), id="get"),
             pytest.param(lambda fs, p, local: fs.sign(p("bucket/key")), id="sign"),
             pytest.param(lambda fs, p, local: fs.metadata(p("bucket/key")), id="metadata"),
@@ -2197,6 +2202,75 @@ class TestS3FileSystem:
         # Each call either sends a request or returns a value.
         assert outcomes[0][0] is not None or outcomes[0][1]
         assert outcomes[1] == outcomes[0]
+
+    @pytest.mark.parametrize(
+        ("call", "expected"),
+        [
+            pytest.param(
+                lambda fs, seq, local, cb: fs.copy(
+                    seq(["bucket/dir/b", "bucket/dir/a"]), seq(["bucket/x", "bucket/y"])
+                ),
+                [("dir/a", None, "y"), ("dir/b", None, "x")],
+                id="copy",
+            ),
+            pytest.param(
+                lambda fs, seq, local, cb: fs.mv(
+                    seq(["bucket/dir/b", "bucket/dir/a"]), seq(["bucket/x", "bucket/y"])
+                ),
+                [("dir/a", None, "y"), ("dir/b", None, "x")],
+                id="mv",
+            ),
+            pytest.param(
+                lambda fs, seq, local, cb: fs.get(
+                    seq(["bucket/dir/b", "bucket/dir/a"]),
+                    seq([f"{local}/x", f"{local}/y"]),
+                    callback=cb,
+                ),
+                [("bucket/dir/a", "y"), ("bucket/dir/b", "x")],
+                id="get",
+            ),
+            pytest.param(
+                lambda fs, seq, local, cb: fs.put(
+                    seq([f"{local}/b", f"{local}/a"]), seq(["bucket/x", "bucket/y"]), callback=cb
+                ),
+                [("a", "bucket/y"), ("b", "bucket/x")],
+                id="put",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "seq",
+        [
+            pytest.param(lambda p: list(p), id="list"),
+            pytest.param(lambda p: tuple(p), id="tuple"),
+            # The sources end in "b", the destinations in "x".
+            pytest.param(lambda p: tuple(p) if p[0].endswith("b") else list(p), id="tuple-list"),
+            pytest.param(lambda p: list(p) if p[0].endswith("b") else tuple(p), id="list-tuple"),
+            # A tuple that is also path-like, and looks file-like, is still a
+            # tuple of paths.
+            pytest.param(lambda p: PathTuple(p), id="path-like-tuple"),
+        ],
+    )
+    def test_sequence_paths_pair_in_order(self, tmp_path, call, expected, seq):
+        # GH-1482: a tuple of sources is paired in order with the
+        # destinations, as a list is, instead of being expanded and sorted.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs, {"dir/a", "dir/b"})
+        (tmp_path / "a").write_bytes(b"a")
+        (tmp_path / "b").write_bytes(b"b")
+        callback = BranchRecordingCallback()
+        call(fs, seq, tmp_path, callback)
+
+        def name(path):
+            # The local paths by their names.
+            return path if path.startswith("bucket/") else os.path.basename(path)
+
+        pairs = s3_copy_targets(requests) or sorted(
+            (name(s), name(d)) for s, d in zip(callback.sources, callback.destinations, strict=True)
+        )
+        assert pairs == expected
 
     def test_requester_pays(self):
         # GH-969: RequestPayer is sent only with the operations that accept

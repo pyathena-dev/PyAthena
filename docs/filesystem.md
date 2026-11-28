@@ -157,6 +157,13 @@ A source of `cp` or `mv` without an object at its key, such as a key prefix give
 list, writes no destination and does not conflict; the sources without a version whose
 destinations conflict are looked up with HeadObject before anything is copied. `get`
 with `outfile` writes the objects into it one after another, in order.
+`get` and `put` advance the progress of their callback by one for each pair as its
+transfer ends, also when it fails; `put` transfers only the local files, not the
+directories. Before uploading anything, `put` raises `ValueError` if the destination of
+a local file is not an S3 path, names a version, or names the object of another file; a
+destination without a key, to which `put_file` writes nothing, is not checked. It passes
+its destinations to `put_file` without the protocol, while `get` passes the sources of
+two lists to `get_file` with the protocol they are given with, if any.
 
 `rm` deletes up to 1,000 objects per DeleteObjects request, `batch_size` requests at a
 time. Its `max_workers` argument is a deprecated alias of `batch_size`.
@@ -327,6 +334,8 @@ logged.
 
 Every method of the filesystems also accepts paths as `os.PathLike` objects, such as
 `pathlib.PurePosixPath("YOUR_S3_BUCKET/dir/key")`, and uses them as their strings.
+`rm`, `cp`, `mv`, `get`, and `put` use a tuple of paths as a list, so a tuple of sources
+is paired in order with a list or tuple of destinations.
 `pathlib` removes a trailing slash and collapses `//`, so a path with the `s3://`
 protocol or a trailing slash needs to be a string. On Windows, `pathlib.Path` joins
 its parts with backslashes, so S3 paths need `PurePosixPath`.

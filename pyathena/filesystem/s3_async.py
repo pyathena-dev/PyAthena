@@ -635,7 +635,10 @@ class AioS3FileSystem(AsyncFileSystem):
 
     async def _rm(
         self,
-        path: str | os.PathLike[str] | list[str | os.PathLike[str]],
+        path: str
+        | os.PathLike[str]
+        | list[str | os.PathLike[str]]
+        | tuple[str | os.PathLike[str], ...],
         recursive: bool = False,
         batch_size: int | None = None,
         maxdepth: int | None = None,
@@ -649,7 +652,8 @@ class AioS3FileSystem(AsyncFileSystem):
         have not started and waits for the others.
 
         Args:
-            path: S3 path (s3://bucket/key) or list of paths to delete.
+            path: S3 path (s3://bucket/key), or list or tuple of paths to
+                delete.
             recursive: Whether to delete all objects below the paths.
             batch_size: Number of DeleteObjects requests to send at the same
                 time. None takes the ``batch_size`` of the internal
@@ -1029,8 +1033,11 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Raises:
             ValueError: If two files have the same destination, or the
-                destination of a local file names a version, also when
-                ``rpath`` names one and the file is named below it.
+                destination of a local file is not an S3 path or names a
+                version, also when ``rpath`` names one and the file is named
+                below it, as in :meth:`S3FileSystem.put`. A destination
+                without a key, to which ``_put_file()`` writes nothing, is not
+                checked.
         """
         lpath, rpath = self._sync_fs._stringify_paths(lpath), self._sync_fs._stringify_paths(rpath)
         # As in _get(), a converted source returns what its string returns.

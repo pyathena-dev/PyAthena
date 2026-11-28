@@ -1793,6 +1793,24 @@ class LocalBucketFileSystem(DirFileSystem):
         """Do nothing, as PyAthena's filesystems release their idle threads here."""
 
 
+class PathTuple(tuple):
+    """A tuple of paths that is also ``os.PathLike``, as its first path.
+
+    It also has the attributes by which fsspec's ``isfilelike()`` recognizes
+    a file-like object, which it is not.
+    """
+
+    read = close = tell = None
+
+    def __fspath__(self):
+        """Return the first path.
+
+        Returns:
+            The first path of the tuple.
+        """
+        return self[0]
+
+
 class OpaquePath:
     """An ``os.PathLike`` path whose ``str()`` is not the path.
 
