@@ -2644,8 +2644,8 @@ class TestAioS3FileSystem:
                 lambda fs, tmp, cb: fs._get(
                     PurePosixPath("bucket/dir"), str(tmp / "out"), callback=cb
                 ),
-                [],
-                [0],
+                list,
+                None,
                 id="get-path-like-directory",
             ),
             pytest.param(
@@ -2690,10 +2690,11 @@ class TestAioS3FileSystem:
         # of the transfers as the callback's branch_coro() wraps them, or
         # None, without a use of the callback, when a source given as a str
         # copied without recursive, or with maxdepth, names only directories.
-        # A path-like source of only directories, which the pairing leaves
-        # out as for a string, transfers nothing and returns []. _get()
-        # returned None, and _put() of only such string sources set the size
-        # of the callback to 0 and returned [].
+        # A source of another type returns a list, whose length the callback
+        # receives as its size; expected=list checks only that, as the
+        # pairing of a path-like S3 directory differs from fsspec's. _get()
+        # returned None, and _put() of only such str sources set the size of
+        # the callback to 0 and returned [].
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
@@ -2722,8 +2723,13 @@ class TestAioS3FileSystem:
                 return wrapped
 
         callback = Recording()
-        assert await await_bounded(call(fs, tmp_path, callback)) == expected
-        assert callback.sizes == sizes
+        result = await await_bounded(call(fs, tmp_path, callback))
+        if expected is list:
+            assert isinstance(result, list)
+            assert callback.sizes == [len(result)]
+        else:
+            assert result == expected
+            assert callback.sizes == sizes
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
