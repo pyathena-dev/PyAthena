@@ -454,6 +454,9 @@ class TestAthenaDialect:
                 stubber.add_response("list_table_metadata", {"TableMetadataList": []})
                 insp = sqlalchemy.inspect(engine)
                 assert insp.has_table("events")
+                # Comments and options look up the table separately, and find the
+                # metadata cached under the same database.
+                assert insp.get_table_comment("events") == {"text": None}
                 assert insp.get_table_names() == []
         finally:
             engine.dispose()
