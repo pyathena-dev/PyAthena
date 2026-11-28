@@ -3870,8 +3870,8 @@ class S3FileSystem(AbstractFileSystem):
             end: Byte offset to stop reading at, as in :meth:`cat_file`.
             name: The path string that the caller passed, which ``info()``
                 looks up for the size of the object of a negative offset or
-                an empty range if ``path`` has no version, and which a missing
-                object is reported by; None to look up ``path`` itself.
+                an empty range if ``path`` has no version, and which the
+                errors raised here name; None to use ``path`` itself.
             **kwargs: Additional parameters passed to the GetObject API, and
                 ``version_id``, as in :meth:`cat_file`.
 

@@ -5255,17 +5255,9 @@ class TestS3FileSystem:
             # GH-1425: also the VersionId parameter selects the version that
             # sizes a negative offset. The current object was looked up.
             ("s3://bucket/key", {"VersionId": "v1"}, ("s3://bucket/key", "v1"), "v1"),
-            # GH-1425: an empty VersionId is sent as given, which S3 rejects,
-            # instead of reading the current object.
+            # GH-1425: an empty VersionId is sent as given instead of reading
+            # the current object.
             ("s3://bucket/key", {"VersionId": ""}, ("s3://bucket/key", None), ""),
-            # GH-1425: a version that ends in a slash sizes the offset. The
-            # name, which drops the slash, was looked up.
-            (
-                "s3://bucket/key?versionId=v1/",
-                {},
-                (S3Path("bucket", "key", "v1/"), "v1/"),
-                "v1/",
-            ),
         ],
     )
     def test_cat_file_version_id(self, path, kwargs, lookup, expected):
@@ -5291,6 +5283,27 @@ class TestS3FileSystem:
             Range="bytes=2-3",
             VersionId=expected,
         )
+
+    def test_cat_file_range_version_ending_in_slash(self):
+        # GH-1425: a version of the path that ends in a slash sizes a
+        # negative offset, as it is read. The name of the path, which drops
+        # the slash, sized the range by another version.
+        fs = self._make_fs()
+        requests = self._record_requests(
+            fs,
+            responses={
+                "head_object": lambda request: {
+                    "ContentLength": 4 if request.get("VersionId") == "v1/" else 2,
+                    "ETag": '"e"',
+                }
+            },
+        )
+
+        assert fs.cat_file("s3://bucket/key?versionId=v1/", start=-2, end=-1) == b"aa"
+        assert [(name, r.get("VersionId"), r.get("Range")) for name, r in requests] == [
+            ("head_object", "v1/", None),
+            ("get_object", "v1/", "bytes=2-2"),
+        ]
 
     def _make_object_fs(self, data):
         # A filesystem holding one object at s3://bucket/key whose client
