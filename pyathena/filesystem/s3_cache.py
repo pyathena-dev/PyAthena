@@ -63,8 +63,8 @@ class S3ListingCache:
     invalidation through this cache drops the reference, so a lookup that
     starts after it returns does not return a result with parameters cached
     before it, even if a lookup that was running stores the dictionary
-    again. The cache adds no lock. A lookup whose request was answered before a write can still
-    cache its own answer after the invalidation, as in any filesystem cache.
+    again. The cache adds no lock. A lookup whose request was answered
+    before a write can still cache its own answer after the invalidation.
 
     Attributes:
         dircache: The ``DirCache`` that stores the entries, which the
@@ -89,8 +89,11 @@ class S3ListingCache:
         """
         self.dircache = dircache
         # The current dictionary of lookups with parameters of each lookup
-        # key. An entry goes away when the dictionary is no longer
-        # referenced, such as after the DirCache drops it.
+        # key. An entry normally goes away when the dictionary is no longer
+        # referenced, such as after the DirCache drops it. If garbage
+        # collection cleared the weak references of the cache and a finalizer
+        # resurrected it, dead entries stay until their keys are invalidated
+        # or the cache is cleared.
         self._lookups: weakref.WeakValueDictionary[str | tuple[str, str, str], _Lookups] = (
             weakref.WeakValueDictionary()
         )

@@ -5457,7 +5457,6 @@ class TestS3FileSystem:
         }
         path = "s3://bucket/key"
         other_key = {**self.LOOKUP_KWARGS, "SSECustomerKey": "j" * 32}
-        fs.info(path, **self.LOOKUP_KWARGS)
 
         class InterruptedDirCache(DirCache):
             armed = False
@@ -5477,16 +5476,16 @@ class TestS3FileSystem:
                 return value
 
             def __setitem__(self, key, value):
-                if self.armed:
+                if self.armed and interruption != "replace_dircache":
                     # A write invalidates the object just before the lookup
-                    # with other parameters stores the cached lookups, its
-                    # only write to the cache.
+                    # with other parameters stores the cached lookups again,
+                    # its only assignment to the DirCache.
                     self.armed = False
                     if interruption == "invalidate_path":
                         fs.invalidate_cache(path)
                     elif interruption == "invalidate_all":
                         fs.invalidate_cache()
-                    else:
+                    elif interruption == "evict_then_invalidate":
                         # The DirCache drops the entry, as on expiry or
                         # eviction, before the invalidation.
                         del self[key]
@@ -5494,10 +5493,15 @@ class TestS3FileSystem:
                 super().__setitem__(key, value)
 
         cache = InterruptedDirCache()
-        cache.update(fs.dircache)
         fs.dircache = cache
+        fs.info(path, **self.LOOKUP_KWARGS)
+        fs.core.call.reset_mock()
+        assert fs.info(path, **self.LOOKUP_KWARGS).etag == '"old"'
+        fs.core.call.assert_not_called()
+
         cache.armed = True
         fs.info(path, **other_key)
+        assert not cache.armed
 
         fs.core.call.reset_mock()
         assert fs.info(path, **self.LOOKUP_KWARGS).etag == '"new"'
