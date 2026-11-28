@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import time
+import weakref
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -21,6 +22,18 @@ if TYPE_CHECKING:
     from fsspec.dircache import DirCache
 
     from pyathena.filesystem.s3_object import S3Object
+
+
+class _Lookups(dict[tuple[tuple[str, Any], ...], tuple[float, "S3Object"]]):
+    """The lookups of a path made with lookup request parameters.
+
+    Each set of parameters, as :meth:`S3ListingCache._lookup_id` identifies
+    it, maps to the time at which its result was cached and the result. The
+    dictionary can be referenced weakly, so that :class:`S3ListingCache` can
+    tell which one is current without keeping it alive.
+    """
+
+    __slots__ = ("__weakref__",)
 
 
 class S3ListingCache:
@@ -44,6 +57,15 @@ class S3ListingCache:
     copying them, so callers must not change them, and copy those that they
     return.
 
+    The cache also keeps, outside the ``DirCache``, a weak reference to the
+    current dictionary of lookups with parameters of each lookup key, and
+    uses a dictionary from the ``DirCache`` only if it is that one. An
+    invalidation through this cache drops the reference, so a lookup that
+    starts after it returns does not return a result with parameters cached
+    before it, even if a lookup that was running stores the dictionary
+    again. The cache adds no lock. A lookup whose request was answered
+    before a write can still cache its own answer after the invalidation.
+
     Attributes:
         dircache: The ``DirCache`` that stores the entries, which the
             filesystem replaces when its ``dircache`` is assigned.
@@ -57,7 +79,7 @@ class S3ListingCache:
     # string, can equal.
     VERSION_KEY: ClassVar[str] = "versionId"
 
-    __slots__ = ("dircache",)
+    __slots__ = ("_lookups", "dircache")
 
     def __init__(self, dircache: DirCache) -> None:
         """Create a cache that stores its entries in a ``DirCache``.
@@ -66,6 +88,16 @@ class S3ListingCache:
             dircache: The ``DirCache`` that stores the entries.
         """
         self.dircache = dircache
+        # The current dictionary of lookups with parameters of each lookup
+        # key. An entry normally goes away when the dictionary is no longer
+        # referenced, such as after the DirCache drops it. If garbage
+        # collection cleared the weak reference that the WeakValueDictionary
+        # keeps to itself for its removal callbacks, and a finalizer
+        # resurrected it, the keys of dead dictionaries stay until a lookup
+        # replaces them, they are invalidated, or the cache is cleared.
+        self._lookups: weakref.WeakValueDictionary[str | tuple[str, str, str], _Lookups] = (
+            weakref.WeakValueDictionary()
+        )
 
     @staticmethod
     def _parent_listing_key(path: S3Path) -> str | tuple[str, str]:
@@ -149,8 +181,8 @@ class S3ListingCache:
         key = self._lookup_key(path)
         if not lookup_kwargs:
             return cast("S3Object | None", dircache.get(key))
-        lookups = dircache.get((key, self.LOOKUPS_KEY))
-        cached = lookups.get(self._lookup_id(lookup_kwargs)) if lookups else None
+        lookups = self._current_lookups(dircache, key)
+        cached = lookups.get(self._lookup_id(lookup_kwargs)) if lookups is not None else None
         if cached is None:
             return None
         cached_at, file = cached
@@ -159,7 +191,7 @@ class S3ListingCache:
             # Caching the result of any parameters renews the dircache entry
             # of the path, so each result expires on its own.
             return None
-        return cast("S3Object", file)
+        return file
 
     def put_lookup(self, path: S3Path, lookup_kwargs: Mapping[str, Any], file: S3Object) -> None:
         """Cache the HeadObject or HeadBucket result of a lookup.
@@ -183,15 +215,38 @@ class S3ListingCache:
         if not lookup_kwargs:
             dircache[key] = file
             return
-        lookups_key = (key, self.LOOKUPS_KEY)
-        lookups = dircache.get(lookups_key)
+        lookups = self._current_lookups(dircache, key)
         if lookups is None:
-            lookups = {}
+            # Only a new, empty dictionary becomes current, and only once, so
+            # that one that an invalidation has replaced is never current
+            # again, even if this or another lookup stores it again.
+            lookups = _Lookups()
+            self._lookups[key] = lookups
         # Updated in place: a copy written back could replace a result that
         # another thread has cached since for other parameters.
         lookups[self._lookup_id(lookup_kwargs)] = (time.time(), file)
         # Set again so that the expiry time of the entry is renewed.
-        dircache[lookups_key] = lookups
+        dircache[(key, self.LOOKUPS_KEY)] = lookups
+
+    def _current_lookups(
+        self, dircache: DirCache, key: str | tuple[str, str, str]
+    ) -> _Lookups | None:
+        """Get the current cached lookups with parameters of a lookup key.
+
+        Args:
+            dircache: The ``DirCache`` to read, read once by the caller so
+                that a lookup stores into the cache that it read.
+            key: The lookup key (see :meth:`_lookup_key`).
+
+        Returns:
+            The dictionary of lookups with parameters in the ``DirCache``,
+            or None if there is none or it is not the current one, such as
+            one that an invalidation removed and a lookup stored again.
+        """
+        lookups = dircache.get((key, self.LOOKUPS_KEY))
+        if lookups is None or self._lookups.get(key) is not lookups:
+            return None
+        return cast("_Lookups", lookups)
 
     def evict_missing(self, path: S3Path) -> None:
         """Remove the cached entries of a bucket or an object found missing.
@@ -323,6 +378,7 @@ class S3ListingCache:
 
     def clear(self) -> None:
         """Remove every cached entry."""
+        self._lookups.clear()
         self.dircache.clear()
 
     def invalidate_path(self, name: str, trailing: int = 0) -> None:
@@ -396,9 +452,14 @@ class S3ListingCache:
     def _evict_lookup(self, key: str | tuple[str, str, str]) -> None:
         """Remove the cached lookups under a lookup key, with and without parameters.
 
+        The dictionary of lookups with parameters stops being current, so
+        that a lookup that read it before and stores it again does not make
+        its results usable again.
+
         Args:
             key: The lookup key (see :meth:`_lookup_key`).
         """
+        self._lookups.pop(key, None)
         self._evict(key)
         self._evict((key, self.LOOKUPS_KEY))
 
