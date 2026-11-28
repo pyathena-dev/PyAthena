@@ -234,30 +234,40 @@ class TestS3MultipartWriter:
             stubber.assert_no_pending_responses()
 
     @pytest.mark.parametrize(
-        ("upload_type", "inherited_type", "sent"),
-        [("FULL_OBJECT", None, True), ("COMPOSITE", "FULL_OBJECT", False)],
+        ("upload_type", "inherited_type", "request_type", "sent"),
+        [
+            ("FULL_OBJECT", None, None, True),
+            ("COMPOSITE", "FULL_OBJECT", None, False),
+            # Without a type of the upload, that of the request decides.
+            (None, "FULL_OBJECT", "COMPOSITE", False),
+            (None, None, "FULL_OBJECT", True),
+        ],
     )
-    def test_writer_completion_checksum_type(self, upload_type, inherited_type, sent):
-        # GH-1383: the checksum type of the upload, not the inherited one,
-        # decides whether the completion takes the whole-object value.
+    def test_writer_completion_checksum_type(self, upload_type, inherited_type, request_type, sent):
+        # GH-1383: the checksum type that the completion sends, that of the
+        # upload or else of the request or the write, decides whether it
+        # takes the inherited whole-object value.
         params = {"ChecksumCRC32": "whole"}
         if inherited_type:
             params["ChecksumType"] = inherited_type
         writer, stubber = _make_writer(request_kwargs=params)
         identity = {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
-        writer.upload = S3MultipartUpload({**identity, "ChecksumType": upload_type})
+        writer.upload = S3MultipartUpload(
+            {**identity, **({"ChecksumType": upload_type} if upload_type else {})}
+        )
         stubber.add_response(
             "complete_multipart_upload",
             {"ETag": '"done"'},
             {
                 **identity,
-                "ChecksumType": upload_type,
+                "ChecksumType": upload_type or request_type or inherited_type,
                 **({"ChecksumCRC32": "whole"} if sent else {}),
                 "MultipartUpload": {"Parts": [{"PartNumber": 1, "ETag": '"one"'}]},
             },
         )
+        request = {"ChecksumType": request_type} if request_type else {}
         with stubber:
-            writer.complete([S3MultipartUploadPart(1, {"ETag": '"one"'})])
+            writer.complete([S3MultipartUploadPart(1, {"ETag": '"one"'})], **request)
             stubber.assert_no_pending_responses()
 
     def test_writer_copy_range_parameter(self):

@@ -4583,6 +4583,7 @@ class TestAioS3StreamedFile:
         await f.close()
         assert fs.core.get_object.call_args_list
         for call in fs.core.get_object.call_args_list:
+            assert call.args[0] == S3Path("bucket", "key")
             assert call.kwargs == {"RequestPayer": "requester"}
 
     @pytest.mark.asyncio

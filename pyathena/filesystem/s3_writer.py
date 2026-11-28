@@ -134,7 +134,13 @@ class S3MultipartWriter:
         Returns:
             The parameters that the operation accepts.
         """
-        inherited = self.inherited_params(method, self._request_kwargs, ranged)
+        # A ChecksumType of the request is the type that the completion
+        # sends, by which it takes the inherited whole-object values.
+        decisive = {
+            **self._request_kwargs,
+            **{k: v for k, v in params.items() if k == "ChecksumType"},
+        }
+        inherited = self.inherited_params(method, decisive, ranged)
         return self._core.operation_params(method, {**inherited, **params})
 
     def _upload_fields(self, method: str) -> frozenset[str]:
@@ -179,10 +185,11 @@ class S3MultipartWriter:
         type of a ``CompleteMultipartUpload`` request when the upload has
         them. An ``UploadPart`` request takes neither the checksum values,
         ``ContentMD5`` nor ``ContentLength`` of the whole object. The
-        completion takes the checksum values only when its checksum type is
-        ``FULL_OBJECT``, for which S3 checks them: the type of the upload, or
-        else the inherited ``ChecksumType``, not one given to the completion
-        itself.
+        completion takes the checksum values only when its checksum type,
+        that of the upload or else the ``ChecksumType`` of
+        ``request_kwargs``, is ``FULL_OBJECT``, the type for which S3 can
+        check them; the writer counts a ``ChecksumType`` given to the
+        completion itself.
 
         Args:
             method: The name of the client method, such as ``upload_part``.

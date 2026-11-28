@@ -7816,6 +7816,32 @@ class TestS3FileSystem:
             if fs.exists(path):
                 fs.rm(path)
 
+    def test_open_multipart_sends_whole_object_checksum(self, fs):
+        # GH-1383: the completion of a FULL_OBJECT upload takes the
+        # whole-object checksum of the file, which S3 checks: a wrong one
+        # fails the write.
+        block_size = 5 * 2**20
+        path = (
+            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
+            f"filesystem/test_open_multipart_sends_whole_object_checksum/{uuid.uuid4()}"
+        )
+        kwargs = {
+            "ChecksumAlgorithm": "CRC32",
+            "ChecksumType": "FULL_OBJECT",
+            "ChecksumCRC32": "AAAAAA==",
+        }
+        try:
+            with (
+                pytest.raises(OSError, match=r"BadDigest|crc32"),
+                fs.open(path, "wb", block_size=block_size, s3_additional_kwargs=kwargs) as file,
+            ):
+                file.write(b"x" * (block_size + 1))
+            assert not fs.exists(path)
+        finally:
+            fs.clear_multipart_uploads(path)
+            if fs.exists(path):
+                fs.rm(path)
+
     @pytest.mark.parametrize(
         ("algorithm", "checksum_type"),
         [("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],

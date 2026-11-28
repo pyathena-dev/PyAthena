@@ -434,6 +434,16 @@ class TestS3PutObject:
         assert actual["version_id"] == "v"
         assert actual["checksum_sha256"] is None
         assert {*_CHECKSUMS.values(), "checksum_type"} <= actual.keys()
+        assert {
+            "expiration",
+            "server_side_encryption",
+            "sse_customer_algorithm",
+            "sse_customer_key_md5",
+            "sse_kms_key_id",
+            "sse_kms_encryption_context",
+            "bucket_key_enabled",
+            "request_charged",
+        } <= actual.keys()
         assert not any(key.startswith("_") for key in actual)
 
     def test_equality(self):
@@ -623,6 +633,15 @@ class TestS3CompleteMultipartUpload:
         assert actual["version_id"] == "v"
         assert actual["location"] is None
         assert {*_CHECKSUMS.values(), "checksum_type"} <= actual.keys()
+        assert {
+            "bucket",
+            "key",
+            "expiration",
+            "server_side_encryption",
+            "sse_kms_key_id",
+            "bucket_key_enabled",
+            "request_charged",
+        } <= actual.keys()
         assert not any(key.startswith("_") for key in actual)
 
 
