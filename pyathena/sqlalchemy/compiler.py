@@ -1314,6 +1314,22 @@ class AthenaDDLCompiler(DDLCompiler):
             f"\t{self._escape_string_literal(str(key))} = {self._escape_string_literal(str(value))}"
         )
 
+    def _get_property_entries(self, properties: str | dict[Any, Any]) -> list[str]:
+        """Return the entries of a property list.
+
+        A dict gives one entry per item, with the key and the value quoted as
+        string literals. A string is a property list inserted as given.
+
+        Args:
+            properties: The properties as a dict, or as a property list string.
+
+        Returns:
+            The entries, to be joined with commas.
+        """
+        if isinstance(properties, dict):
+            return [self._get_property_specification(k, v) for k, v in properties.items()]
+        return [properties]
+
     def _get_bucket_count(
         self, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
     ) -> str | None:
@@ -1381,8 +1397,7 @@ class AthenaDDLCompiler(DDLCompiler):
     ) -> str:
         """Build the WITH SERDEPROPERTIES clause.
 
-        The keys and values of a dict are quoted as string literals. A string is
-        a property list inserted as given.
+        The properties are rendered as described in ``_get_property_entries()``.
 
         Args:
             dialect_opts: The table's ``awsathena_*`` dialect options.
@@ -1396,14 +1411,7 @@ class AthenaDDLCompiler(DDLCompiler):
         text = []
         if serde_properties:
             text.append("WITH SERDEPROPERTIES (")
-            if isinstance(serde_properties, dict):
-                text.append(
-                    ",\n".join(
-                        self._get_property_specification(k, v) for k, v in serde_properties.items()
-                    )
-                )
-            else:
-                text.append(serde_properties)
+            text.append(",\n".join(self._get_property_entries(serde_properties)))
             text.append(")")
         return "\n".join(text)
 
@@ -1622,8 +1630,8 @@ class AthenaDDLCompiler(DDLCompiler):
     ) -> str:
         """Build the TBLPROPERTIES clause, including the compression property.
 
-        The keys and values of a dict are quoted as string literals, and so is the
-        compression value. A string is a property list inserted as given.
+        The properties are rendered as described in ``_get_property_entries()``,
+        and the compression value is quoted as a string literal.
 
         The compression property is ``parquet.compression`` for Parquet,
         ``orc.compress`` for ORC, and ``write.compression`` for other formats.
@@ -1640,17 +1648,7 @@ class AthenaDDLCompiler(DDLCompiler):
             The TBLPROPERTIES clause, or an empty string if there are no properties.
         """
         properties = self._get_table_properties(dialect_opts, connect_opts)
-        if properties:
-            if isinstance(properties, dict):
-                table_properties = [
-                    ",\n".join(
-                        self._get_property_specification(k, v) for k, v in properties.items()
-                    )
-                ]
-            else:
-                table_properties = [properties]
-        else:
-            table_properties = []
+        table_properties = self._get_property_entries(properties) if properties else []
 
         compression = self._get_compression(dialect_opts, connect_opts)
         if compression:

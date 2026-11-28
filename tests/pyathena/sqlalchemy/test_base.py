@@ -2113,13 +2113,11 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
         table.create(bind=conn)
         actual = Table(table_name, MetaData(schema=ENV.schema), autoload_with=conn)
 
-        dialect_opts = actual.dialect_options["awsathena"]
-        assert {k: dialect_opts["serdeproperties"].get(k) for k in serde_properties} == (
-            serde_properties
-        )
-        assert {k: dialect_opts["tblproperties"].get(k) for k in table_properties} == (
-            table_properties
-        )
+        # Reflection also returns properties that Athena adds.
+        actual_serde = actual.dialect_options["awsathena"]["serdeproperties"]
+        actual_table = actual.dialect_options["awsathena"]["tblproperties"]
+        assert {k: actual_serde.get(k) for k in serde_properties} == serde_properties
+        assert {k: actual_table.get(k) for k in table_properties} == table_properties
 
     def test_create_table_json(self, engine):
         engine, conn = engine
