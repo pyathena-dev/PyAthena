@@ -899,7 +899,7 @@ class AthenaTableMetadata:
     def serde_properties(self) -> dict[str, str]:
         """The ``serde.param.``-prefixed table parameters with the prefix removed."""
         return {
-            k.replace("serde.param.", ""): v
+            k.removeprefix("serde.param."): v
             for k, v in self._parameters.items()
             if k.startswith("serde.param.")
         }
