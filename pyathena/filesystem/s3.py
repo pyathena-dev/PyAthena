@@ -2898,8 +2898,9 @@ class S3FileSystem(AbstractFileSystem):
                 :meth:`S3PathPairing.copy_pairs` names them.
             versioned: Whether every source names a version of an object,
                 which the ``get_file()`` arguments of a ``get()`` request (see
-                :meth:`_requests_version`), so that no source is left out as
-                a directory.
+                :meth:`_requests_version`), so that only a source whose name
+                ends in a separator, which names a local directory, is left
+                out as a directory.
             **kwargs: Passed to the expansion, as fsspec's ``get()`` passes its
                 keyword arguments to ``expand_path()``.
 
@@ -2908,13 +2909,15 @@ class S3FileSystem(AbstractFileSystem):
         """
         if not pairing.expands:
             return list(pairing.copy_pairs())
-        skips_directories = pairing.skips_directories and not versioned
         sources = [
             target
             for name, target in self._expand_paths(
                 pairing.path1, recursive=pairing.recursive, maxdepth=pairing.maxdepth, **kwargs
             )
-            if not (skips_directories and (trailing_sep(name) or self.isdir(target)))
+            if not (
+                pairing.skips_directories
+                and (trailing_sep(name) or (not versioned and self.isdir(target)))
+            )
         ]
         isdir = LocalFileSystem().isdir if local else self.isdir
         destination_is_dir = (
@@ -3064,7 +3067,8 @@ class S3FileSystem(AbstractFileSystem):
         absolute, with ``~`` expanded, as one destination path is. A version
         that the arguments of ``get_file()`` request (``version_id``, or a
         ``VersionId`` parameter) names the version of every source, which
-        ``get_file()`` downloads as an object, so no source is left out as a
+        ``get_file()`` downloads as an object, so only a source whose name
+        ends in a slash, which names a local directory, is left out as a
         directory.
 
         A failed download starts no further one, the running ones read and

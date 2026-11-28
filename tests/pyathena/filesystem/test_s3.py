@@ -3628,13 +3628,16 @@ class TestS3FileSystem:
             # which downloads the version of the object of that name. It was
             # left out.
             ("s3://bucket/k*", {"key/child"}, {"version_id": "v1"}, [("bucket/key", "v1")]),
-            # Also a listed key that ends in a slash, such as a folder marker.
+            # Also the directories of a recursion with maxdepth.
             (
-                "s3://bucket/**",
-                {"d/"},
-                {"withdirs": False, "version_id": "v1"},
-                [("bucket/d/", "v1")],
+                "s3://bucket/p",
+                {"p/sub/leaf"},
+                {"recursive": True, "maxdepth": 1, "version_id": "v1"},
+                [("bucket/p", "v1"), ("bucket/p/sub", "v1")],
             ),
+            # A listed key that ends in a slash, such as a folder marker,
+            # names a local directory, which no version is downloaded into.
+            ("s3://bucket/**", {"d/"}, {"withdirs": False, "version_id": "v1"}, []),
         ],
     )
     def test_get_glob_version_of_a_prefix(self, tmp_path, pattern, keys, kwargs, sources):
@@ -5952,8 +5955,8 @@ class TestS3FileSystem:
 
     def _make_version_of_a_prefix_fs(self, fs_params):
         # A filesystem whose s3://bucket/key is the 4-byte object b"data" at
-        # the version v1, and a directory at the latest name and at any other
-        # version.
+        # the version v1, which GetObject must request, and a directory at
+        # the latest name and at any other version.
         fs, _ = self._make_object_fs(b"data")
         fs.s3_additional_kwargs = fs_params
         version = self._file_object("key")
@@ -5965,6 +5968,13 @@ class TestS3FileSystem:
             return S3FileSystem._directory_object("bucket", "key")
 
         fs._info_entry.side_effect = info_entry
+        get_object = fs.core.client.get_object.side_effect
+
+        def get_version(**request):
+            assert request.get("VersionId") == "v1", request
+            return get_object(**request)
+
+        fs.core.client.get_object.side_effect = get_version
         return fs
 
     def test_get_file_file_like(self, tmp_path):
