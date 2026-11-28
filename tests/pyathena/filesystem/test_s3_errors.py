@@ -31,11 +31,20 @@ class TestS3ClientError:
         [
             ("AccessDenied", PermissionError),
             ("403", PermissionError),
+            ("AccountProblem", PermissionError),
+            ("AllAccessDisabled", PermissionError),
             ("InvalidAccessKeyId", PermissionError),
             ("ExpiredToken", PermissionError),
+            ("InvalidObjectState", PermissionError),
+            ("InvalidPayer", PermissionError),
+            ("InvalidSecurity", PermissionError),
+            ("NotSignedUp", PermissionError),
+            ("RequestTimeTooSkewed", PermissionError),
             ("SignatureDoesNotMatch", PermissionError),
             ("NoSuchKey", FileNotFoundError),
             ("NoSuchBucket", FileNotFoundError),
+            ("NoSuchBucketPolicy", FileNotFoundError),
+            ("NoSuchLifecycleConfiguration", FileNotFoundError),
             ("NoSuchUpload", FileNotFoundError),
             ("NoSuchVersion", FileNotFoundError),
             ("404", FileNotFoundError),
@@ -58,6 +67,7 @@ class TestS3ClientError:
             ("SlowDown", errno.EBUSY),
             ("ServiceUnavailable", errno.EBUSY),
             ("OperationAborted", errno.EBUSY),
+            ("RestoreAlreadyInProgress", errno.EBUSY),
             ("InternalError", errno.EIO),
             # An unknown code without a status code.
             ("UnknownCode", errno.EIO),
@@ -83,6 +93,8 @@ class TestS3ClientError:
             (416, errno.EINVAL),
             (500, errno.EIO),
             (501, errno.ENOSYS),
+            # A status code that is not listed.
+            (502, errno.EIO),
             (503, errno.EBUSY),
         ],
     )

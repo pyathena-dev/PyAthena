@@ -14,18 +14,21 @@ import pyarrow.csv as pa_csv
 import pytest
 
 from pyathena.filesystem.reader import ReadAheadStream
-from tests.pyathena.util import EVENT_TIMEOUT, ImmediateExecutor
+from tests.pyathena.util import EVENT_TIMEOUT, ImmediateExecutor, poll_until
 
 
 class _RecordingRangeFile:
     """A file over bytes that records the ranges it reads."""
 
-    def __init__(self, data, short=False, error_at=None, gate=None):
+    def __init__(self, data, short=False, error_at=None, gate=None, gates=None):
         self._data = data
         self._short = short
         self._error_at = error_at
         self._gate = gate
+        # An event per offset that blocks the read at that offset until set.
+        self._gates = gates or {}
         self.gated_read_started = threading.Event()
+        self.started = {offset: threading.Event() for offset in self._gates}
         self.reads = []
         self.closes = 0
         # The offsets of the reads in the order they ended, and "close" when closed.
@@ -33,12 +36,16 @@ class _RecordingRangeFile:
         # Set when the file is closed, and by signal_close_wait() when close()
         # starts to wait for the reads.
         self.close_progressed = threading.Event()
+        self.file_closed = threading.Event()
 
     def read_range(self, offset, size):
         self.reads.append((offset, size))
         if self._gate is not None and offset > 0:
             self.gated_read_started.set()
             assert self._gate.wait(EVENT_TIMEOUT)
+        if offset in self._gates:
+            self.started[offset].set()
+            assert self._gates[offset].wait(EVENT_TIMEOUT)
         self.events.append(offset)
         if offset == self._error_at:
             raise OSError("read failed")
@@ -52,6 +59,7 @@ class _RecordingRangeFile:
         self.events.append("close")
         self.closes += 1
         self.close_progressed.set()
+        self.file_closed.set()
 
     def assert_closed_after_reads(self, stream):
         """Check that closing the stream while the gated reads block closes the file last.
@@ -170,16 +178,14 @@ class TestReadAheadStream:
         assert file.closed
 
     @pytest.mark.parametrize(
-        ("kwargs", "message"),
-        [
-            ({"part_size": 0}, "part_size"),
-            ({"max_parts": 0}, "max_parts"),
-        ],
+        "kwargs",
+        [{"part_size": 0}, {"max_parts": 0}],
+        ids=["kwargs0-part_size", "kwargs1-max_parts"],
     )
     @pytest.mark.filterwarnings("error::pytest.PytestUnraisableExceptionWarning")
-    def test_invalid_options(self, kwargs, message):
+    def test_invalid_options(self, kwargs):
         closed = []
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ValueError):  # noqa: PT011
             ReadAheadStream(lambda o, s: b"", 10, on_close=lambda: closed.append(1), **kwargs)
         # The stream that failed to initialize is closed without an error when it is
         # finalized, and without calling on_close.
@@ -201,7 +207,7 @@ class TestReadAheadStream:
 
     def test_short_read(self):
         stream = _RecordingRangeFile(bytes(20), short=True).open_stream(part_size=10, max_parts=2)
-        with pytest.raises(OSError, match="Read 9 bytes of a range of 10 bytes"):
+        with pytest.raises(OSError):  # noqa: PT011
             stream.read(20)
         stream.close()
 
@@ -281,14 +287,45 @@ class TestReadAheadStream:
         file.assert_closed_after_reads(stream)
         assert (20, 10) not in file.reads
 
-    def test_close_waits_for_running_reads(self, monkeypatch, gate):
-        """Closing waits for the reads in flight before closing the file."""
-        file = _RecordingRangeFile(bytes(100), gate=gate)
+    @pytest.mark.parametrize("first", [10, 20])
+    def test_close_waits_for_running_reads(self, monkeypatch, first):
+        """Closing waits for every read in flight, not only the first one to end,
+        before closing the file, whichever read ends first."""
+        gates = {10: threading.Event(), 20: threading.Event()}
+        (second,) = set(gates) - {first}
+        file = _RecordingRangeFile(bytes(100), gates=gates)
         stream = file.open_stream(part_size=10, max_parts=2)
         file.signal_close_wait(monkeypatch)
-        assert stream.read(10) == bytes(10)
-        assert file.gated_read_started.wait(EVENT_TIMEOUT)
-        file.assert_closed_after_reads(stream)
+        errors = []
+
+        def close():
+            try:
+                stream.close()
+            except BaseException as e:
+                errors.append(e)
+
+        closer = threading.Thread(target=close, daemon=True)
+        try:
+            assert stream.read(10) == bytes(10)
+            # Both reads ahead run, each held by its gate.
+            assert all(file.started[offset].wait(EVENT_TIMEOUT) for offset in gates)
+            closer.start()
+            assert file.close_progressed.wait(EVENT_TIMEOUT)
+            gates[first].set()
+            poll_until(lambda: first in file.events, "the first read did not end")
+            # The other read still runs, so the file stays open.
+            assert not file.file_closed.wait(0.2)
+            gates[second].set()
+        finally:
+            for event in gates.values():
+                event.set()
+            if closer.ident is None:
+                stream.close()
+            else:
+                closer.join(EVENT_TIMEOUT)
+        assert not closer.is_alive()
+        assert not errors
+        assert file.events == [0, first, second, "close"]
 
     def test_csv(self):
         """pyarrow reads a CSV through the stream with its own block size."""

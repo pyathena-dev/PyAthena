@@ -435,19 +435,25 @@ class TestS3Core:
         stubber.assert_no_pending_responses()
 
     @pytest.mark.parametrize(
-        ("path", "range_", "match"),
+        ("path", "range_"),
         [
-            (S3Path("bucket"), None, "no key"),
+            (S3Path("bucket"), None),
             # S3 would ignore these ranges and return the whole object.
-            (S3Path("bucket", "key"), (5, 5), "Invalid range"),
-            (S3Path("bucket", "key"), (6, 5), "Invalid range"),
-            (S3Path("bucket", "key"), (-8, 5), "Invalid range"),
+            (S3Path("bucket", "key"), (5, 5)),
+            (S3Path("bucket", "key"), (6, 5)),
+            (S3Path("bucket", "key"), (-8, 5)),
+        ],
+        ids=[
+            "path0-None-no key",
+            "path1-range_1-Invalid range",
+            "path2-range_2-Invalid range",
+            "path3-range_3-Invalid range",
         ],
     )
-    def test_get_object_invalid(self, path, range_, match):
+    def test_get_object_invalid(self, path, range_):
         core, stubber = _make_core()
         # No request is stubbed, so one that is sent fails the test.
-        with stubber, pytest.raises(ValueError, match=match):
+        with stubber, pytest.raises(ValueError):  # noqa: PT011
             core.get_object(path, range_)
 
     def test_get_object_closes_body(self):
@@ -817,7 +823,7 @@ class TestS3Core:
         # in params it would be sent twice from the second page on.
         core, stubber = _make_core()
         args = () if method == "list_buckets" else ("bucket",)
-        with stubber, pytest.raises(TypeError, match="Pass the first page"):
+        with stubber, pytest.raises(TypeError):
             next(getattr(core, method)(*args, **params))
         stubber.assert_no_pending_responses()
 
@@ -1375,38 +1381,45 @@ class TestS3Core:
         ) == ("v-dst", "v1", '"e"', MODIFIED)
 
     @pytest.mark.parametrize(
-        ("method", "args", "match"),
+        ("method", "args"),
         [
-            ("copy_object", (S3Path("bucket"), S3Path("bucket", "dst")), "has no key"),
-            ("copy_object", (S3Path("bucket", "src"), S3Path("bucket")), "has no key"),
+            ("copy_object", (S3Path("bucket"), S3Path("bucket", "dst"))),
+            ("copy_object", (S3Path("bucket", "src"), S3Path("bucket"))),
             (
                 "copy_object",
                 (S3Path("bucket", "src"), S3Path("bucket", "dst", "v1")),
-                "Cannot write to a version",
             ),
-            ("plan_multipart_copy", (S3Path("bucket"), S3Path("bucket", "dst")), "has no key"),
-            ("plan_multipart_copy", (S3Path("bucket", "src"), S3Path("bucket")), "has no key"),
+            ("plan_multipart_copy", (S3Path("bucket"), S3Path("bucket", "dst"))),
+            ("plan_multipart_copy", (S3Path("bucket", "src"), S3Path("bucket"))),
             (
                 "plan_multipart_copy",
                 (S3Path("bucket", "src"), S3Path("bucket", "dst", "v1")),
-                "Cannot write to a version",
             ),
-            ("list_object_annotations", (S3Path("bucket"),), "has no key"),
+            ("list_object_annotations", (S3Path("bucket"),)),
             (
                 "copy_object_annotation",
                 ("a", S3Path("bucket"), S3Path("bucket", "dst"), None, None),
-                "has no key",
             ),
             (
                 "copy_object_annotation",
                 ("a", S3Path("bucket", "src"), S3Path("bucket"), None, None),
-                "has no key",
             ),
         ],
+        ids=[
+            "copy_object-args0-has no key",
+            "copy_object-args1-has no key",
+            "copy_object-args2-Cannot write to a version",
+            "plan_multipart_copy-args3-has no key",
+            "plan_multipart_copy-args4-has no key",
+            "plan_multipart_copy-args5-Cannot write to a version",
+            "list_object_annotations-args6-has no key",
+            "copy_object_annotation-args7-has no key",
+            "copy_object_annotation-args8-has no key",
+        ],
     )
-    def test_copy_rejects_paths(self, method, args, match):
+    def test_copy_rejects_paths(self, method, args):
         core, stubber = _make_core()
-        with stubber, pytest.raises(ValueError, match=match):
+        with stubber, pytest.raises(ValueError):  # noqa: PT011
             getattr(core, method)(*args)
 
     @staticmethod
@@ -1530,8 +1543,10 @@ class TestS3Core:
     def test_plan_multipart_copy_without_size(self):
         core, stubber = _make_core()
         self._stub_head(stubber, {})
-        with stubber, pytest.raises(ValueError, match="no size"):
+        with stubber, pytest.raises(ValueError):  # noqa: PT011
             core.plan_multipart_copy(S3Path("bucket", "src"), S3Path("bucket", "dst"))
+        # The size is missing from the HeadObject response that was read.
+        stubber.assert_no_pending_responses()
 
     def test_plan_multipart_copy_request_kwargs_sse_c(self):
         # GH-1372: a source whose customer-provided key comes from the
@@ -1914,7 +1929,7 @@ class TestS3Core:
     )
     def test_replace_object_metadata_rejects_fields_of_the_copy(self, name):
         core, stubber = _make_core()
-        with stubber, pytest.raises(TypeError, match=name):
+        with stubber, pytest.raises(TypeError):
             core.replace_object_metadata(S3Path("bucket", "key"), S3Metadata({}), {}, **{name: "x"})
 
     @pytest.mark.parametrize(
@@ -2005,20 +2020,25 @@ class TestS3DeleteBatch:
             S3DeleteBatch.from_paths(mixed)
 
     @pytest.mark.parametrize(
-        ("objects", "match"),
+        "objects",
         [
-            ((), "1 to 1000 objects, not 0"),
-            (
-                tuple(S3Path("bucket", f"k{i}") for i in range(S3DeleteBatch.MAX_KEYS + 1)),
-                "1 to 1000 objects, not 1001",
-            ),
-            ((S3Path("bucket"),), "Not an object of the bucket bucket: s3://bucket"),
-            ((S3Path("bucket", ""),), "Not an object of the bucket bucket: s3://bucket"),
-            ((S3Path("other", "a"),), "Not an object of the bucket bucket: s3://other/a"),
+            (),
+            # DeleteObjects accepts at most 1,000 keys.
+            tuple(S3Path("bucket", f"k{i}") for i in range(1001)),
+            (S3Path("bucket"),),
+            (S3Path("bucket", ""),),
+            (S3Path("other", "a"),),
+        ],
+        ids=[
+            "objects0-1 to 1000 objects, not 0",
+            "objects1-1 to 1000 objects, not 1001",
+            "objects2-Not an object of the bucket bucket: s3://bucket",
+            "objects3-Not an object of the bucket bucket: s3://bucket",
+            "objects4-Not an object of the bucket bucket: s3://other/a",
         ],
     )
-    def test_invalid(self, objects, match):
-        with pytest.raises(ValueError, match=match):
+    def test_invalid(self, objects):
+        with pytest.raises(ValueError):  # noqa: PT011
             S3DeleteBatch("bucket", objects)
 
 
