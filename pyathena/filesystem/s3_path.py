@@ -238,13 +238,14 @@ class S3Path:
 
     @property
     def subtree_prefix(self) -> str:
-        """The key prefix of the keys under the path.
+        """The key prefix that selects the keys under the path.
 
-        ``""`` for a bucket path, and otherwise the key without its trailing
-        slashes, followed by ``/``. S3 matches a ``Prefix`` as a plain
-        string, so a listing by the key also returns sibling keys that merely
-        start with the same characters (e.g., ``key.bak``); the keys under the
-        path start with this prefix.
+        ``""`` for a path without a key, and otherwise the key without its
+        trailing slashes, followed by ``/``: ``a/`` for both ``a`` and
+        ``a//``, and ``/`` for the key ``/`` of ``bucket//``. S3 matches a
+        ``Prefix`` as a plain string, so a listing by the key also returns
+        sibling keys that merely start with the same characters (e.g.,
+        ``key.bak``), which this prefix excludes.
         """
         return f"{self.key.rstrip('/')}/" if self.key else ""
 
@@ -256,7 +257,7 @@ class S3Path:
 
         Returns:
             True for the key of the path and for the keys that start with
-            :attr:`subtree_prefix`; any key for a bucket path.
+            :attr:`subtree_prefix`; any key for a path without a key.
         """
         return key == self.key or key.startswith(self.subtree_prefix)
 

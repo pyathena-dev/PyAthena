@@ -520,6 +520,23 @@ class TestS3MultipartUpload:
         assert actual.initiator.display_name == "test_initiator"
         assert actual.initiator.id == "test_initiator_id"
 
+    def test_request_identity(self):
+        upload = S3MultipartUpload({"Bucket": "b", "Key": "k", "UploadId": "u", "Owner": {}})
+        assert upload.request_identity() == {"Bucket": "b", "Key": "k", "UploadId": "u"}
+
+    @pytest.mark.parametrize(
+        ("response", "missing"),
+        [
+            ({"Key": "k", "UploadId": "u"}, "bucket"),
+            ({"Bucket": "b", "UploadId": "u"}, "key"),
+            ({"Bucket": "b", "Key": "k"}, "upload ID"),
+        ],
+    )
+    def test_request_identity_incomplete(self, response, missing):
+        # An upload that S3 could not have answered is never sent.
+        with pytest.raises(ValueError, match=f"has no {missing}"):
+            S3MultipartUpload(response).request_identity()
+
 
 class TestS3MultipartUploadPart:
     def test_init(self):
