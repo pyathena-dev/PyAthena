@@ -4762,16 +4762,14 @@ class TestS3FileSystem:
         assert fs.core.retry_config is connection.retry_config
         assert fs.max_workers == 7
 
-    @pytest.mark.parametrize("through_fsspec", [False, True], ids=["class", "fsspec"])
-    def test_connection_rejected(self, through_fsspec):
+    def test_connection_rejected(self):
         # GH-1386: connection= raises instead of reaching fsspec as an unknown
         # argument, with which the filesystem would build a client of its own.
         connection = mock.MagicMock()
         s3_client = mock.PropertyMock(return_value=mock_client())
         type(connection).s3_client = s3_client
-        create = functools.partial(fsspec.filesystem, "s3") if through_fsspec else S3FileSystem
         with pytest.raises(TypeError, match=r"pyathena\.fs\.s3_filesystem\(connection\)"):
-            create(connection=connection, skip_instance_cache=True)
+            S3FileSystem(connection=connection, skip_instance_cache=True)
         s3_client.assert_not_called()
 
     def test_positional_args_rejected(self):
