@@ -1024,10 +1024,11 @@ class TestAthenaDDLCompiler:
             CreateTable(table).compile(engine)
 
     def test_create_table_s3tables_catalog_from_cursor_kwargs(self):
-        # The cursor's catalog_name decides the catalog the statement runs in.
+        # The cursor's catalog_name, not the connection's, decides the catalog the
+        # statement runs in.
         engine = create_engine(
             "awsathena+rest://athena.us-west-2.amazonaws.com/pyathena"
-            "?s3_staging_dir=s3://bucket/staging/",
+            "?s3_staging_dir=s3://bucket/staging/&catalog_name=AwsDataCatalog",
             connect_args={"cursor_kwargs": {"catalog_name": "s3tablescatalog/bucket"}},
         )
         table = Table(
