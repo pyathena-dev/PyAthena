@@ -1132,7 +1132,9 @@ class AioS3FileSystem(AsyncFileSystem):
             recursive: Whether to read the files below the directories.
             on_error: ``"raise"``, ``"omit"``, or ``"return"``.
             batch_size: Number of reads to run at the same time.
-            **kwargs: Additional parameters passed to ``_cat_file()``.
+            **kwargs: Additional parameters passed to the expansion of the
+                paths, such as ``prefix``, and to ``_cat_file()``, except
+                those of the expansion, as in :meth:`S3FileSystem.cat`.
 
         Returns:
             The bytes of a single path, or a dictionary of the paths and
@@ -1158,17 +1160,19 @@ class AioS3FileSystem(AsyncFileSystem):
             recursive: Whether to read the files below the directories.
             on_error: ``"raise"``, ``"omit"``, or ``"return"``.
             batch_size: Number of reads to run at the same time.
-            **kwargs: Additional parameters passed to the reads.
+            **kwargs: Additional parameters passed to the expansion and the
+                reads, as in :meth:`_cat`.
 
         Returns:
             The bytes of a single path, or a dictionary of the paths and
             their bytes.
         """
-        # As in fsspec, the expansion does not receive the parameters of the
-        # reads.
         targets = self._sync_fs._first_targets(
-            await self._thread_pool.run(self._sync_fs._expand_paths, path, recursive=recursive)
+            await self._thread_pool.run(
+                self._sync_fs._expand_paths, path, recursive=recursive, **kwargs
+            )
         )
+        kwargs = self._sync_fs._get_read_kwargs(kwargs)
         paths = list(targets)
         out = await _run_coros_in_chunks(
             [self._cat_file(target, **kwargs) for target in targets.values()],

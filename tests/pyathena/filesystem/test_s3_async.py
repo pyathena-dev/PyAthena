@@ -2885,6 +2885,24 @@ class TestAioS3FileSystem:
         assert [p.name for p in (tmp_path / "out").iterdir()] == ["a1"]
 
     @pytest.mark.asyncio
+    async def test_cat_passes_kwargs_to_expansion(self):
+        # GH-1425: as with S3FileSystem.cat(), the keyword arguments of _cat()
+        # reach the expansion of the paths, such as prefix and withdirs, and
+        # are not sent with GetObject. They were sent with GetObject only,
+        # which botocore rejected, and did not select the paths.
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs._sync_fs, {"d/a1", "d/a2/b", "d/b1"})
+
+        assert await await_bounded(
+            fs._cat("s3://bucket/d/*", prefix="a", withdirs=False, maxdepth=1, refresh=True)
+        ) == {"bucket/d/a1": b"aa"}
+        assert [r for name, r in requests if name == "get_object"] == [
+            {"Bucket": "bucket", "Key": "d/a1"}
+        ]
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("argument", ["batch_size", "max_workers"])
     async def test_rm_batch_size(self, argument):
         # GH-1337: batch_size of _rm() is the number of DeleteObjects requests

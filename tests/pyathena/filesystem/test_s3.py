@@ -3462,6 +3462,22 @@ class TestS3FileSystem:
             "bucket/d/sub/b",
         ]
 
+    def test_cat_kwargs_of_expansion(self):
+        # GH-1425: the keyword arguments of the expansion, such as prefix and
+        # withdirs, select the paths and are not sent with GetObject, as
+        # with get(). cat() sent them, which botocore rejected.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        _, requests = serve_s3_keys(fs, {"d/a1", "d/a2/b", "d/b1"})
+
+        assert fs.cat("s3://bucket/d/*", prefix="a", withdirs=False, maxdepth=1, refresh=True) == {
+            "bucket/d/a1": b"aa"
+        }
+        assert [r for name, r in requests if name == "get_object"] == [
+            {"Bucket": "bucket", "Key": "d/a1"}
+        ]
+
     def test_get_put_pass_kwargs_to_expansion(self, tmp_path):
         # GH-1322: as in fsspec, get() and put() pass their keyword arguments
         # to the expansion of the sources, such as prefix or assume_literal.

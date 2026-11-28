@@ -121,6 +121,11 @@ _LOOKUP_REQUEST_PARAMETERS = frozenset(
         "SSECustomerKeyMD5",
     }
 )
+# The keyword arguments of the expansion of paths (``expand_path()``,
+# ``glob()`` and ``find()``), which are not request parameters.
+_EXPANSION_KWARGS = frozenset(
+    {"assume_literal", "detail", "maxdepth", "prefix", "refresh", "withdirs"}
+)
 # The second element of the dircache key, ``(path, _LOOKUPS_CACHE_KEY)``, of
 # the lookup results of a path made with lookup request parameters.
 _LOOKUPS_CACHE_KEY = "lookups"
@@ -3679,8 +3684,9 @@ class S3FileSystem(AbstractFileSystem):
                 return the error in place of their contents.
             batch_size: Number of reads to run at the same time, as in
                 ``copy()``.
-            **kwargs: Additional parameters passed to ``expand_path()`` and
-                ``cat_file()``.
+            **kwargs: Additional parameters passed to ``expand_path()``, such
+                as ``prefix``, and to ``cat_file()``, except those of the
+                expansion.
 
         Returns:
             The contents of the path, or a dict of the contents by path if
@@ -3691,6 +3697,7 @@ class S3FileSystem(AbstractFileSystem):
         """
         limit = self._batch_limit(batch_size)
         targets = self._first_targets(self._expand_paths(path, recursive=recursive, **kwargs))
+        kwargs = self._get_read_kwargs(kwargs)
         paths = list(targets)
         if not (len(paths) > 1 or isinstance(path, list) or paths[0] != self._strip_protocol(path)):
             return self.cat_file(targets[paths[0]], **kwargs)
@@ -4790,6 +4797,21 @@ class S3FileSystem(AbstractFileSystem):
         except FileNotFoundError:
             return False
         return bool(info.get("type") != S3ObjectType.S3_OBJECT_TYPE_DIRECTORY)
+
+    @staticmethod
+    def _get_read_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
+        """Select the keyword arguments of the reads of :meth:`cat`.
+
+        Those of the expansion of the paths, such as ``prefix``, are not
+        sent with GetObject.
+
+        Args:
+            kwargs: The keyword arguments to select from.
+
+        Returns:
+            The keyword arguments of ``cat_file()``.
+        """
+        return {k: v for k, v in kwargs.items() if k not in _EXPANSION_KWARGS}
 
     @staticmethod
     def _get_lookup_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
