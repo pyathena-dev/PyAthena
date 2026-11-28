@@ -2691,7 +2691,7 @@ class TestAioS3FileSystem:
             [str(tmp_path / "0"), str(tmp_path / "1")],
             **kwargs,
         )
-        with mock.patch.dict(fsspec_config.conf, conf):
+        with mock.patch.dict(fsspec_config.conf, conf, clear=True):
             if expected is ValueError:
                 with pytest.raises(ValueError, match="batch_size"):
                     await get
@@ -2809,8 +2809,9 @@ class TestAioS3FileSystem:
             (operation, {}, {"nofiles_gather_batch_size": 1}, 2, {}, None)
             for operation in ("copy", "mv", "pipe")
         ]
-        # Any mapping of values, whose items fsspec writes.
-        + [("pipe-mapping", {}, {}, 2, {}, 2)],
+        # Any mapping of values, or other object with items(), whose items
+        # fsspec writes.
+        + [(operation, {}, {}, 2, {}, 2) for operation in ("pipe-mapping", "pipe-items")],
     )
     async def test_batch_window(self, operation, fs_kwargs, conf, count, kwargs, expected):
         # GH-1427: as in S3FileSystem, each multipart copy or write of a batch
@@ -2837,11 +2838,14 @@ class TestAioS3FileSystem:
         fs._copy_file = copy_file
         fs._sync_fs.pipe_file = pipe_file
         targets = [f"s3://bucket/dst/{i}" for i in range(count)]
-        with mock.patch.dict(fsspec_config.conf, conf):
+        with mock.patch.dict(fsspec_config.conf, conf, clear=True):
             if operation == "pipe":
                 await fs._pipe(dict.fromkeys(targets, b"x"), **kwargs)
             elif operation == "pipe-mapping":
                 await fs._pipe(collections.UserDict(dict.fromkeys(targets, b"x")), **kwargs)
+            elif operation == "pipe-items":
+                values = dict.fromkeys(targets, b"x")
+                await fs._pipe(SimpleNamespace(items=values.items), **kwargs)
             else:
                 sources = [f"s3://bucket/src/{i}" for i in range(count)]
                 await getattr(fs, f"_{operation}")(sources, targets, **kwargs)
