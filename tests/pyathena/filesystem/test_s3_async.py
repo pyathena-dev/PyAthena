@@ -537,7 +537,7 @@ class TestAioS3FileSystem:
             ("_setxattr", "setxattr", ("s3://bucket/key",), {"fn": "2"}),
             ("_list_multipart_uploads", "list_multipart_uploads", ("s3://bucket/dir",), {}),
             ("_clear_multipart_uploads", "clear_multipart_uploads", ("s3://bucket/dir",), {}),
-            ("_checksum", "checksum", ("s3://bucket/key",), {"refresh": True}),
+            ("_checksum", "checksum", ("s3://bucket/key",), {}),
             ("_created", "created", ("s3://bucket/key",), {}),
             ("_modified", "modified", ("s3://bucket/key",), {}),
             ("_tree", "tree", ("s3://bucket/dir",), {"recursion_limit": 1, "display_size": True}),
@@ -612,42 +612,73 @@ class TestAioS3FileSystem:
         assert outcomes[1] == outcomes[0]
 
     @pytest.mark.parametrize(
-        ("method", "sync_method", "args", "returns"),
+        ("method", "sync_method", "args", "kwargs", "returns"),
         [
-            ("_metadata", "metadata", ("s3://bucket/key",), True),
-            ("_getxattr", "getxattr", ("s3://bucket/key", "m"), True),
-            ("_setxattr", "setxattr", ("s3://bucket/key",), False),
-            ("_get_tags", "get_tags", ("s3://bucket/key",), True),
-            ("_put_tags", "put_tags", ("s3://bucket/key", {"b": "2"}), False),
-            ("_chmod", "chmod", ("s3://bucket/key", "private"), False),
-            ("_object_version_info", "object_version_info", ("s3://bucket/key",), True),
-            ("_list_multipart_uploads", "list_multipart_uploads", ("s3://bucket",), True),
-            ("_clear_multipart_uploads", "clear_multipart_uploads", ("s3://bucket",), False),
-            ("_checksum", "checksum", ("s3://bucket/key",), True),
-            ("_created", "created", ("s3://bucket/key",), True),
-            ("_modified", "modified", ("s3://bucket/key",), True),
-            ("_tree", "tree", ("s3://bucket/dir",), True),
+            # "fn" is also the name of the callable argument of the pool.
+            ("_metadata", "metadata", ("s3://bucket/key",), {"fn": 1}, True),
+            ("_getxattr", "getxattr", ("s3://bucket/key", "m"), {"fn": 1}, True),
+            ("_setxattr", "setxattr", ("s3://bucket/key",), {"fn": "2"}, False),
+            ("_get_tags", "get_tags", ("s3://bucket/key",), {}, True),
+            ("_put_tags", "put_tags", ("s3://bucket/key", {"b": "2"}), {"mode": "m"}, False),
+            ("_chmod", "chmod", ("s3://bucket/key", "private"), {"fn": 1}, False),
+            (
+                "_object_version_info",
+                "object_version_info",
+                ("s3://bucket/key",),
+                {"fn": 1},
+                True,
+            ),
+            ("_list_multipart_uploads", "list_multipart_uploads", ("s3://bucket",), {}, True),
+            (
+                "_clear_multipart_uploads",
+                "clear_multipart_uploads",
+                ("s3://bucket",),
+                {},
+                False,
+            ),
+            ("_checksum", "checksum", ("s3://bucket/key",), {"refresh": True, "fn": 1}, True),
+            ("_created", "created", ("s3://bucket/key",), {}, True),
+            ("_modified", "modified", ("s3://bucket/key",), {}, True),
+            ("_tree", "tree", ("s3://bucket/dir",), {"recursion_limit": 1}, True),
         ],
     )
     @pytest.mark.asyncio
     async def test_coroutine_forms_run_in_the_threads_of_the_filesystem(
-        self, method, sync_method, args, returns
+        self, method, sync_method, args, kwargs, returns
     ):
         # GH-1457: the coroutine forms of the methods that run on the
-        # caller's thread run them in the threads of the filesystem, not on
-        # the thread of the event loop or in its default executor, and return
-        # what the synchronous forms return.
+        # caller's thread run them in the threads of the filesystem with the
+        # given arguments, while the event loop keeps running: here, the
+        # call waits until the loop releases it. Each returns what its
+        # synchronous form returns.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
         result = object() if returns else None
-        in_pool = []
+        entered = threading.Event()
+        released = threading.Event()
+        calls = []
 
-        def delegate(*_args, **_kwargs):
-            in_pool.append(fs._thread_pool.owns_current_thread())
+        def delegate(*call_args, **call_kwargs):
+            calls.append((call_args, call_kwargs, fs._thread_pool.owns_current_thread()))
+            entered.set()
+            if not released.wait(EVENT_TIMEOUT):
+                raise TimeoutError("the event loop did not release the call")
             return result
 
+        async def wait_entered():
+            while not entered.is_set():
+                await asyncio.sleep(0.01)
+
         setattr(fs._sync_fs, sync_method, delegate)
-        assert await getattr(fs, method)(*args) is result
-        assert in_pool == [True]
+        task = asyncio.ensure_future(getattr(fs, method)(*args, **kwargs))
+        try:
+            await asyncio.wait_for(wait_entered(), EVENT_TIMEOUT)
+        finally:
+            released.set()
+        assert await asyncio.wait_for(task, EVENT_TIMEOUT) is result
+        [(call_args, call_kwargs, in_pool)] = calls
+        assert call_args == args
+        assert call_kwargs.items() >= kwargs.items()
+        assert in_pool
         fs.close()
 
     @pytest.mark.parametrize(
@@ -698,10 +729,13 @@ class TestAioS3FileSystem:
         finished = threading.Event()
         clear = fs._sync_fs.clear_multipart_uploads
 
+        listed = []
+
         def list_uploads(path):
             entered.set()
             poll_until(retries_stopped, "the cancellation did not stop the listing")
-            return [mock.sentinel.upload]
+            listed.append(mock.sentinel.upload)
+            return listed
 
         def clear_and_finish(path):
             try:
@@ -718,6 +752,9 @@ class TestAioS3FileSystem:
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, EVENT_TIMEOUT)
         assert finished.wait(EVENT_TIMEOUT)
+        # The listing saw the stop and returned an upload, which is not
+        # aborted.
+        assert listed == [mock.sentinel.upload]
         abort.assert_not_called()
         fs.close()
 

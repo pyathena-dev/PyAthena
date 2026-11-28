@@ -1764,15 +1764,17 @@ class AioS3FileSystem(AsyncFileSystem):
         return cast(
             str,
             await self._thread_pool.run(
-                self._sync_fs.tree,
-                path,
-                recursion_limit=recursion_limit,
-                max_display=max_display,
-                display_size=display_size,
-                prefix=prefix,
-                is_last=is_last,
-                first=first,
-                indent_size=indent_size,
+                functools.partial(
+                    self._sync_fs.tree,
+                    path,
+                    recursion_limit=recursion_limit,
+                    max_display=max_display,
+                    display_size=display_size,
+                    prefix=prefix,
+                    is_last=is_last,
+                    first=first,
+                    indent_size=indent_size,
+                )
             ),
         )
 
@@ -2170,7 +2172,9 @@ class AioS3FileSystem(AsyncFileSystem):
             tags: Tags to apply.
             mode: ``o`` to overwrite the existing tags or ``m`` to merge with them.
         """
-        await self._thread_pool.run(self._sync_fs.put_tags, path, tags, mode=mode)
+        await self._thread_pool.run(
+            functools.partial(self._sync_fs.put_tags, path, tags, mode=mode)
+        )
 
     def put_tags(self, path: str | os.PathLike[str], tags: dict[str, str], mode: str = "o") -> None:
         """Set the tags for the given existing key.

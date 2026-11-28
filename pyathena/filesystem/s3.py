@@ -4644,8 +4644,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Uploads completed or aborted after listing are already cleared.
         All abort results are checked before another abort error is raised.
-        When the enclosing scopes are stopped before the listing returns,
-        such as by the cancellation of
+        When the enclosing scopes are stopped by the time a listing that
+        returned uploads has ended, such as by the cancellation of
         ``AioS3FileSystem._clear_multipart_uploads()``, nothing is aborted.
 
         Args:
@@ -4655,8 +4655,8 @@ class S3FileSystem(AbstractFileSystem):
                 aborted, as listed by :meth:`list_multipart_uploads`.
 
         Raises:
-            concurrent.futures.CancelledError: If the enclosing scopes
-                stopped during a listing that returned uploads.
+            concurrent.futures.CancelledError: If the enclosing scopes are
+                stopped when a listing that returned uploads has ended.
             OSError: The error of an abort that failed, other than for an
                 upload that no longer exists.
         """
