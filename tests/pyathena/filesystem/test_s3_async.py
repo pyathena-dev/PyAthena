@@ -46,7 +46,7 @@ from pyathena.filesystem.s3_object import (
     S3ObjectVersion,
 )
 from pyathena.filesystem.s3_path import S3Path
-from pyathena.filesystem.s3_retry import raise_if_stopped
+from pyathena.filesystem.s3_retry import raise_if_stopped, retries_stopped
 from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
 from pyathena.fs import s3_filesystem
 from pyathena.util import RetryConfig, stop_retries_on
@@ -537,7 +537,7 @@ class TestAioS3FileSystem:
             ("_setxattr", "setxattr", ("s3://bucket/key",), {"fn": "2"}),
             ("_list_multipart_uploads", "list_multipart_uploads", ("s3://bucket/dir",), {}),
             ("_clear_multipart_uploads", "clear_multipart_uploads", ("s3://bucket/dir",), {}),
-            ("_checksum", "checksum", ("s3://bucket/key",), {}),
+            ("_checksum", "checksum", ("s3://bucket/key",), {"refresh": True}),
             ("_created", "created", ("s3://bucket/key",), {}),
             ("_modified", "modified", ("s3://bucket/key",), {}),
             ("_tree", "tree", ("s3://bucket/dir",), {"recursion_limit": 1, "display_size": True}),
@@ -630,41 +630,24 @@ class TestAioS3FileSystem:
         ],
     )
     @pytest.mark.asyncio
-    async def test_coroutine_forms_leave_the_event_loop_running(
+    async def test_coroutine_forms_run_in_the_threads_of_the_filesystem(
         self, method, sync_method, args, returns
     ):
         # GH-1457: the coroutine forms of the methods that run on the
-        # caller's thread run them in the threads of the filesystem, neither
-        # on the thread of the event loop nor in its default executor, which
-        # is held here, so that the loop runs while they wait: here, until
-        # the loop releases the call. Each returns what its synchronous form
-        # returns.
-        loop = asyncio.get_running_loop()
-        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        # caller's thread run them in the threads of the filesystem, not on
+        # the thread of the event loop or in its default executor, and return
+        # what the synchronous forms return.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
-        entered = threading.Event()
-        released = threading.Event()
         result = object() if returns else None
-        blocker = loop.run_in_executor(None, released.wait, EVENT_TIMEOUT)
+        in_pool = []
 
-        def blocking(*_args, **_kwargs):
-            entered.set()
-            if not released.wait(EVENT_TIMEOUT):
-                raise TimeoutError("the event loop did not run")
+        def delegate(*_args, **_kwargs):
+            in_pool.append(fs._thread_pool.owns_current_thread())
             return result
 
-        async def wait_entered():
-            while not entered.is_set():
-                await asyncio.sleep(0.01)
-
-        setattr(fs._sync_fs, sync_method, blocking)
-        task = asyncio.ensure_future(getattr(fs, method)(*args))
-        try:
-            await asyncio.wait_for(wait_entered(), EVENT_TIMEOUT)
-        finally:
-            released.set()
-            await blocker
-        assert await asyncio.wait_for(task, EVENT_TIMEOUT) is result
+        setattr(fs._sync_fs, sync_method, delegate)
+        assert await getattr(fs, method)(*args) is result
+        assert in_pool == [True]
         fs.close()
 
     @pytest.mark.parametrize(
@@ -694,35 +677,47 @@ class TestAioS3FileSystem:
         # an asynchronous filesystem inside a running event loop, where
         # fsspec's sync() raises.
         fs = AioS3FileSystem(asynchronous=True, client=mock_client(), skip_instance_cache=True)
-        setattr(fs._sync_fs, method, mock.MagicMock())
+        calls = []
+        setattr(
+            fs._sync_fs,
+            method,
+            lambda *call_args, **_kwargs: calls.append((call_args, threading.get_ident())),
+        )
 
         getattr(fs, method)(*args)
-        getattr(fs._sync_fs, method).assert_called_once()
-        assert getattr(fs._sync_fs, method).call_args.args == args
+        assert calls == [(args, threading.get_ident())]
         fs.close()
 
     @pytest.mark.asyncio
     async def test_clear_multipart_uploads_cancelled_while_listing(self):
         # GH-1457: cancelling _clear_multipart_uploads() while it lists the
-        # uploads aborts none of the uploads that the listing returns.
+        # uploads aborts none of the uploads that the listing returns. The
+        # listing returns once the cancellation has stopped its call.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
         entered = threading.Event()
-        released = threading.Event()
+        finished = threading.Event()
+        clear = fs._sync_fs.clear_multipart_uploads
 
         def list_uploads(path):
             entered.set()
-            released.wait(EVENT_TIMEOUT)
+            poll_until(retries_stopped, "the cancellation did not stop the listing")
             return [mock.sentinel.upload]
 
+        def clear_and_finish(path):
+            try:
+                clear(path)
+            finally:
+                finished.set()
+
         fs._sync_fs.list_multipart_uploads = list_uploads
+        fs._sync_fs.clear_multipart_uploads = clear_and_finish
         abort = fs._sync_fs.core.abort_multipart_upload = mock.MagicMock()
         task = asyncio.ensure_future(fs._clear_multipart_uploads("s3://bucket"))
-        await asyncio.to_thread(entered.wait, EVENT_TIMEOUT)
+        assert await asyncio.to_thread(entered.wait, EVENT_TIMEOUT)
         task.cancel()
-        await asyncio.sleep(0)
-        released.set()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, EVENT_TIMEOUT)
+        assert finished.wait(EVENT_TIMEOUT)
         abort.assert_not_called()
         fs.close()
 
@@ -3899,7 +3894,8 @@ class TestAioS3FileSystem:
         # Checked before the client of the connection is used.
         s3_client.assert_not_called()
 
-    def test_attributes_of_the_internal_filesystem(self):
+    @pytest.mark.parametrize(("creation", "deletion"), [(True, False), (False, True)])
+    def test_attributes_of_the_internal_filesystem(self, creation, deletion):
         # GH-1457: the s3fs attributes of S3FileSystem are those of the
         # internal filesystem, which reads them, and cannot be assigned.
         s3_additional_kwargs = {"ContentType": "text/csv"}
@@ -3911,8 +3907,8 @@ class TestAioS3FileSystem:
             default_cache_type="none",
             max_workers=3,
             s3_additional_kwargs=s3_additional_kwargs,
-            allow_bucket_creation=True,
-            allow_bucket_deletion=False,
+            allow_bucket_creation=creation,
+            allow_bucket_deletion=deletion,
             version_aware=True,
             requester_pays=True,
             skip_instance_cache=True,
@@ -3922,8 +3918,8 @@ class TestAioS3FileSystem:
         assert fs.max_workers == 3
         assert fs.s3_additional_kwargs is fs._sync_fs.s3_additional_kwargs
         assert fs.s3_additional_kwargs == {"ContentType": "text/csv"}
-        assert fs.allow_bucket_creation is True
-        assert fs.allow_bucket_deletion is False
+        assert fs.allow_bucket_creation is creation
+        assert fs.allow_bucket_deletion is deletion
         assert fs.version_aware is True
         assert fs.request_kwargs["RequestPayer"] == "requester"
         assert fs.request_kwargs == fs._sync_fs.request_kwargs

@@ -653,10 +653,12 @@ class AioS3FileSystem(AsyncFileSystem):
             path: S3 path (s3://bucket/key) or list of paths to delete.
             recursive: Whether to delete all objects below the paths.
             batch_size: Number of DeleteObjects requests to send at the same
-                time. None or -1 is ``max_workers``; the ``batch_size`` of
-                the filesystem, which is that of fsspec's other batch
-                coroutines, does not apply. ``max_workers`` is a deprecated
-                alias.
+                time. None takes the ``batch_size`` of the internal
+                ``S3FileSystem``, which only fsspec's configuration for the
+                protocol sets; None or -1 there is ``max_workers``. The
+                ``batch_size`` argument of this filesystem, that of fsspec's
+                other batch coroutines, does not apply. ``max_workers`` is a
+                deprecated alias.
             maxdepth: Maximum depth to expand when ``recursive`` is True.
             **kwargs: Additional parameters passed to the DeleteObjects API.
                 ``Quiet`` (default True) sets the quiet mode of the requests.
@@ -2031,7 +2033,9 @@ class AioS3FileSystem(AsyncFileSystem):
         Returns:
             S3Metadata of the object.
         """
-        return await self._thread_pool.run(self._sync_fs.metadata, path, **kwargs)
+        return await self._thread_pool.run(
+            functools.partial(self._sync_fs.metadata, path, **kwargs)
+        )
 
     def metadata(self, path: str | os.PathLike[str] | S3Path, **kwargs) -> S3Metadata:
         """Return the metadata of the path.
@@ -2064,7 +2068,9 @@ class AioS3FileSystem(AsyncFileSystem):
         Returns:
             The value of the attribute, or None if the attribute is not set.
         """
-        return await self._thread_pool.run(self._sync_fs.getxattr, path, attr_name, **kwargs)
+        return await self._thread_pool.run(
+            functools.partial(self._sync_fs.getxattr, path, attr_name, **kwargs)
+        )
 
     def getxattr(
         self, path: str | os.PathLike[str] | S3Path, attr_name: str, **kwargs
@@ -2102,8 +2108,6 @@ class AioS3FileSystem(AsyncFileSystem):
             **kwargs: Key-value pairs of metadata to set; a None value deletes the
                 key.
         """
-        # Bound before it is submitted, so that a metadata key named as an
-        # argument of the pool, such as "fn", is passed to setxattr().
         await self._thread_pool.run(
             functools.partial(self._sync_fs.setxattr, path, copy_kwargs=copy_kwargs, **kwargs)
         )
@@ -2194,7 +2198,9 @@ class AioS3FileSystem(AsyncFileSystem):
             **kwargs: Additional parameters passed to the PutObjectAcl or
                 PutBucketAcl API.
         """
-        await self._thread_pool.run(self._sync_fs.chmod, path, acl, recursive=recursive, **kwargs)
+        await self._thread_pool.run(
+            functools.partial(self._sync_fs.chmod, path, acl, recursive=recursive, **kwargs)
+        )
 
     def chmod(
         self, path: str | os.PathLike[str], acl: str, recursive: bool = False, **kwargs
@@ -2228,7 +2234,9 @@ class AioS3FileSystem(AsyncFileSystem):
             List of S3ObjectVersion instances describing the versions.
         """
         return await self._thread_pool.run(
-            self._sync_fs.object_version_info, path, delete_markers=delete_markers, **kwargs
+            functools.partial(
+                self._sync_fs.object_version_info, path, delete_markers=delete_markers, **kwargs
+            )
         )
 
     def object_version_info(
@@ -2308,7 +2316,10 @@ class AioS3FileSystem(AsyncFileSystem):
         Returns:
             Integer checksum derived from the ETag or the directory token.
         """
-        return cast(int, await self._thread_pool.run(self._sync_fs.checksum, path, **kwargs))
+        return cast(
+            int,
+            await self._thread_pool.run(functools.partial(self._sync_fs.checksum, path, **kwargs)),
+        )
 
     def checksum(self, path: str | os.PathLike[str], **kwargs) -> int:
         """Get the checksum of an S3 object or directory.

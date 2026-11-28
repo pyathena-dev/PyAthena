@@ -4644,9 +4644,9 @@ class S3FileSystem(AbstractFileSystem):
 
         Uploads completed or aborted after listing are already cleared.
         All abort results are checked before another abort error is raised.
-        A stop of the enclosing scopes during the listing, such as the
-        cancellation of ``AioS3FileSystem._clear_multipart_uploads()``,
-        aborts nothing.
+        When the enclosing scopes are stopped before the listing returns,
+        such as by the cancellation of
+        ``AioS3FileSystem._clear_multipart_uploads()``, nothing is aborted.
 
         Args:
             path: S3 bucket or key path (e.g., "bucket", "s3://bucket" or
@@ -4656,7 +4656,7 @@ class S3FileSystem(AbstractFileSystem):
 
         Raises:
             concurrent.futures.CancelledError: If the enclosing scopes
-                stopped during the listing.
+                stopped during a listing that returned uploads.
             OSError: The error of an abort that failed, other than for an
                 upload that no longer exists.
         """
