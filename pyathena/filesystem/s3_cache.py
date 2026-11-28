@@ -314,7 +314,13 @@ class S3ListingCache:
             name = key
             while isinstance(name, tuple):
                 name = name[0]
-            if name == bucket or name.startswith(prefix):
+            if not (name == bucket or name.startswith(prefix)):
+                continue
+            if isinstance(key, tuple) and key[1:] == (self.LOOKUPS_KEY,):
+                # The lookups with parameters are removed as an invalidation
+                # removes them.
+                self._evict_lookup(key[0])
+            else:
                 self._evict(key)
 
     def get_listing(self, name: str, delimiter: str) -> list[S3Object] | None:
