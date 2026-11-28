@@ -1138,8 +1138,10 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Returns:
             The bytes of a single path, or a dictionary of the paths and
-            their bytes. As in fsspec, the error of the read of a single
-            path is returned unless ``on_error`` is ``"raise"``.
+            their bytes, which holds the error of a failed read with
+            ``on_error="return"`` and leaves out its path with ``"omit"``.
+            As in fsspec, the error of the read of a single path is returned
+            unless ``on_error`` is ``"raise"``.
         """
         return await _S3BatchTasks().run(
             self._cat_paths(
@@ -1167,8 +1169,10 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Returns:
             The bytes of a single path, or a dictionary of the paths and
-            their bytes. As in fsspec, the error of the read of a single
-            path is returned unless ``on_error`` is ``"raise"``.
+            their bytes, which holds the error of a failed read with
+            ``on_error="return"`` and leaves out its path with ``"omit"``.
+            As in fsspec, the error of the read of a single path is returned
+            unless ``on_error`` is ``"raise"``.
         """
         targets = self._sync_fs._first_targets(
             await self._thread_pool.run(

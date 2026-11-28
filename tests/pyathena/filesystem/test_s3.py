@@ -5242,17 +5242,33 @@ class TestS3FileSystem:
             assert f.blocksize == block_size
 
     @pytest.mark.parametrize(
-        ("path", "kwargs", "expected"),
+        ("path", "kwargs", "lookup", "expected"),
         [
-            ("s3://bucket/key", {"version_id": "v1"}, "v1"),
+            ("s3://bucket/key", {"version_id": "v1"}, ("s3://bucket/key", "v1"), "v1"),
             # The version in the path takes precedence, as in info().
-            ("s3://bucket/key?versionId=v2", {"version_id": "v1"}, "v2"),
+            (
+                "s3://bucket/key?versionId=v2",
+                {"version_id": "v1"},
+                (S3Path("bucket", "key", "v2"), "v2"),
+                "v2",
+            ),
             # GH-1425: also the VersionId parameter selects the version that
             # sizes a negative offset. The current object was looked up.
-            ("s3://bucket/key", {"VersionId": "v1"}, "v1"),
+            ("s3://bucket/key", {"VersionId": "v1"}, ("s3://bucket/key", "v1"), "v1"),
+            # GH-1425: an empty VersionId is sent as given, which S3 rejects,
+            # instead of reading the current object.
+            ("s3://bucket/key", {"VersionId": ""}, ("s3://bucket/key", None), ""),
+            # GH-1425: a version that ends in a slash sizes the offset. The
+            # name, which drops the slash, was looked up.
+            (
+                "s3://bucket/key?versionId=v1/",
+                {},
+                (S3Path("bucket", "key", "v1/"), "v1/"),
+                "v1/",
+            ),
         ],
     )
-    def test_cat_file_version_id(self, path, kwargs, expected):
+    def test_cat_file_version_id(self, path, kwargs, lookup, expected):
         fs = self._make_fs()
         fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
         fs._info_entry.return_value.size = 10
@@ -5267,7 +5283,7 @@ class TestS3FileSystem:
         fs._call.reset_mock()
         fs._call.return_value = {"Body": io.BytesIO(b"ta")}
         assert fs.cat_file(path, start=-8, end=-6, **kwargs) == b"ta"
-        fs._info_entry.assert_called_once_with(path, version_id=expected)
+        fs._info_entry.assert_called_once_with(lookup[0], version_id=lookup[1])
         fs._call.assert_called_once_with(
             fs._client.get_object,
             Bucket="bucket",

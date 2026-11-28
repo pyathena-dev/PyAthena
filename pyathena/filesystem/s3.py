@@ -3870,8 +3870,8 @@ class S3FileSystem(AbstractFileSystem):
             end: Byte offset to stop reading at, as in :meth:`cat_file`.
             name: The path string that the caller passed, which ``info()``
                 looks up for the size of the object of a negative offset or
-                an empty range, and which a missing object is reported by;
-                None to look up ``path`` itself.
+                an empty range if ``path`` has no version, and which a missing
+                object is reported by; None to look up ``path`` itself.
             **kwargs: Additional parameters passed to the GetObject API, and
                 ``version_id``, as in :meth:`cat_file`.
 
@@ -3885,11 +3885,10 @@ class S3FileSystem(AbstractFileSystem):
         if not path.key:
             raise FileNotFoundError(name or str(path))
         version_id = kwargs.pop("version_id", None)
-        request_version_id = kwargs.pop("VersionId", None)
         # The version that GetObject reads, which also sizes a negative
         # offset: that of the path, then version_id, then the VersionId
-        # parameter.
-        version_id = path.version_id or version_id or request_version_id
+        # parameter, which is sent as given.
+        version_id = path.version_id or version_id or kwargs.get("VersionId") or None
         ranges: tuple[int, int | None] | None = None
         if start is not None and start < 0 and end is None:
             # S3 returns the last bytes, or the whole object when it is
@@ -3904,7 +3903,11 @@ class S3FileSystem(AbstractFileSystem):
                 # missing object.
                 lookup_kwargs = self._get_lookup_kwargs(kwargs)
                 info = self._info_entry(
-                    name if name is not None else path, version_id=version_id, **lookup_kwargs
+                    # A version of the path is looked up as parsed, also one
+                    # that ends in a slash, which the name would drop.
+                    name if name is not None and not path.version_id else path,
+                    version_id=version_id,
+                    **lookup_kwargs,
                 )
                 if (
                     info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY
