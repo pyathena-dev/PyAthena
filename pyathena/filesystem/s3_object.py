@@ -335,7 +335,7 @@ class S3Object(dict[str, Any]):
         """
         fields: dict[str, Any] = {"version_id": version.version_id, "is_latest": version.is_latest}
         if version.version_id != "null":
-            fields["name"] = str(S3Path(version.bucket, version.key, version.version_id))
+            fields["name"] = str(version.path)
         return cls._from_listing(version, **fields)
 
     @classmethod
@@ -412,9 +412,12 @@ class S3Object(dict[str, Any]):
         )
 
 
-@dataclass(frozen=True, eq=False, init=False)
 class _S3Response:
-    """The base of the models whose constructors read an S3 API response."""
+    """The base of the models whose constructors read an S3 API response.
+
+    A plain class, so that it generates no equality of its own, which would
+    precede the mapping equality of :class:`S3Metadata`.
+    """
 
     def _set_fields(self, **fields: Any) -> None:
         """Set the fields of the frozen model; called by the constructors only.
@@ -565,7 +568,9 @@ class S3Metadata(_S3Response, Mapping[str, str]):
             object_lock_legal_hold_status=response.get("ObjectLockLegalHoldStatus"),
             **self._checksums(response),
             checksum_type=response.get("ChecksumType"),
-            _user_metadata=response.get("Metadata", {}),
+            # A copy, so that a change to the response does not change the
+            # frozen model.
+            _user_metadata=dict(response.get("Metadata", {})),
         )
 
     @override
@@ -719,7 +724,11 @@ class S3ObjectVersion(_S3Response):
 
     @property
     def path(self) -> S3Path:
-        """The path of the version, with its version ID, including ``null``."""
+        """The path of the version, with its version ID, including ``null``.
+
+        The key is that of the listing, which is URL-encoded when the listing
+        was requested with ``EncodingType="url"``.
+        """
         return S3Path(self.bucket, self.key, self.version_id)
 
 

@@ -298,6 +298,13 @@ class TestS3Metadata:
         assert actual.version_id == "test_version_id"
         assert actual.user_metadata == {"attr1": "value1", "attr-2": "value2"}
 
+    def test_user_metadata_is_a_copy(self):
+        # GH-1383: the frozen model does not change with the response.
+        response = {"Metadata": {"attr1": "value1"}}
+        actual = S3Metadata(response)
+        response["Metadata"]["attr1"] = "changed"
+        assert dict(actual) == {"attr1": "value1"}
+
     def test_mapping_interface(self):
         # The mapping interface exposes the user-defined metadata, so the
         # object is a drop-in for a plain user-metadata dictionary.
@@ -449,7 +456,6 @@ class TestS3PutObject:
         assert S3PutObject({"ETag": '"a"'}) == S3PutObject({"ETag": '"a"'})
         assert S3PutObject({"ETag": '"a"'}) != S3PutObject({"ETag": '"b"'})
         assert hash(S3PutObject({"ETag": '"a"'})) == hash(S3PutObject({"ETag": '"a"'}))
-        assert len({S3PutObject({"ETag": '"a"'}), S3PutObject({"ETag": '"a"'})}) == 1
 
 
 class TestS3MultipartUpload:
@@ -755,7 +761,7 @@ def test_models_set_every_field(model, args):
     # GH-1383: the constructors read a response into every field, so that the
     # fields compare, hash and convert.
     actual = model(*args)
-    assert {f.name for f in dataclasses.fields(actual)} <= vars(actual).keys()
+    assert {f.name for f in dataclasses.fields(actual)} == vars(actual).keys()
     assert actual == model(*args)
     # Compared by their fields, which the equality of S3Metadata ignores.
     for restored in (copy.copy(actual), pickle.loads(pickle.dumps(actual))):
