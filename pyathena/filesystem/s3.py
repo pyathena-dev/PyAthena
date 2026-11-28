@@ -662,16 +662,6 @@ class S3FileSystem(AbstractFileSystem):
             listing_cache.dircache = value
 
     @property
-    def _client(self) -> BaseClient:
-        """The boto3 S3 client of the filesystem (``core.client``)."""
-        return self._core.client
-
-    @property
-    def _retry_config(self) -> RetryPolicy:
-        """The retry policy of the requests (``core.retry_config``)."""
-        return self._core.retry_config
-
-    @property
     def request_kwargs(self) -> dict[str, Any]:
         """The parameters sent with every operation that accepts them.
 
@@ -4905,18 +4895,6 @@ class S3FileSystem(AbstractFileSystem):
             s3_additional_kwargs=s3_additional_kwargs,
             **kwargs,
         )
-
-    def _call(self, method: str | Callable[..., Any], **kwargs) -> dict[str, Any]:
-        """Send a request with the core (see :meth:`S3Core.call`).
-
-        Args:
-            method: The name of the client method, or the method itself.
-            **kwargs: The request parameters.
-
-        Returns:
-            The response.
-        """
-        return self._core.call(method, **kwargs)
 
 
 # The parameters of the encryption of a written object, kept from an appended

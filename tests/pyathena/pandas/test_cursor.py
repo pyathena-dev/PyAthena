@@ -347,7 +347,7 @@ class TestPandasCursor:
                 assert pandas_cursor.fetchall() == [(1,)]
                 file_systems.append(pandas_cursor.result_set._fs)
         assert [c.args for c in client.call_args_list] == [("s3",)]
-        assert all(fs._client is conn.s3_client for fs in file_systems)
+        assert all(fs.core.client is conn.s3_client for fs in file_systems)
 
     @pytest.mark.parametrize(
         ("query", "expected"),

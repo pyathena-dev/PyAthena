@@ -135,7 +135,7 @@ class TestAioS3FileSystem:
             max_workers=1,
             skip_instance_cache=True,
         )
-        with Stubber(fs._sync_fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stub_multipart_copy(stubber, **kwargs)
             try:
                 await await_bounded(
@@ -195,7 +195,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        with Stubber(fs._sync_fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stubber.add_response("head_object", {"ContentLength": size, "VersionId": "v1"}, None)
             stubber.add_response(
                 "copy_object",
@@ -260,7 +260,7 @@ class TestAioS3FileSystem:
             max_workers=1,
             skip_instance_cache=True,
         )
-        with Stubber(fs._sync_fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             stub_move_with_source_params(stubber)
             fs.mv(
                 ["s3://bucket/a", "s3://bucket/a/x"],
@@ -332,7 +332,7 @@ class TestAioS3FileSystem:
         sync_fs.core.complete_multipart_upload = mock.MagicMock()
         # The HeadObject of the source, with 4 parts of the default block size.
         size = 4 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        sync_fs.core.call = mock.MagicMock(return_value={"ContentLength": size})
 
         await fs._copy_object_with_multipart_upload(
             S3Path("bucket", "src"),
@@ -370,7 +370,7 @@ class TestAioS3FileSystem:
         sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         sync_fs.core.complete_multipart_upload = mock.MagicMock()
         size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        sync_fs.core.call = mock.MagicMock(return_value={"ContentLength": size})
 
         await asyncio.gather(
             *[
@@ -699,7 +699,7 @@ class TestAioS3FileSystem:
                 release.wait(EVENT_TIMEOUT)
             return serve(method, **request)
 
-        fs._sync_fs._call = fs._sync_fs._core.call = call
+        fs.core.call = call
         task = asyncio.ensure_future(anext(fs._walk("s3://bucket/a", topdown=False)))
         assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
         task.cancel()
@@ -985,7 +985,7 @@ class TestAioS3FileSystem:
                 release.wait(EVENT_TIMEOUT)
             return serve(method, **request)
 
-        fs._sync_fs._call = fs._sync_fs._core.call = call
+        fs.core.call = call
         task = asyncio.ensure_future(fs._du("s3://bucket/a"))
         assert await asyncio.to_thread(started.wait, EVENT_TIMEOUT)
         task.cancel()
@@ -1040,7 +1040,7 @@ class TestAioS3FileSystem:
         sync_fs.core.complete_multipart_upload = mock.MagicMock()
         sync_fs.core.put_object = mock.MagicMock()
         # The HeadObject of the source, with 2 parts of the default block size.
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(
+        sync_fs.core.call = mock.MagicMock(
             return_value={"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
         )
         await fs._copy_object_with_multipart_upload(
@@ -1099,7 +1099,7 @@ class TestAioS3FileSystem:
         sync_fs.core.complete_multipart_upload = mock.MagicMock()
         # The HeadObject of the source, with 3 parts of the default block size.
         size = 3 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        sync_fs.core.call = mock.MagicMock(return_value={"ContentLength": size})
         sync_fs.core.abort_multipart_upload = mock.MagicMock(side_effect=abort_multipart_upload)
 
         task = asyncio.ensure_future(
@@ -1208,7 +1208,7 @@ class TestAioS3FileSystem:
         sync_fs.core.abort_multipart_upload = mock.MagicMock()
         # The HeadObject of the source, with 2 parts of the default block size.
         size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        sync_fs.core.call = mock.MagicMock(return_value={"ContentLength": size})
         task = asyncio.ensure_future(
             fs._copy_object_with_multipart_upload(
                 S3Path("bucket", "src"),
@@ -1277,7 +1277,7 @@ class TestAioS3FileSystem:
         )
         # The HeadObject of the source, with 2 parts of the default block size.
         size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        sync_fs.core.call = mock.MagicMock(return_value={"ContentLength": size})
         sync_fs.core.abort_multipart_upload = mock.MagicMock(
             side_effect=lambda *args, **kwargs: events.append("abort")
         )
@@ -1347,7 +1347,7 @@ class TestAioS3FileSystem:
         sync_fs.core.upload_part_copy = mock.MagicMock()
         # The HeadObject of the source, with 2 parts of the default block size.
         size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        sync_fs.core.call = mock.MagicMock(return_value={"ContentLength": size})
         sync_fs.core.abort_multipart_upload = mock.MagicMock(
             side_effect=lambda upload, **params: events.append(("abort", upload.upload_id))
         )
@@ -1428,7 +1428,7 @@ class TestAioS3FileSystem:
         )
         # The HeadObject of the source, with 2 parts of the default block size.
         size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        sync_fs.core.call = mock.MagicMock(return_value={"ContentLength": size})
         sync_fs.core.abort_multipart_upload = mock.MagicMock(
             side_effect=lambda upload, **params: events.append("abort")
         )
@@ -1496,7 +1496,7 @@ class TestAioS3FileSystem:
         sync_fs.core.abort_multipart_upload = mock.MagicMock()
         # The HeadObject of the source, with 2 parts of the default block size.
         size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        sync_fs.core.call = mock.MagicMock(return_value={"ContentLength": size})
         submit_to = S3ThreadPool.submit_to
 
         async def copy():
@@ -1753,7 +1753,7 @@ class TestAioS3FileSystem:
         sync_fs.core.complete_multipart_upload = mock.MagicMock()
         # The HeadObject of the source, with 2 parts of the default block size.
         size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        sync_fs.core.call = mock.MagicMock(return_value={"ContentLength": size})
         sync_fs.core.abort_multipart_upload = mock.MagicMock(
             side_effect=lambda upload, **params: events.append("abort")
         )
@@ -1853,7 +1853,7 @@ class TestAioS3FileSystem:
         )
         # The HeadObject of the source, with 2 parts of the default block size.
         size = 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        sync_fs.core.call = mock.MagicMock(return_value={"ContentLength": size})
         sync_fs.core.abort_multipart_upload = mock.MagicMock(
             side_effect=lambda upload, **params: events.append("abort")
         )
@@ -1924,7 +1924,7 @@ class TestAioS3FileSystem:
         # the file is opened, for an existing object.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
         fs._sync_fs._object_exists = mock.MagicMock(return_value=True)
-        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
+        fs.core.call = mock.MagicMock()
         local = tmp_path / "local"
         local.write_bytes(b"a")
         with fs.transaction:
@@ -1932,7 +1932,7 @@ class TestAioS3FileSystem:
                 fs.pipe_file("s3://bucket/k1", b"data", mode="create")
             with pytest.raises(FileExistsError):
                 fs.put_file(str(local), "s3://bucket/k2", mode="create")
-        fs._sync_fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize(
         ("path", "compression"),
@@ -2029,7 +2029,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
         fs._sync_fs.core.MULTIPART_UPLOAD_MAX_PARTS = 3
         fs._sync_fs.default_block_size = 4
-        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
+        fs.core.call = mock.MagicMock()
         fs._open = mock.MagicMock()
         local = tmp_path / "local"
         local.write_bytes(b"a" * 13)
@@ -2040,7 +2040,7 @@ class TestAioS3FileSystem:
             with pytest.raises(ValueError, match="in 3 parts with a block size of 4 bytes"):
                 fs.put_file(str(local), "s3://bucket/k2", **kwargs)
         fs._open.assert_not_called()
-        fs._sync_fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_rm_requests(self):
@@ -2049,12 +2049,12 @@ class TestAioS3FileSystem:
         # filesystem sends the request of each bucket in parallel.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={})
+        sync_fs.core.call = mock.MagicMock(return_value={})
 
         await fs._rm(["s3://b1/a", "s3://b2/b"], ExpectedBucketOwner="111122223333")
         assert sorted(
             (c.kwargs["Bucket"], c.kwargs["Delete"]["Objects"], c.kwargs["ExpectedBucketOwner"])
-            for c in sync_fs._call.call_args_list
+            for c in sync_fs.core.call.call_args_list
         ) == [
             ("b1", [{"Key": "a"}], "111122223333"),
             ("b2", [{"Key": "b"}], "111122223333"),
@@ -2069,7 +2069,7 @@ class TestAioS3FileSystem:
                 raise PermissionError("Access Denied")
             return {"Errors": [{"Key": "b", "Code": "AccessDenied", "Message": "Access Denied"}]}
 
-        fs._sync_fs._call = fs._sync_fs._core.call = call
+        fs.core.call = call
         with pytest.raises(PermissionError, match="Access Denied") as exc_info:
             await fs._rm(["s3://b1/a", "s3://b2/b"])
         assert exc_info.value.__notes__ == [
@@ -2091,7 +2091,7 @@ class TestAioS3FileSystem:
             release[request["Bucket"]].wait(EVENT_TIMEOUT)
             return {}
 
-        fs._sync_fs._call = fs._sync_fs._core.call = call
+        fs.core.call = call
         task = asyncio.create_task(fs._rm(["s3://b1/a", "s3://b2/b"]))
         try:
             for event in started.values():
@@ -2121,7 +2121,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
-        with Stubber(fs._sync_fs._client) as stubber:
+        with Stubber(fs.core.client) as stubber:
             # One level of the directory: dir/sub/deep is not listed.
             stubber.add_response(
                 "list_objects_v2",
@@ -2173,7 +2173,7 @@ class TestAioS3FileSystem:
                 return {"ETag": '"e"'}
             return {}
 
-        fs._sync_fs._call = fs._sync_fs._core.call = call
+        fs.core.call = call
         task = asyncio.ensure_future(
             fs._put_file(str(local), "s3://bucket/key", block_size=block_size, max_workers=1)
         )
@@ -2372,7 +2372,7 @@ class TestAioS3FileSystem:
                 return {"ETag": '"e"'}
             return {}
 
-        fs._sync_fs._call = fs._sync_fs._core.call = call
+        fs.core.call = call
         try:
             with fs.transaction:
                 task = asyncio.ensure_future(
@@ -2447,7 +2447,7 @@ class TestAioS3FileSystem:
                     state["started"] = 1
                     release.wait(EVENT_TIMEOUT)
 
-        fs._sync_fs._call = fs._sync_fs._core.call = call
+        fs.core.call = call
         blocker_started = threading.Event()
         blocker_release = threading.Event()
         blocker_ended = threading.Event()
@@ -2545,7 +2545,7 @@ class TestAioS3FileSystem:
             requests.append(method.__name__)
             return {}
 
-        fs._sync_fs._call = fs._sync_fs._core.call = call
+        fs.core.call = call
         write_ended = threading.Event()
         run = _S3TransactionWrite.run
 
@@ -2596,7 +2596,7 @@ class TestAioS3FileSystem:
             requests.append(method.__name__)
             return {}
 
-        fs._sync_fs._call = fs._sync_fs._core.call = call
+        fs.core.call = call
         stop = threading.Event()
         stop.set()
         with fs.transaction:
@@ -3118,7 +3118,7 @@ class TestAioS3FileSystem:
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
         serve_s3_keys(fs._sync_fs, {"a", "b"})
-        serve = fs._sync_fs._call
+        serve = fs.core.call
 
         def call(method, **request):
             # Each object holds its key twice, so that the destinations tell
@@ -3128,7 +3128,7 @@ class TestAioS3FileSystem:
                 response = {**response, "Body": io.BytesIO(request["Key"].encode() * 2)}
             return response
 
-        fs._sync_fs._call = fs._sync_fs._core.call = call
+        fs.core.call = call
         stream = PathLikeStream() if path_like else io.BytesIO()
 
         await await_bounded(
@@ -3261,7 +3261,7 @@ class TestAioS3FileSystem:
             overlap()
             return {}
 
-        fs._sync_fs._call = fs._sync_fs._core.call = call
+        fs.core.call = call
         with contextlib.ExitStack() as stack:
             if argument == "max_workers":
                 stack.enter_context(pytest.warns(DeprecationWarning, match="use batch_size"))
@@ -3336,10 +3336,10 @@ class TestAioS3FileSystem:
         fs._sync_fs._info_entry = mock.MagicMock(
             return_value=S3FileSystem._directory_object("bucket", "src")
         )
-        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
+        fs.core.call = mock.MagicMock()
 
         await fs._cp_file("s3://bucket/src", "s3://bucket/dst")
-        fs._sync_fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_copy_version(self):
@@ -3368,7 +3368,7 @@ class TestAioS3FileSystem:
         # the cached entry, which the next call returns again.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
-        sync_fs._call = sync_fs._core.call = mock.MagicMock()
+        sync_fs.core.call = mock.MagicMock()
         file = S3Object(
             init={"Metadata": {"k": "v"}},
             type=S3ObjectType.S3_OBJECT_TYPE_FILE,
@@ -3410,7 +3410,7 @@ class TestAioS3FileSystem:
                 entry["metadata"]["k"] = "changed"
         assert file == expected
         assert [e for e in await entries() if e["name"] == "bucket/dir/a"] == [expected]
-        sync_fs._call.assert_not_called()
+        sync_fs.core.call.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_walk_detail_lists_the_listed_directories(self):
@@ -3419,7 +3419,7 @@ class TestAioS3FileSystem:
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
         # A listing of another prefix fails, which the walk yields empty.
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(side_effect=FileNotFoundError)
+        sync_fs.core.call = mock.MagicMock(side_effect=FileNotFoundError)
         cache = sync_fs._listing_cache
         cache.put_listing("bucket/dir", "/", [sync_fs._directory_object("bucket", "dir/sub")])
         cache.put_listing(
@@ -3438,7 +3438,7 @@ class TestAioS3FileSystem:
             for entry in dirs.values():
                 entry["name"] = entry["key"] = "changed"
         assert walked == [("bucket/dir", []), ("bucket/dir/sub", ["b"])]
-        sync_fs._call.assert_not_called()
+        sync_fs.core.call.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_expand_path_glob_lists_stem_prefix(self):
@@ -3447,7 +3447,7 @@ class TestAioS3FileSystem:
         # used before GH-1337, does.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(
+        sync_fs.core.call = mock.MagicMock(
             side_effect=lambda method, **request: {"Contents": [], "KeyCount": 0}
         )
 
@@ -3455,8 +3455,8 @@ class TestAioS3FileSystem:
             await fs._expand_path("s3://bucket/reports/2026-*.csv")
         listings = [
             c.kwargs
-            for c in sync_fs._call.call_args_list
-            if c.args[0] is sync_fs._client.list_objects_v2
+            for c in sync_fs.core.call.call_args_list
+            if c.args[0] is sync_fs.core.client.list_objects_v2
         ]
         assert listings[0]["Prefix"] == "reports/2026-"
 
@@ -3515,7 +3515,7 @@ class TestAioS3FileSystem:
             return True
 
         fs._copy_file = copy_file
-        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock(return_value={})
+        fs.core.call = mock.MagicMock(return_value={})
 
         await fs._mv(
             ["s3://bucket/a", "s3://bucket/d", "s3://bucket/c"],
@@ -3526,8 +3526,8 @@ class TestAioS3FileSystem:
             ("s3://bucket/a", "s3://bucket/x/a", {"RequestPayer": "requester", "max_workers": 2}),
             ("s3://bucket/c", "s3://bucket/x/c", {"RequestPayer": "requester", "max_workers": 2}),
         ]
-        fs._sync_fs._call.assert_called_once_with(
-            fs._sync_fs._client.delete_objects,
+        fs.core.call.assert_called_once_with(
+            fs.core.client.delete_objects,
             Bucket="bucket",
             Delete={"Objects": [{"Key": "a"}, {"Key": "c"}], "Quiet": True},
         )
@@ -3575,12 +3575,12 @@ class TestAioS3FileSystem:
             return True
 
         fs._copy_file = copy_file
-        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
+        fs.core.call = mock.MagicMock()
 
         with pytest.raises(OSError, match="copy failed"):
             await fs._mv(["s3://bucket/a", "s3://bucket/b"], ["s3://bucket/x/a", "s3://bucket/x/b"])
         assert finished == ["s3://bucket/b"]
-        fs._sync_fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_mv_copy_failure_in_batches(self):
@@ -3597,7 +3597,7 @@ class TestAioS3FileSystem:
             return True
 
         fs._copy_file = copy_file
-        fs._sync_fs._call = fs._sync_fs._core.call = mock.MagicMock()
+        fs.core.call = mock.MagicMock()
 
         with pytest.raises(OSError, match="copy failed"):
             await fs._mv(
@@ -3606,7 +3606,7 @@ class TestAioS3FileSystem:
                 batch_size=1,
             )
         assert finished == ["s3://bucket/b", "s3://bucket/c"]
-        fs._sync_fs._call.assert_not_called()
+        fs.core.call.assert_not_called()
 
     @pytest.mark.parametrize("size", [10, 5 * 2**30 + 1])
     @pytest.mark.asyncio
@@ -3640,7 +3640,7 @@ class TestAioS3FileSystem:
         sync_fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
         sync_fs.core.complete_multipart_upload = mock.MagicMock()
         # The HeadObject of the source.
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": size})
+        sync_fs.core.call = mock.MagicMock(return_value={"ContentLength": size})
         directives = {
             "MetadataDirective": "REPLACE",
             "TaggingDirective": "REPLACE",
@@ -3711,7 +3711,7 @@ class TestAioS3FileSystem:
             warnings.simplefilter("error", DeprecationWarning)
             fs = s3_filesystem(connection, AioS3FileSystem, skip_instance_cache=True)
         assert type(fs) is AioS3FileSystem
-        assert fs._sync_fs._client is connection.s3_client
+        assert fs.core.client is connection.s3_client
         assert fs.core.retry_config is connection.retry_config
 
     def test_connection_deprecated(self):
@@ -3722,7 +3722,7 @@ class TestAioS3FileSystem:
             fs = AioS3FileSystem(connection=connection, skip_instance_cache=True)
         assert len(record) == 1
         assert record[0].filename == __file__
-        assert fs._sync_fs._client is connection.s3_client
+        assert fs.core.client is connection.s3_client
         assert fs.core.retry_config is connection.retry_config
 
     @pytest.mark.parametrize(
@@ -3756,7 +3756,7 @@ class TestAioS3FileSystem:
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
         unpickled = pickle.loads(pickle.dumps(fs))
-        assert unpickled._sync_fs._client.meta.region_name == "us-east-1"
+        assert unpickled.core.client.meta.region_name == "us-east-1"
 
     @pytest.mark.asyncio
     async def test_assigned_dircache_caches_the_lookups(self):
@@ -3764,7 +3764,7 @@ class TestAioS3FileSystem:
         # of both filesystems. It did not reach the internal S3FileSystem.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
         sync_fs = fs._sync_fs
-        sync_fs._call = sync_fs._core.call = mock.MagicMock(return_value={"ContentLength": 2})
+        sync_fs.core.call = mock.MagicMock(return_value={"ContentLength": 2})
         dircache = DirCache()
         fs.dircache = dircache
 

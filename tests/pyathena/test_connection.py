@@ -510,7 +510,7 @@ class TestConnection:
 
         fs = s3_filesystem(conn, skip_instance_cache=True)
 
-        assert fs._client is conn.s3_client
+        assert fs.core.client is conn.s3_client
         assert fs.core.retry_config is conn.retry_config
 
     def test_s3_config_defaults_to_config(self):
