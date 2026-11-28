@@ -958,6 +958,12 @@ class TestS3FileSystem:
         assert [c.args[0] for c in fs._call.call_args_list] == [fs._client.head_object]
         # Only the lookup of the version is cached: nothing as a listing of
         # the version-qualified path, nor as the current object.
+        listings = [
+            ("listing", name, delimiter)
+            for name in ("bucket/key?versionId=v2", "bucket/key")
+            for delimiter in ("/", "")
+        ]
+        assert self._cached(fs, listings) == []
         assert len(fs.dircache) == 1
         assert fs._listing_cache.get_lookup(S3Path("bucket", "key", "v2"), {}) is not None
 
