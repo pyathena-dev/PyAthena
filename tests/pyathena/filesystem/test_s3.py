@@ -1944,39 +1944,42 @@ class TestS3FileSystem:
         assert fs._listing_cache.get_buckets() is None
 
     @pytest.mark.parametrize(
-        ("method", "error", "evicted"),
+        ("method", "responses", "error", "evicted"),
         [
-            ("mkdir", None, True),
-            ("rmdir", None, True),
+            # HeadBucket finds the bucket missing, and CreateBucket creates it.
+            ("mkdir", [FileNotFoundError, {}], None, True),
+            ("rmdir", [{}], None, True),
             # NoSuchBucket: the bucket does not exist either.
-            ("rmdir", FileNotFoundError, True),
+            ("rmdir", [FileNotFoundError], FileNotFoundError, True),
             # BucketNotEmpty: the bucket and its objects still exist.
-            ("rmdir", OSError, False),
+            ("rmdir", [OSError], OSError, False),
         ],
         ids=["mkdir", "rmdir", "rmdir-no-such-bucket", "rmdir-bucket-not-empty"],
     )
-    def test_bucket_change_invalidates_bucket_cache(self, method, error, evicted):
+    def test_bucket_change_invalidates_bucket_cache(self, method, responses, error, evicted):
         # GH-1460: a bucket that has been created, deleted or found missing
         # by DeleteBucket holds none of the objects cached below it, which
         # another client may have deleted.
         fs = self._make_fs()
         fs.allow_bucket_creation = True
         fs.allow_bucket_deletion = True
-        fs.exists = mock.MagicMock(return_value=False)
         fs.core.client.meta.region_name = "us-east-1"
-        fs.core.call.side_effect = error
+        fs.core.call.side_effect = responses
         fs.invalidate_cache = mock.MagicMock(wraps=fs.invalidate_cache)
         key = S3Path("bucket", "dir/key")
         version = S3Path("bucket", "dir/key", "v1")
+        # No lookup of the bucket without parameters, with which mkdir() would
+        # find the bucket in the cache.
         bucket_entries = [
             ("buckets",),
-            ("lookup", S3Path("bucket")),
+            ("lookups", S3Path("bucket")),
             ("listing", "bucket", "/"),
             ("lookup", key),
             ("lookups", key),
             ("lookup", version),
             ("lookups", version),
             ("listing", "bucket/dir", "/"),
+            ("listing", "bucket/dir", ""),
         ]
         # The entries of a bucket whose name starts with that of the bucket.
         other_entries = [
