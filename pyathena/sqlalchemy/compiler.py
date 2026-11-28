@@ -1297,6 +1297,23 @@ class AthenaDDLCompiler(DDLCompiler):
     def _get_comment_specification(self, comment: str) -> str:
         return f"COMMENT {self._escape_string_literal(comment)}"
 
+    def _get_property_specification(self, key: Any, value: Any) -> str:
+        """Return one ``'key' = 'value'`` entry of a property list.
+
+        The key and the value are converted with ``str()`` and quoted as string
+        literals, so they are the text that Athena stores.
+
+        Args:
+            key: The property name.
+            value: The property value.
+
+        Returns:
+            The property entry, indented with a tab.
+        """
+        return (
+            f"\t{self._escape_string_literal(str(key))} = {self._escape_string_literal(str(value))}"
+        )
+
     def _get_bucket_count(
         self, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
     ) -> str | None:
@@ -1362,12 +1379,29 @@ class AthenaDDLCompiler(DDLCompiler):
     def _get_serde_properties_specification(
         self, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
     ) -> str:
+        """Build the WITH SERDEPROPERTIES clause.
+
+        The keys and values of a dict are quoted as string literals. A string is
+        a property list inserted as given.
+
+        Args:
+            dialect_opts: The table's ``awsathena_*`` dialect options.
+            connect_opts: The connection options, used for unset dialect options.
+
+        Returns:
+            The WITH SERDEPROPERTIES clause, or an empty string if there are no
+            properties.
+        """
         serde_properties = self._get_serde_properties(dialect_opts, connect_opts)
         text = []
         if serde_properties:
             text.append("WITH SERDEPROPERTIES (")
             if isinstance(serde_properties, dict):
-                text.append(",\n".join([f"\t'{k}' = '{v}'" for k, v in serde_properties.items()]))
+                text.append(
+                    ",\n".join(
+                        self._get_property_specification(k, v) for k, v in serde_properties.items()
+                    )
+                )
             else:
                 text.append(serde_properties)
             text.append(")")
@@ -1588,6 +1622,9 @@ class AthenaDDLCompiler(DDLCompiler):
     ) -> str:
         """Build the TBLPROPERTIES clause, including the compression property.
 
+        The keys and values of a dict are quoted as string literals, and so is the
+        compression value. A string is a property list inserted as given.
+
         The compression property is ``parquet.compression`` for Parquet,
         ``orc.compress`` for ORC, and ``write.compression`` for other formats.
         The format comes from the file format keyword, matched case-insensitively,
@@ -1605,7 +1642,11 @@ class AthenaDDLCompiler(DDLCompiler):
         properties = self._get_table_properties(dialect_opts, connect_opts)
         if properties:
             if isinstance(properties, dict):
-                table_properties = [",\n".join([f"\t'{k}' = '{v}'" for k, v in properties.items()])]
+                table_properties = [
+                    ",\n".join(
+                        self._get_property_specification(k, v) for k, v in properties.items()
+                    )
+                ]
             else:
                 table_properties = [properties]
         else:
@@ -1617,15 +1658,16 @@ class AthenaDDLCompiler(DDLCompiler):
             row_format = self._get_row_format(dialect_opts, connect_opts)
             if file_format or row_format:
                 if file_format and AthenaFileFormat.is_parquet(file_format):
-                    table_properties.append(f"\t'parquet.compression' = '{compression}'")
+                    key = "parquet.compression"
                 elif file_format and AthenaFileFormat.is_orc(file_format):
-                    table_properties.append(f"\t'orc.compress' = '{compression}'")
+                    key = "orc.compress"
                 elif row_format and AthenaRowFormatSerde.is_parquet(row_format):
-                    table_properties.append(f"\t'parquet.compression' = '{compression}'")
+                    key = "parquet.compression"
                 elif row_format and AthenaRowFormatSerde.is_orc(row_format):
-                    table_properties.append(f"\t'orc.compress' = '{compression}'")
+                    key = "orc.compress"
                 else:
-                    table_properties.append(f"\t'write.compression' = '{compression}'")
+                    key = "write.compression"
+                table_properties.append(self._get_property_specification(key, compression))
 
         text = []
         if table_properties:

@@ -829,6 +829,42 @@ class TestAthenaDDLCompiler:
         )
         assert r"LOCATION 's3://bucket/o\'brien\\x%20y/'" in executed_sql(CreateTable(table))
 
+    @pytest.mark.parametrize(
+        ("option", "clause"),
+        [
+            ("awsathena_serdeproperties", "WITH SERDEPROPERTIES"),
+            ("awsathena_tblproperties", "TBLPROPERTIES"),
+        ],
+    )
+    def test_create_table_dict_properties_are_escaped(self, option, clause):
+        table = Table(
+            "events",
+            MetaData(),
+            Column("id", Integer),
+            awsathena_location="s3://bucket/events/",
+            **{option: {"it's %": "a\\b 100%", "skip.header.line.count": 1}},
+        )
+        expected = "\n".join(
+            [
+                f"{clause} (",
+                "\t" + r"'it\'s %' = 'a\\b 100%',",
+                "\t'skip.header.line.count' = '1'",
+                ")",
+            ]
+        )
+        assert expected in executed_sql(CreateTable(table))
+
+    def test_create_table_compression_is_escaped(self):
+        table = Table(
+            "events",
+            MetaData(),
+            Column("id", Integer),
+            awsathena_location="s3://bucket/events/",
+            awsathena_file_format="PARQUET",
+            awsathena_compression="it's\\%",
+        )
+        assert r"'parquet.compression' = 'it\'s\\%'" in executed_sql(CreateTable(table))
+
     def test_create_table_s3tables_catalog_omits_location(self):
         table = Table(
             "tbl",
