@@ -2732,6 +2732,8 @@ class TestAioS3FileSystem:
         assert result == expected
         assert callback.sizes == sizes
         assert (spy.mock_calls == []) is (expected is None)
+        # One update of the progress for each transfer, as in fsspec.
+        assert spy.relative_update.call_args_list == [mock.call(1)] * len(result or [])
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
