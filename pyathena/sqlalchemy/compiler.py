@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from itertools import product
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import exc, select, types, util
+from sqlalchemy import exc, select, type_coerce, types, util
 from sqlalchemy.sql import operators, visitors
 from sqlalchemy.sql import util as sql_util
 from sqlalchemy.sql.compiler import (
@@ -628,6 +628,7 @@ class _AthenaLambda(types.String):
         double_percents = dialect.identifier_preparer._double_percents
 
         def process(value: Any) -> str:
+            # Earlier SQLAlchemy 2.0 releases, such as 2.0.0, pass NULL to the processor.
             if value is None:
                 return "NULL"
             text = str(value)
@@ -1046,8 +1047,7 @@ class AthenaStatementCompiler(SQLCompiler):
             # literal_execute parameter when the statement runs, not into the
             # cached SQL.
             lambda_sql = self.process(
-                lambda_expr._with_binary_element_type(_AthenaLambda()),
-                **{**kw, "literal_execute": True},
+                type_coerce(lambda_expr, _AthenaLambda()), **{**kw, "literal_execute": True}
             )
         else:
             # Process as regular SQL expression

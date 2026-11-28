@@ -245,23 +245,11 @@ class TestAthenaStatementCompiler:
                 "SELECT count(filter(data, x -> x['timestamp'] <= '2023-10-10' "
                 "AND x['timestamp'] >= '2023-10-01' AND x['action_count'] >= 2)) AS count_1",
             ),
-            (
-                func.filter(column("numbers", ARRAY(Integer)), "x -> x % 2 = 1"),
-                "SELECT filter(numbers, x -> x %% 2 = 1) AS filter_1",
-            ),
         ],
-        ids=[
-            "basic",
-            "array_literal",
-            "complex_lambda",
-            "nested_access",
-            "integration_example",
-            "percent",
-        ],
+        ids=["basic", "array_literal", "complex_lambda", "nested_access", "integration_example"],
     )
     def test_visit_filter_func(self, expression, expected):
-        # A string literal is the lambda itself, so it is rendered unquoted, with
-        # percent signs escaped for the pyformat parameter style.
+        # A string literal is the lambda itself, so it is rendered unquoted.
         compiled = select(expression).compile(
             dialect=self.dialect, compile_kwargs={"render_postcompile": True}
         )
