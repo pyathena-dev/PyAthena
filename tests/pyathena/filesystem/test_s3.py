@@ -440,7 +440,7 @@ class TestS3FileSystem:
     def test_info_bucket_missing_from_bucket_listing(self):
         # GH-980: the bucket listing holds only the buckets of the caller.
         fs = self._make_fs()
-        fs._listing_cache.put_buckets([S3Object.directory("mine", None)])
+        fs._listing_cache.put_buckets([S3Object.directory("mine")])
         fs.core.call.return_value = {}
 
         info = fs.info("s3://other-account-bucket")
@@ -810,7 +810,7 @@ class TestS3FileSystem:
         if kind in ("buckets", "listing"):
             cached = [self._file_object("dir/a")]
         elif args[0].key is None:
-            cached = S3Object.directory("bucket", None)
+            cached = S3Object.directory("bucket")
         else:
             cached = self._file_object("key")
         self._cache(fs, entry, value=cached)
@@ -1802,7 +1802,7 @@ class TestS3FileSystem:
 
     def test_refresh_evicts_cached_object_and_bucket_not_found(self):
         fs = self._make_fs()
-        bucket = S3Object.directory("bucket", None)
+        bucket = S3Object.directory("bucket")
         fs._listing_cache.put_lookup(S3Path("bucket", "key"), {}, self._file_object("key"))
         fs._listing_cache.put_lookup(S3Path("bucket"), {}, bucket)
         fs._listing_cache.put_buckets([bucket])
@@ -1826,7 +1826,7 @@ class TestS3FileSystem:
 
     def test_exists_refresh_bypasses_cache(self):
         fs = self._make_fs()
-        bucket = S3Object.directory("bucket", None)
+        bucket = S3Object.directory("bucket")
         fs._listing_cache.put_lookup(S3Path("bucket", "key"), {}, self._file_object("key"))
         fs._listing_cache.put_lookup(S3Path("bucket"), {}, bucket)
         fs._listing_cache.put_buckets([bucket])
@@ -1847,7 +1847,7 @@ class TestS3FileSystem:
 
     def test_missing_bucket_keeps_bucket_listing_without_it(self):
         fs = self._make_fs()
-        fs._listing_cache.put_buckets([S3Object.directory("bucket", None)])
+        fs._listing_cache.put_buckets([S3Object.directory("bucket")])
         fs.core.call.side_effect = FileNotFoundError
 
         assert not fs.exists("s3://missing")
@@ -5523,7 +5523,7 @@ class TestS3FileSystem:
         # bucket listing nor the result of a lookup without them.
         fs = self._make_fs()
         fs.core.call.return_value = {}
-        fs._listing_cache.put_buckets([S3Object.directory("bucket", None)])
+        fs._listing_cache.put_buckets([S3Object.directory("bucket")])
 
         for _ in range(2):
             assert fs.exists("s3://bucket")

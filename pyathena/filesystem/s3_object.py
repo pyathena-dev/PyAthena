@@ -243,12 +243,12 @@ class S3Object(dict[str, Any]):
         return entry
 
     def to_path(self) -> S3Path:
-        """Return the path that the entry names, from its bucket and key as they are.
+        """Return the path of the bucket and key of the entry, without a version.
 
-        The name of the entry is never parsed. A listing of the current
-        objects, and a lookup of a path without a version, name no version,
-        also when a ``version_aware`` lookup records the version of the
-        object, so the path never has a version.
+        The bucket and the key are taken as they are, never parsed from the
+        name of the entry. A version ID that the entry records, such as that
+        of a version entry or of a ``version_aware`` lookup, is not part of
+        the path.
 
         Returns:
             The path of the bucket, the directory or the object.
@@ -260,8 +260,10 @@ class S3Object(dict[str, Any]):
 
         A directory is named after its common prefix without the final
         delimiter, which may leave the name with a version ID query or with
-        trailing slashes. The prefix is taken from its key instead, so that
-        the directory is listed as it was listed.
+        trailing slashes. The prefix is taken from its key as it is, so that
+        the directory is listed as it was listed: ``a//`` for the key ``a/``.
+        For a parsed path, whose trailing slashes do not name a key, see
+        :attr:`S3Path.subtree_prefix`.
 
         Returns:
             The key prefix: ``""`` for a bucket, and otherwise the key of the
@@ -425,7 +427,7 @@ class S3Object(dict[str, Any]):
         Returns:
             The directory entry, named after the bucket.
         """
-        return cls._zero_size(bucket.name, None, None, S3StorageClass.S3_STORAGE_CLASS_BUCKET)
+        return cls._zero_size(bucket.name, S3StorageClass.S3_STORAGE_CLASS_BUCKET)
 
     @classmethod
     def root(cls) -> S3Object:
@@ -434,7 +436,7 @@ class S3Object(dict[str, Any]):
         Returns:
             The directory entry, with an empty bucket and name.
         """
-        return cls._zero_size("", None, None, S3StorageClass.S3_STORAGE_CLASS_BUCKET)
+        return cls._zero_size("", S3StorageClass.S3_STORAGE_CLASS_BUCKET)
 
     @classmethod
     def directory(
@@ -445,25 +447,31 @@ class S3Object(dict[str, Any]):
         Args:
             bucket: The bucket of the directory.
             key: The key of the directory, without the final delimiter, or
-                None for the bucket itself.
+                None for the top level of the bucket. Unlike
+                :meth:`from_bucket`, the entry has the ``DIRECTORY`` storage
+                class.
             version_id: The version ID that the entry records, if any.
 
         Returns:
             The zero-size directory entry.
         """
-        return cls._zero_size(bucket, key, version_id, S3StorageClass.S3_STORAGE_CLASS_DIRECTORY)
+        return cls._zero_size(bucket, S3StorageClass.S3_STORAGE_CLASS_DIRECTORY, key, version_id)
 
     @classmethod
     def _zero_size(
-        cls, bucket: str, key: str | None, version_id: str | None, storage_class: str
+        cls,
+        bucket: str,
+        storage_class: str,
+        key: str | None = None,
+        version_id: str | None = None,
     ) -> S3Object:
         """Build a zero-size directory entry.
 
         Args:
             bucket: The bucket of the entry.
+            storage_class: The storage class of the entry.
             key: The key of the entry, or None.
             version_id: The version ID of the entry, or None.
-            storage_class: The storage class of the entry.
 
         Returns:
             The directory entry.

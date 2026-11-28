@@ -532,7 +532,7 @@ class S3FileSystem(AbstractFileSystem):
         requester_pays = kwargs.pop("requester_pays", False)
         # The parameters that authorize the access to the objects, sent with
         # every request that accepts them, and with a copy for its source.
-        request_kwargs = S3Core.lookup_params(self.s3_additional_kwargs)
+        request_kwargs = S3Core.authorization_params(self.s3_additional_kwargs)
         if requester_pays:
             request_kwargs.setdefault("RequestPayer", "requester")
         self._core = S3Core(
@@ -756,7 +756,7 @@ class S3FileSystem(AbstractFileSystem):
         Args:
             bucket: The bucket name.
             refresh: If True, bypass the cache and call HeadBucket.
-            lookup_kwargs: The lookup parameters (see :meth:`S3Core.lookup_params`)
+            lookup_kwargs: The lookup parameters (see :meth:`S3Core.authorization_params`)
                 to send with the request.
 
         Returns:
@@ -794,7 +794,7 @@ class S3FileSystem(AbstractFileSystem):
         Args:
             path: The path of the object, optionally with a version ID.
             refresh: If True, bypass the cache and call HeadObject.
-            lookup_kwargs: The lookup parameters (see :meth:`S3Core.lookup_params`)
+            lookup_kwargs: The lookup parameters (see :meth:`S3Core.authorization_params`)
                 to send with the request.
 
         Returns:
@@ -1190,8 +1190,11 @@ class S3FileSystem(AbstractFileSystem):
             s3_path = S3Path.parse(name)
         if version_id and not s3_path.version_id:
             s3_path = s3_path.with_version_id(version_id)
+        # A lookup sends only the parameters that authorize it, which also
+        # select its cached result. Others that HeadObject accepts, such as
+        # IfMatch, PartNumber or ResponseContentType, would change the result.
         return self._path_info(
-            s3_path, refresh=refresh, lookup_kwargs=self.core.lookup_params(kwargs)
+            s3_path, refresh=refresh, lookup_kwargs=self.core.authorization_params(kwargs)
         )
 
     def _path_info(
@@ -1209,7 +1212,7 @@ class S3FileSystem(AbstractFileSystem):
         Args:
             path: The path, with the version to look up, if any.
             refresh: If True, bypass the cache and query S3.
-            lookup_kwargs: The lookup parameters (see :meth:`S3Core.lookup_params`).
+            lookup_kwargs: The lookup parameters (see :meth:`S3Core.authorization_params`).
 
         Returns:
             S3Object describing the bucket, directory, or file.
@@ -2041,7 +2044,7 @@ class S3FileSystem(AbstractFileSystem):
             # The root always exists.
             return True
         s3_path = S3Path.parse(path)
-        lookup_kwargs = self.core.lookup_params(kwargs)
+        lookup_kwargs = self.core.authorization_params(kwargs)
         # The cached listings are made without lookup parameters.
         use_listings = not refresh and not lookup_kwargs
         if s3_path.key:
@@ -2562,7 +2565,7 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError("Cannot touch the file with the version specified.")
         if "Body" in kwargs:
             raise TypeError("touch() creates an empty object; use pipe_file() to write data.")
-        if not truncate and self._key_exists(s3_path, self.core.lookup_params(kwargs)):
+        if not truncate and self._key_exists(s3_path, self.core.authorization_params(kwargs)):
             raise ValueError("Cannot touch the existing file without specifying truncate.")
         if not s3_path.key:
             raise ValueError("Cannot touch the bucket.")
@@ -2728,7 +2731,7 @@ class S3FileSystem(AbstractFileSystem):
         versioned_buckets = {
             bucket for bucket in buckets if self.core.get_bucket_versioning(bucket) == "Enabled"
         }
-        lookup_kwargs = self.core.lookup_params(source_params or {})
+        lookup_kwargs = self.core.authorization_params(source_params or {})
         missing = {
             source
             for source in pairing.conflict_candidates(
@@ -3521,7 +3524,7 @@ class S3FileSystem(AbstractFileSystem):
         if mode == "create":
             # Checked up front, as open() does in "xb" mode, and with
             # IfNoneMatch for an object created since.
-            if self._object_exists(path, self.core.lookup_params(request_kwargs)):
+            if self._object_exists(path, self.core.authorization_params(request_kwargs)):
                 raise FileExistsError(path)
             request_kwargs["IfNoneMatch"] = "*"
         if not isinstance(value, bytes):
@@ -3764,7 +3767,7 @@ class S3FileSystem(AbstractFileSystem):
                 # A negative offset needs the size of the object, and an
                 # empty range sends no GetObject request that would report a
                 # missing object.
-                lookup_kwargs = self.core.lookup_params(kwargs)
+                lookup_kwargs = self.core.authorization_params(kwargs)
                 info = self._info_entry(
                     # A version of the path is looked up as parsed, also one
                     # that ends in a slash, which the name would drop.
@@ -4591,7 +4594,7 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             path: The path of the object.
-            lookup_kwargs: The lookup parameters (see :meth:`S3Core.lookup_params`)
+            lookup_kwargs: The lookup parameters (see :meth:`S3Core.authorization_params`)
                 to send with the requests.
 
         Returns:
@@ -4613,7 +4616,7 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             path: S3 path (s3://bucket/key).
-            lookup_kwargs: The lookup parameters (see :meth:`S3Core.lookup_params`)
+            lookup_kwargs: The lookup parameters (see :meth:`S3Core.authorization_params`)
                 to send with the requests.
 
         Returns:
@@ -4890,7 +4893,7 @@ class S3FileTarget:
         append_data: bytes | None = None
         # The lookups need the parameters of the file on which their
         # authorization depends, such as the customer-provided key.
-        lookup_kwargs = fs.core.lookup_params(kwargs)
+        lookup_kwargs = fs.core.authorization_params(kwargs)
         if "r" in mode:
             # Looked up here; the base class initializer of a file would
             # otherwise take the size from the latest version of the object.
@@ -5708,11 +5711,11 @@ class S3File(AbstractBufferedFile):
 
         Returns:
             The lookup parameters of the file (see
-            ``S3Core.lookup_params``), such as ``RequestPayer`` or
+            ``S3Core.authorization_params``), such as ``RequestPayer`` or
             the ``SSECustomer*`` parameters of an object encrypted with a
             customer-provided key.
         """
-        return self.fs.core.lookup_params(self.s3_additional_kwargs)
+        return self.fs.core.authorization_params(self.s3_additional_kwargs)
 
     def url(self, expiration: int = 3600, **kwargs) -> str:
         """Generate a presigned HTTP URL to read this file (if it already exists).

@@ -245,7 +245,8 @@ class S3Path:
         ``a//``, and ``/`` for the key ``/`` of ``bucket//``. S3 matches a
         ``Prefix`` as a plain string, so a listing by the key also returns
         sibling keys that merely start with the same characters (e.g.,
-        ``key.bak``), which this prefix excludes.
+        ``key.bak``), which this prefix excludes. For a listed directory,
+        whose key is taken as it is, see :meth:`S3Object.listing_prefix`.
         """
         return f"{self.key.rstrip('/')}/" if self.key else ""
 

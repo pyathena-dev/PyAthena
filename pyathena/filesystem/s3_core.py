@@ -113,9 +113,8 @@ _COPY_SOURCE_PARAMS = {
     "CopySourceSSECustomerKeyMD5": "SSECustomerKeyMD5",
 }
 
-# The request parameters on which the authorization of a lookup (HeadObject,
-# HeadBucket, or ListObjectsV2) depends.
-_LOOKUP_PARAMS = frozenset(
+# The request parameters that authorize the access to an object or a bucket.
+_AUTHORIZATION_PARAMS = frozenset(
     {
         "ExpectedBucketOwner",
         "RequestPayer",
@@ -1393,15 +1392,8 @@ class S3Core:
         )
 
     @staticmethod
-    def lookup_params(params: Mapping[str, Any]) -> dict[str, Any]:
-        """Select the request parameters that lookups send.
-
-        Lookups (HeadObject, HeadBucket, or ListObjectsV2 of a path) send
-        only the parameters on which their authorization depends, which also
-        select their cached results. Other parameters that HeadObject
-        accepts, such as ``IfMatch``, ``PartNumber`` or
-        ``ResponseContentType``, are not sent, because the result would
-        depend on them.
+    def authorization_params(params: Mapping[str, Any]) -> dict[str, Any]:
+        """Select the request parameters that authorize the access to an object or a bucket.
 
         Args:
             params: The parameters to select from.
@@ -1410,7 +1402,7 @@ class S3Core:
             ``ExpectedBucketOwner``, ``RequestPayer`` and the SSE-C
             parameters (``SSECustomer*``), where given.
         """
-        return {k: v for k, v in params.items() if k in _LOOKUP_PARAMS}
+        return {k: v for k, v in params.items() if k in _AUTHORIZATION_PARAMS}
 
     @staticmethod
     def copy_source_params(params: Mapping[str, Any]) -> dict[str, Any]:
