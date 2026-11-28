@@ -36,7 +36,7 @@ from sqlalchemy.engine.url import make_url
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql import literal, literal_column, operators
 from sqlalchemy.sql.compiler import FROM_LINTING
-from sqlalchemy.sql.ddl import CreateTable
+from sqlalchemy.sql.ddl import CreateTable, DropTable
 
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.compiler import AthenaTypeCompiler
@@ -752,6 +752,39 @@ class TestAthenaDDLCompiler:
             awsathena_file_format="PARQUET",
         )
         return str(CreateTable(table).compile(dialect=AthenaDialect()))
+
+    @pytest.mark.parametrize(
+        ("schema", "schema_translate_map", "expected_table", "expected_location"),
+        [
+            ("logical", {"logical": "tenant"}, "tenant.events", "tenant"),
+            (None, {None: "tenant"}, "tenant.events", "tenant"),
+            # The translated name keeps the DDL quoting rules and reserved words.
+            ("logical", {"logical": "external"}, "`external`.events", "external"),
+            ("other", {"logical": "tenant"}, "other.events", "other"),
+        ],
+    )
+    def test_ddl_applies_schema_translate_map(
+        self, schema, schema_translate_map, expected_table, expected_location
+    ):
+        engine, calls = recording_engine(query="s3_staging_dir=s3%3A%2F%2Fbucket%2Fpath%2F")
+        table = Table("events", MetaData(schema=schema), Column("id", Integer))
+        with engine.connect().execution_options(schema_translate_map=schema_translate_map) as conn:
+            conn.execute(CreateTable(table))
+            conn.execute(DropTable(table))
+
+        (_, create, _), (_, drop, _) = calls
+        assert f"CREATE EXTERNAL TABLE {expected_table} (" in create
+        assert f"LOCATION 's3://bucket/path/{expected_location}/events/'" in create
+        assert drop.strip() == f"DROP TABLE {expected_table}"
+
+    def test_create_table_location_is_escaped(self):
+        table = Table(
+            "events",
+            MetaData(),
+            Column("id", Integer),
+            awsathena_location="s3://bucket/o'brien\\x%20y/",
+        )
+        assert r"LOCATION 's3://bucket/o\'brien\\x%20y/'" in executed_sql(CreateTable(table))
 
     def test_create_table_s3tables_catalog_omits_location(self):
         table = Table(
