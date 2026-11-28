@@ -2614,7 +2614,10 @@ class S3FileSystem(AbstractFileSystem):
                 region_name=kwargs.pop("region_name", None),
                 **self.core.operation_params("create_bucket", kwargs),
             )
-            self._listing_cache.invalidate_bucket(s3_path.bucket)
+            # invalidate_cache of the bucket keeps the cached bucket
+            # listing, so evict it directly.
+            self._listing_cache.evict_buckets()
+            self.invalidate_cache(s3_path.bucket)
         else:
             # exists() has already confirmed the bucket does not exist,
             # and it is not requested to be created.
@@ -2679,7 +2682,10 @@ class S3FileSystem(AbstractFileSystem):
             )
 
         self.core.delete_bucket(s3_path.bucket)
-        self._listing_cache.invalidate_bucket(s3_path.bucket)
+        self.invalidate_cache(s3_path.bucket)
+        # invalidate_cache of the bucket keeps the cached bucket listing,
+        # so evict it directly.
+        self._listing_cache.evict_buckets()
 
     def touch(
         self, path: str | os.PathLike[str], truncate: bool = True, **kwargs
@@ -4724,10 +4730,9 @@ class S3FileSystem(AbstractFileSystem):
             self._listing_cache.clear()
             return
         raw = stringify_path(path)
-        # The path without the protocol, with the trailing slashes that
-        # _strip_protocol() strips.
-        trailing = len(raw) - len(raw.rstrip("/"))
-        self._listing_cache.invalidate_path(self._strip_protocol(raw) + "/" * trailing)
+        self._listing_cache.invalidate_path(
+            self._strip_protocol(raw), len(raw) - len(raw.rstrip("/"))
+        )
 
     def _invalidate(self, path: S3Path) -> None:
         """Remove the cached entries of a path and of the directories above it.

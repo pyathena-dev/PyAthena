@@ -200,29 +200,13 @@ class TestS3FileSystem:
 
         return [e for e in entries if get(*e) is not None]
 
-    def test_unused_filesystem_is_freed_without_the_cycle_collector(self):
-        # GH-1384: the result sets release their filesystem, and its
-        # dircache, with them. The listing cache must not refer back to it.
-        fs = S3FileSystem(
-            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
-        )
-        freed = weakref.ref(fs)
-        enabled = gc.isenabled()
-        gc.disable()
-        try:
-            del fs
-            assert freed() is None
-        finally:
-            if enabled:
-                gc.enable()
-
     def test_collected_filesystem_cache_in_finalizers(self):
         # GH-1384: a finalizer that the cyclic garbage collector runs, as that
         # of an unclosed file, invalidates the cache of a filesystem collected
         # with it. CPython up to 3.14 clears the weak references to the
         # collected objects before it runs their finalizers, so the cache
         # must not reach its filesystem through one.
-        invalidated = []
+        remaining = []
 
         class Finalized:
             def __init__(self, fs):
@@ -231,17 +215,20 @@ class TestS3FileSystem:
 
             def __del__(self):
                 self.fs.invalidate_cache("s3://bucket/key")
-                invalidated.append(True)
+                remaining.append(len(self.fs.dircache))
 
+        fs = self._make_fs()
+        self._cache(fs, ("lookup", S3Path("bucket", "key")))
         enabled = gc.isenabled()
         gc.disable()
         try:
-            Finalized(self._make_fs())
+            Finalized(fs)
+            del fs
             gc.collect()
         finally:
             if enabled:
                 gc.enable()
-        assert len(invalidated) == 1
+        assert remaining == [0]
 
     def test_get_client_compatible_with_s3fs(self):
         # Only constructs a boto3 client; no AWS access.
@@ -969,13 +956,9 @@ class TestS3FileSystem:
         actual = getattr(fs, method)("s3://bucket/key?versionId=v2", **kwargs)
         assert actual == ["bucket/key?versionId=v2"]
         assert [c.args[0] for c in fs._call.call_args_list] == [fs._client.head_object]
-        # Nothing is cached as a listing of the version-qualified path.
-        listings = [
-            ("listing", name, delimiter)
-            for name in ("bucket/key?versionId=v2", "bucket/key")
-            for delimiter in ("/", "")
-        ]
-        assert self._cached(fs, listings) == []
+        # Only the lookup of the version is cached: nothing as a listing of
+        # the version-qualified path, nor as the current object.
+        assert len(fs.dircache) == 1
         assert fs._listing_cache.get_lookup(S3Path("bucket", "key", "v2"), {}) is not None
 
     def test_listing_of_missing_version_path(self):

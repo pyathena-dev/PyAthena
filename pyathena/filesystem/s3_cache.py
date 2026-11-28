@@ -328,7 +328,7 @@ class S3ListingCache:
         """Remove every cached entry."""
         self.dircache.clear()
 
-    def invalidate_path(self, name: str) -> None:
+    def invalidate_path(self, name: str, trailing: int = 0) -> None:
         """Remove the cached entries of a path and of the directories above it.
 
         The bucket listing is removed only by the root, ``""``. A path with a
@@ -346,14 +346,14 @@ class S3ListingCache:
         ``bucket/dir/``.
 
         Args:
-            name: The path without the protocol, with the trailing slashes
-                that it was given with.
+            name: The path without the protocol and its trailing slashes.
+            trailing: The number of trailing slashes that the path was given
+                with.
         """
-        stripped = name.rstrip("/")
-        if not stripped:
+        if not name:
             self.evict_buckets()
             return
-        for spelling in (stripped, name) if name != stripped else (stripped,):
+        for spelling in (name, name + "/" * trailing) if trailing else (name,):
             base, version_id = S3Path.split_version_id(spelling)
             if not version_id:
                 # Also the directory of a trailing slash.
@@ -366,15 +366,6 @@ class S3ListingCache:
             for query in _VERSION_QUERIES:
                 self._invalidate_name(f"{base}?{query}={version_id}")
             self._invalidate_name(base)
-
-    def invalidate_bucket(self, bucket: str) -> None:
-        """Remove the cached entries of a created or deleted bucket and the bucket listing.
-
-        Args:
-            bucket: The bucket name.
-        """
-        self.evict_buckets()
-        self._invalidate_name(bucket)
 
     def invalidate(self, path: S3Path) -> None:
         """Remove the cached entries of a written path and of the directories above it.

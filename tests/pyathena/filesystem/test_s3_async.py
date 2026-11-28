@@ -3651,7 +3651,12 @@ class TestAioS3FileSystem:
         fs.dircache = dircache
 
         await fs._info("s3://bucket/key")
+        assert fs.dircache is dircache
         assert dircache
+        # Replacing the dircache of the internal filesystem replaces it too.
+        other = DirCache()
+        sync_fs.dircache = other
+        assert fs.dircache is other
 
     def test_internal_file_system_not_cached(self):
         # GH-978: the internal S3FileSystem was kept in the fsspec instance
