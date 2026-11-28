@@ -863,9 +863,8 @@ class AioS3FileSystem(AsyncFileSystem):
             The results of the downloads in the order of the pairs, as in
             fsspec: those of the ``_get_file()`` calls as the callback's
             ``branch_coro()`` returns them. None, without a use of the
-            callback, when ``rpath`` is a string, not ``os.PathLike``, copied
-            without ``recursive``, or with ``maxdepth``, and names only
-            directories.
+            callback, when ``rpath`` is given as a ``str``, copied without
+            ``recursive``, or with ``maxdepth``, and names only directories.
 
         Raises:
             ValueError: If a destination named after a source lies outside
@@ -941,9 +940,8 @@ class AioS3FileSystem(AsyncFileSystem):
             The results of the uploads in the order of the local files, as in
             fsspec: those of the ``_put_file()`` calls as the callback's
             ``branch_coro()`` returns them. None, without a use of the
-            callback, when ``lpath`` is a string, not ``os.PathLike``, copied
-            without ``recursive``, or with ``maxdepth``, and names only
-            directories.
+            callback, when ``lpath`` is given as a ``str``, copied without
+            ``recursive``, or with ``maxdepth``, and names only directories.
 
         Raises:
             ValueError: If two files have the same destination, or the

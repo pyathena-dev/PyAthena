@@ -2641,6 +2641,14 @@ class TestAioS3FileSystem:
                 id="get-maxdepth-directories",
             ),
             pytest.param(
+                lambda fs, tmp, cb: fs._get(
+                    PurePosixPath("bucket/dir"), str(tmp / "out"), callback=cb
+                ),
+                [],
+                [0],
+                id="get-path-like-directory",
+            ),
+            pytest.param(
                 lambda fs, tmp, cb: fs._put(str(tmp / "src" / "a"), "s3://bucket/up", callback=cb),
                 [("done", None)],
                 [1],
@@ -2680,11 +2688,12 @@ class TestAioS3FileSystem:
     async def test_get_put_return_values(self, tmp_path, call, expected, sizes):
         # GH-1429: _get() and _put() return what fsspec's return: the results
         # of the transfers as the callback's branch_coro() wraps them, or
-        # None, without a use of the callback, when a string source copied
-        # without recursive, or with maxdepth, names only directories; for a
-        # path-like source, fsspec's _put() uploads nothing and returns [].
-        # _get() returned None, and _put() of only such directories set the
-        # size of the callback to 0 and returned [].
+        # None, without a use of the callback, when a source given as a str
+        # copied without recursive, or with maxdepth, names only directories.
+        # A path-like source of only directories, which the pairing leaves
+        # out as for a string, transfers nothing and returns []. _get()
+        # returned None, and _put() of only such string sources set the size
+        # of the callback to 0 and returned [].
         fs = AioS3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
