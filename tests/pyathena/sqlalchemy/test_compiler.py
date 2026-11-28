@@ -38,6 +38,7 @@ from sqlalchemy.sql import literal, literal_column, operators
 from sqlalchemy.sql.compiler import FROM_LINTING
 from sqlalchemy.sql.ddl import CreateTable
 
+from pyathena.formatter import DefaultParameterFormatter
 from pyathena.sqlalchemy.base import AthenaDialect
 from pyathena.sqlalchemy.compiler import AthenaTypeCompiler
 from pyathena.sqlalchemy.pandas import AthenaPandasDialect
@@ -265,6 +266,28 @@ class TestAthenaStatementCompiler:
             dialect=self.dialect, compile_kwargs={"render_postcompile": True}
         )
         assert str(compiled) == expected
+
+    def test_visit_filter_func_cached(self):
+        # The statements share one cache key, so the second one reuses the
+        # compiled form of the first and still runs its own lambda.
+        engine, calls = recording_engine()
+        numbers = column("numbers", ARRAY(Integer))
+        with engine.connect() as conn:
+            for lambda_ in ("x -> x > 1", "x -> x % 2 = 1"):
+                conn.execute(select(func.filter(numbers, lambda_)))
+        formatter = DefaultParameterFormatter()
+        assert [formatter.format(operation, parameters) for _, operation, parameters in calls] == [
+            "SELECT filter(numbers, x -> x > 1) AS filter_1",
+            "SELECT filter(numbers, x -> x % 2 = 1) AS filter_1",
+        ]
+
+    def test_visit_filter_func_execution_parameter(self):
+        statement = select(
+            func.filter(column("numbers", ARRAY(Integer)), bindparam("lambda_", type_=String))
+        )
+        assert executed_sql(statement, {"lambda_": "x -> x > 1"}) == (
+            "SELECT filter(numbers, x -> x > 1) AS filter_1"
+        )
 
     def test_visit_filter_func_literal_binds(self):
         expression = func.filter(column("numbers", ARRAY(Integer)), literal("x -> x > 0"))

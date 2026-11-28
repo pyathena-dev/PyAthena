@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy import exc, select, types, util
 from sqlalchemy.sql import operators, visitors
 from sqlalchemy.sql import util as sql_util
-from sqlalchemy.sql.base import NO_ARG
 from sqlalchemy.sql.compiler import (
     DDLCompiler,
     GenericTypeCompiler,
@@ -56,6 +55,7 @@ from pyathena.util import override
 if TYPE_CHECKING:
     from sqlalchemy import (
         CheckConstraint,
+        Dialect,
         ForeignKeyConstraint,
         PrimaryKeyConstraint,
         Table,
@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from sqlalchemy.sql.ddl import CreateTable
     from sqlalchemy.sql.functions import Function
     from sqlalchemy.sql.selectable import GenerativeSelect
-    from sqlalchemy.sql.type_api import TypeEngine
+    from sqlalchemy.sql.type_api import TypeEngine, _LiteralProcessorType
 
     from pyathena.sqlalchemy.base import AthenaDialect
 
@@ -612,6 +612,30 @@ class AthenaDMLTypeCompiler(GenericTypeCompiler):
         return self.visit_array(type_, **kw)
 
 
+class _AthenaLambda(types.String):
+    """The type of a bind parameter that holds the text of a lambda expression."""
+
+    @override
+    def literal_processor(self, dialect: Dialect) -> _LiteralProcessorType[Any]:
+        """Return a processor that renders the lambda text as SQL, not as a string.
+
+        Args:
+            dialect: The dialect rendering the value.
+
+        Returns:
+            The processor, which doubles ``%`` for paramstyles that need it.
+        """
+        double_percents = dialect.identifier_preparer._double_percents
+
+        def process(value: Any) -> str:
+            if value is None:
+                return "NULL"
+            text = str(value)
+            return text.replace("%", "%%") if double_percents else text
+
+        return process
+
+
 class AthenaStatementCompiler(SQLCompiler):
     """SQL statement compiler for Amazon Athena queries.
 
@@ -640,11 +664,6 @@ class AthenaStatementCompiler(SQLCompiler):
     def _dml_type_compiler(self) -> AthenaDMLTypeCompiler:
         """The type compiler for the Trino types of CAST expressions."""
         return AthenaDMLTypeCompiler(self.dialect)
-
-    @util.memoized_property
-    def _lambda_bindparams(self) -> set[BindParameter[Any]]:
-        """The string bind parameters rendered as lambda expressions."""
-        return set()
 
     def visit_char_length_func(self, fn: Function[Any], **kw: Any) -> str:
         """Render ``char_length()`` as Athena ``length()``.
@@ -997,8 +1016,8 @@ class AthenaStatementCompiler(SQLCompiler):
     def visit_filter_func(self, fn: Function[Any], **kw: Any) -> str:
         """Render Athena ``filter()`` with a lambda expression.
 
-        A string second argument, such as ``"x -> x > 1"``, is the lambda itself
-        and is rendered unquoted, so pass only trusted text.
+        A bind parameter second argument, such as the string ``"x -> x > 1"``, is
+        the text of the lambda and is rendered unquoted, so pass only trusted text.
 
         Args:
             fn: The function expression.
@@ -1021,51 +1040,20 @@ class AthenaStatementCompiler(SQLCompiler):
         # Process the array expression normally
         array_sql = self.process(array_expr, **kw)
 
-        if isinstance(lambda_expr, BindParameter) and isinstance(lambda_expr.value, str):
-            # A string such as 'x -> x > 0' is the lambda itself. Its value is not
-            # part of the statement cache key, so it is rendered when the statement
-            # runs, like any literal_execute parameter, not into the cached SQL.
-            self._lambda_bindparams.add(lambda_expr)
-            lambda_sql = self.process(lambda_expr, **{**kw, "literal_execute": True})
+        if isinstance(lambda_expr, BindParameter):
+            # A bind value such as 'x -> x > 0' is the lambda itself. The value is
+            # not part of the statement cache key, so it is rendered as a
+            # literal_execute parameter when the statement runs, not into the
+            # cached SQL.
+            lambda_sql = self.process(
+                lambda_expr._with_binary_element_type(_AthenaLambda()),
+                **{**kw, "literal_execute": True},
+            )
         else:
             # Process as regular SQL expression
             lambda_sql = self.process(lambda_expr, **kw)
 
         return f"filter({array_sql}, {lambda_sql})"
-
-    @override
-    def render_literal_bindparam(
-        self,
-        bindparam,
-        render_literal_value=NO_ARG,
-        bind_expression_template=None,
-        **kw,
-    ):
-        """Render a bind parameter as a literal, and a lambda bind as its text.
-
-        Args:
-            bindparam: The bind parameter.
-            render_literal_value: The value to render instead of the parameter's own.
-            bind_expression_template: The bind expression of an expanding parameter.
-            **kw: Compiler keyword arguments.
-
-        Returns:
-            The literal SQL, or the unquoted lambda expression of ``filter()``.
-        """
-        if bindparam in self._lambda_bindparams:
-            value = (
-                bindparam.effective_value
-                if render_literal_value is NO_ARG
-                else render_literal_value
-            )
-            if isinstance(value, str):
-                return self.post_process_text(value)
-        return super().render_literal_bindparam(
-            bindparam,
-            render_literal_value=render_literal_value,
-            bind_expression_template=bind_expression_template,
-            **kw,
-        )
 
     @override
     def visit_truediv_binary(self, binary, operator, **kw):
