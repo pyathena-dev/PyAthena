@@ -791,7 +791,7 @@ The `/` operator performs true division.
 Bind parameters keep the scale of their values, such as `DECIMAL '1.2345'`, and other operands, such as integers, are left as they are.
 The quotient's scale is the larger scale of the two operands.
 A quotient of two operands with scale 0, such as `DECIMAL '5' / DECIMAL '2'`, is rounded to an integer.
-Athena reads a decimal literal such as `5.52` as `DOUBLE`, so an operand typed `Numeric` without a precision, such as `literal_column("5.52", Numeric())`, divides as `DOUBLE`.
+Athena reads a decimal literal such as `5.52` as `DOUBLE`, so `literal_column("5.52", Numeric())`, typed `Numeric` without a precision, divides as `DOUBLE`.
 Use `cast()` to divide with a given precision and scale:
 
 ```python
