@@ -297,6 +297,50 @@ class S3ListingCache:
         """Remove the cached bucket listing."""
         self._evict("")
 
+    def evict_bucket(self, bucket: str) -> None:
+        """Remove the bucket listing and every cached entry of a bucket or below it.
+
+        A bucket that has been created or deleted holds none of the entries
+        cached below it, which :meth:`invalidate_path` of the bucket keeps.
+        The dictionaries of lookups with parameters of the bucket stop being
+        current, as on an invalidation, also those whose ``DirCache`` entry
+        has expired or been evicted.
+
+        Args:
+            bucket: The name of the bucket.
+        """
+        self.evict_buckets()
+        for key in list(self.dircache):
+            if self._in_bucket(key, bucket):
+                self._evict(key)
+        # The current dictionaries of lookups with parameters, including
+        # those whose DirCache entry is gone, are known only to the registry.
+        # The keys of its underlying dictionary are listed with list(), which
+        # takes each key present when the listing starts. Iterating the
+        # WeakValueDictionary can skip a key that another thread changes
+        # meanwhile, and dict.copy() can compare keys.
+        registry: dict[Any, Any] = self._lookups.data  # type: ignore[attr-defined]
+        for lookup_key in list(registry):
+            if self._in_bucket(lookup_key, bucket):
+                self._evict_lookup(lookup_key)
+
+    @staticmethod
+    def _in_bucket(key: Any, bucket: str) -> bool:
+        """Tell whether a key of the cache belongs to a bucket or a path below it.
+
+        Args:
+            key: A ``dircache`` key or a lookup key. Its name is the key, or
+                the first element of the key, nested in the key of a version
+                lookup with parameters.
+            bucket: The name of the bucket.
+
+        Returns:
+            True if the name is the bucket or starts with ``bucket/``.
+        """
+        while isinstance(key, tuple):
+            key = key[0]
+        return bool(key == bucket or key.startswith(bucket + "/"))
+
     def get_listing(self, name: str, delimiter: str) -> list[S3Object] | None:
         """Get the cached listing of a directory.
 

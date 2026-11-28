@@ -1943,6 +1943,62 @@ class TestS3FileSystem:
         # The cached bucket listing must be evicted.
         assert fs._listing_cache.get_buckets() is None
 
+    @pytest.mark.parametrize(
+        ("method", "responses", "error", "evicted"),
+        [
+            # HeadBucket finds the bucket missing, and CreateBucket creates it.
+            ("mkdir", [FileNotFoundError, {}], None, True),
+            ("rmdir", [{}], None, True),
+            # NoSuchBucket: the bucket does not exist either.
+            ("rmdir", [FileNotFoundError], FileNotFoundError, True),
+            # BucketNotEmpty: the bucket and its objects still exist.
+            ("rmdir", [OSError], OSError, False),
+        ],
+        ids=["mkdir", "rmdir", "rmdir-no-such-bucket", "rmdir-bucket-not-empty"],
+    )
+    def test_bucket_change_invalidates_bucket_cache(self, method, responses, error, evicted):
+        # GH-1460: a bucket that has been created, deleted or found missing
+        # by DeleteBucket holds none of the objects cached below it, which
+        # another client may have deleted.
+        fs = self._make_fs()
+        fs.allow_bucket_creation = True
+        fs.allow_bucket_deletion = True
+        fs.core.client.meta.region_name = "us-east-1"
+        fs.core.call.side_effect = responses
+        fs.invalidate_cache = mock.MagicMock(wraps=fs.invalidate_cache)
+        key = S3Path("bucket", "dir/key")
+        version = S3Path("bucket", "dir/key", "v1")
+        bucket_entries = [
+            ("buckets",),
+            # A lookup of the bucket without parameters would answer the
+            # exists() of mkdir(), so only rmdir() starts with one.
+            *([("lookup", S3Path("bucket"))] if method == "rmdir" else []),
+            ("lookups", S3Path("bucket")),
+            ("listing", "bucket", "/"),
+            ("lookup", key),
+            ("lookups", key),
+            ("lookup", version),
+            ("lookups", version),
+            ("listing", "bucket/dir", "/"),
+            ("listing", "bucket/dir", ""),
+        ]
+        # The entries of a bucket whose name starts with that of the bucket.
+        other_entries = [
+            ("lookup", S3Path("bucket-other", "dir/key")),
+            ("listing", "bucket-other/dir", "/"),
+        ]
+        self._cache(fs, *bucket_entries, *other_entries)
+
+        with pytest.raises(error) if error else contextlib.nullcontext():
+            getattr(fs, method)("s3://bucket")
+        expected = other_entries if evicted else bucket_entries + other_entries
+        assert self._cached(fs, bucket_entries + other_entries) == expected
+        # An override of invalidate_cache() sees the bucket that this
+        # filesystem created or deleted.
+        assert fs.invalidate_cache.call_args_list == (
+            [mock.call("bucket")] if error is None else []
+        )
+
     def test_rmdir_bucket_deletion_disabled(self):
         # Bucket deletion is disabled by default.
         fs = self._make_fs()
@@ -5485,18 +5541,26 @@ class TestS3FileSystem:
 
     @pytest.mark.parametrize(
         "interruption",
-        ["invalidate_path", "invalidate_all", "replace_dircache", "evict_then_invalidate"],
+        [
+            "invalidate_path",
+            "invalidate_all",
+            "replace_dircache",
+            "evict_then_invalidate",
+            "evict_then_delete_bucket",
+        ],
     )
     def test_cache_lookup_invalidated_during_lookup(self, interruption):
         # GH-1459: a lookup with other parameters that stores the cached
         # lookups after an invalidation does not make the results cached
         # before the invalidation usable again.
         fs = self._make_fs()
+        fs.allow_bucket_deletion = True
         etags = iter(['"old"', '"other"', '"new"'])
-        fs.core.call.side_effect = lambda method, **request: {
-            "ContentLength": 2,
-            "ETag": next(etags),
-        }
+        fs.core.call.side_effect = lambda method, **request: (
+            {}
+            if method is fs.core.client.delete_bucket
+            else {"ContentLength": 2, "ETag": next(etags)}
+        )
         path = "s3://bucket/key"
         other_key = {**self.LOOKUP_KWARGS, "SSECustomerKey": "j" * 32}
 
@@ -5532,6 +5596,10 @@ class TestS3FileSystem:
                         # eviction, before the invalidation.
                         del self[key]
                         fs.invalidate_cache(path)
+                    elif interruption == "evict_then_delete_bucket":
+                        # GH-1460: the same, before the bucket is deleted.
+                        del self[key]
+                        fs.rmdir("s3://bucket")
                 super().__setitem__(key, value)
 
         cache = InterruptedDirCache()
