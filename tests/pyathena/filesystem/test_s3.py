@@ -3589,6 +3589,19 @@ class TestS3FileSystem:
         expected = {f"{tmp_path}/out/{name}" for name in ("data", "f1", "f2")}
         assert destinations == (set() if conflict else expected)
 
+    @pytest.mark.parametrize("kwargs", [{"version_id": "v1"}, {"VersionId": "v1"}])
+    def test_get_versions_with_one_destination(self, tmp_path, kwargs):
+        # GH-1437: get_file() reads a version of a source, also one that a
+        # VersionId parameter names, as an object, not as a directory, so
+        # sources with one local path conflict.
+        fs = self._make_fs()
+        self._serve_keys(fs, {"p1/data/f1", "p2/data/f2"})
+        fs.get_file = mock.MagicMock()
+
+        with pytest.raises(ValueError, match="same destination"):
+            fs.get(["s3://bucket/p1/data", "s3://bucket/p2/data"], f"{tmp_path}/out/", **kwargs)
+        fs.get_file.assert_not_called()
+
     def test_put_directories_with_one_destination(self, tmp_path):
         # GH-1398: put_file() uploads nothing for a local directory, so
         # directories with one destination do not conflict. They used to.
