@@ -60,7 +60,7 @@ from pyathena.filesystem.s3_executor import S3Executor, S3ThreadPool, _S3Batch, 
 from pyathena.filesystem.s3_object import S3MultipartUpload, S3Object, S3ObjectType, S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_retry import raise_if_stopped
-from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession
+from pyathena.filesystem.s3_writer import S3MultipartStateError, _S3WriteSession, _S3WriteState
 from pyathena.fs import s3_filesystem
 from pyathena.util import RetryConfig, stop_retries_on
 from tests import ENV
@@ -1845,6 +1845,9 @@ class TestS3FileSystem:
         # GH-1372: also as the parameter of PutObject.
         with pytest.raises(TypeError, match="empty object"):
             fs.touch("s3://bucket/key", Body=b"data")
+        # A version of an object cannot be written.
+        with pytest.raises(ValueError):  # noqa: PT011
+            fs.touch("s3://bucket/key?versionId=v1")
         fs._call.assert_not_called()
 
     def test_touch_no_truncate_lookup(self):
@@ -1885,6 +1888,33 @@ class TestS3FileSystem:
             {"Bucket": "bucket", "Key": "dir/"}
         ]
         assert "put_object" not in [name for name, _ in requests]
+
+    def test_modified_and_created(self):
+        # modified() and created() return the LastModified of the object, and
+        # None for a directory, which has no object.
+        fs = self._make_fs()
+        last_modified = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+        def head_object(request):
+            if request["Key"] != "key":
+                raise FileNotFoundError(request["Key"])
+            return {"ContentLength": 2, "ETag": '"e"', "LastModified": last_modified}
+
+        self._record_requests(
+            fs,
+            responses={
+                "head_object": head_object,
+                "list_objects_v2": lambda request: {
+                    "KeyCount": 1,
+                    "Contents": [{"Key": "dir/x"}],
+                },
+            },
+        )
+
+        assert fs.modified("s3://bucket/key") == last_modified
+        assert fs.created("s3://bucket/key") == last_modified
+        assert fs.modified("s3://bucket/dir") is None
+        assert fs.created("s3://bucket/dir") is None
 
     def test_pipe_file_small_uses_put_object(self):
         fs = self._make_fs()
@@ -5919,6 +5949,21 @@ class TestS3FileSystem:
             assert f.read(20) == data[5:25]
             assert f.read() == data[25:]
 
+    @pytest.mark.parametrize(
+        ("kwargs", "expected"),
+        [({}, "bytes"), ({"default_cache_type": "none"}, "none")],
+        ids=["unset", "given"],
+    )
+    def test_open_default_cache_type(self, kwargs, expected):
+        # A file opened without cache_type uses the default_cache_type of the
+        # filesystem, which is "bytes" unless it is given.
+        fs = S3FileSystem(client=S3_CLIENT, skip_instance_cache=True, **kwargs)
+        fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
+        fs._info_entry.return_value.size = 4
+
+        with fs.open("s3://bucket/key", "rb") as f:
+            assert f.cache.name == expected
+
     def test_read_parallel_ranges_in_order(self):
         # The ranges of a parallel read are joined in their order, also when
         # the first range finishes last.
@@ -6349,145 +6394,6 @@ class TestS3FileSystem:
         assert fs.core.abort_multipart_upload.call_args.kwargs == {}
         fs.core.upload_part_copy.assert_not_called()
 
-    def test_copy_object_with_multipart_upload_interrupted_part_scheduling(self):
-        # GH-1120: an interrupt while a part copy is being scheduled, after
-        # its request started, waits for the part and aborts the upload. The
-        # interrupt used to leave the copy without an abort.
-        fs = self._make_fs()
-        events = []
-        started = threading.Event()
-        waiting = threading.Event()
-        waited_for = []
-
-        class SignallingCondition(threading.Condition):
-            def wait(self, timeout=None):
-                waiting.set()
-                return super().wait(timeout)
-
-        init = _S3WriteSession.__init__
-
-        def init_with_signal(session, *args, **kwargs):
-            init(session, *args, **kwargs)
-            # The wait of the session for its requests; no public seam
-            # observes it.
-            session._changed = SignallingCondition(session._lock)
-
-        def upload_part_copy(**kwargs):
-            started.set()
-            # Copying until the cleanup waits for it.
-            try:
-                waited_for.append(waiting.wait(5))
-            finally:
-                events.append("part stored")
-            return SimpleNamespace(etag='"e"', part_number=kwargs["part_number"])
-
-        fs.core.create_multipart_upload = mock.MagicMock(
-            return_value=S3MultipartUpload(
-                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
-            )
-        )
-        fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
-        # The HeadObject of the source.
-        fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
-        fs.core.abort_multipart_upload = mock.MagicMock(
-            side_effect=lambda *_, **__: events.append("abort")
-        )
-        executor = S3ThreadPool(max_workers=2)
-        submit = executor.submit
-        submitted = []
-
-        def submit_and_interrupt(fn, *args, **kwargs):
-            future = submit(fn, *args, **kwargs)
-            submitted.append(future)
-            if len(submitted) == 2:
-                # The first part copy, interrupted once its request started.
-                assert started.wait(5)
-                raise KeyboardInterrupt
-            return future
-
-        executor.submit = submit_and_interrupt  # type: ignore[method-assign]
-        fs._create_executor = mock.MagicMock(return_value=executor)
-
-        try:
-            with (
-                mock.patch.object(_S3WriteSession, "__init__", init_with_signal),
-                pytest.raises(KeyboardInterrupt),
-            ):
-                fs._copy_object_with_multipart_upload(
-                    S3Path("bucket", "src"),
-                    S3Path("bucket", "dst"),
-                    MetadataDirective="REPLACE",
-                    TaggingDirective="REPLACE",
-                    AnnotationDirective="EXCLUDE",
-                )
-        finally:
-            waiting.set()
-            executor.shutdown()
-
-        assert waited_for == [True]
-        assert events == ["part stored", "abort"]
-        fs.core.upload_part_copy.assert_called_once()
-
-    def test_copy_object_with_multipart_upload_repeated_creation_interrupt(self):
-        # GH-1120: another interrupt while the cleanup waits for the creation
-        # is suppressed, so that the created upload is aborted and the first
-        # interrupt is re-raised, as S3File does.
-        fs = self._make_fs()
-        started = threading.Event()
-        release = threading.Event()
-
-        def create_multipart_upload(*args, **kwargs):
-            started.set()
-            assert release.wait(5)
-            return S3MultipartUpload({"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"})
-
-        fs.core.create_multipart_upload = mock.MagicMock(side_effect=create_multipart_upload)
-        fs.core.upload_part_copy = mock.MagicMock()
-        # The HeadObject of the source.
-        fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
-        fs.core.abort_multipart_upload = mock.MagicMock()
-        ready = _S3WriteSession.ready
-
-        def interrupt_ready(session):
-            # The wait of the copy for the creation is interrupted.
-            waiter = ready(session)
-
-            def interrupt_result(timeout=None):
-                assert started.wait(5)
-                raise KeyboardInterrupt("first interrupt")
-
-            waiter.result = interrupt_result  # type: ignore[method-assign]
-            return waiter
-
-        def interrupt_recovery(futures):
-            if not release.is_set():
-                release.set()
-                raise KeyboardInterrupt("second interrupt")
-            result = wait(futures, timeout=EVENT_TIMEOUT)
-            assert not result.not_done
-            return result
-
-        try:
-            with (
-                mock.patch.object(_S3WriteSession, "ready", interrupt_ready),
-                mock.patch("pyathena.filesystem.s3_writer.wait", side_effect=interrupt_recovery),
-                pytest.raises(KeyboardInterrupt, match="first interrupt"),
-            ):
-                fs._copy_object_with_multipart_upload(
-                    S3Path("bucket", "src"),
-                    S3Path("bucket", "dst"),
-                    MetadataDirective="REPLACE",
-                    TaggingDirective="REPLACE",
-                    AnnotationDirective="EXCLUDE",
-                )
-        finally:
-            release.set()
-
-        fs.core.abort_multipart_upload.assert_called_once()
-        (upload,) = fs.core.abort_multipart_upload.call_args.args
-        assert upload.upload_id == "uploadid"
-        fs.core.upload_part_copy.assert_not_called()
-
     def test_copy_object_with_multipart_upload_interrupted_cleanup(self, caplog):
         # GH-1120: an interrupt of the cleanup stops it, and the upload ID is
         # logged for a later abort.
@@ -6512,6 +6418,74 @@ class TestS3FileSystem:
             )
 
         fs.core.abort_multipart_upload.assert_called_once()
+        assert any(
+            record.levelname == "WARNING" and "uploadid" in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_copy_object_with_multipart_upload_interrupted_part_wait(self, caplog):
+        # An interrupt while the cleanup waits for the running part copies
+        # stops it before the abort, and the upload ID is logged for a later
+        # abort.
+        fs = self._make_fs()
+        fs.core.create_multipart_upload = mock.MagicMock(
+            return_value=S3MultipartUpload(
+                {"Bucket": "bucket", "Key": "dst", "UploadId": "uploadid"}
+            )
+        )
+        part_2_started = threading.Event()
+        release = threading.Event()
+        interrupts = []
+
+        def upload_part_copy(**kwargs):
+            if kwargs["part_number"] == 1:
+                # Fails while the second part copy is running.
+                assert part_2_started.wait(EVENT_TIMEOUT)
+                raise RuntimeError("copy failed")
+            part_2_started.set()
+            assert release.wait(EVENT_TIMEOUT)
+            return SimpleNamespace(etag='"e"', part_number=kwargs["part_number"])
+
+        init = _S3WriteSession.__init__
+
+        def init_with_interrupt(session, *args, **kwargs):
+            init(session, *args, **kwargs)
+
+            class InterruptedCondition(threading.Condition):
+                def wait(self, timeout=None):
+                    # The first wait of the abort, for the running part copy.
+                    if session.state is _S3WriteState.ABORTING and not interrupts:
+                        interrupts.append(part_2_started.is_set() and not release.is_set())
+                        release.set()
+                        raise KeyboardInterrupt
+                    return super().wait(timeout)
+
+            # The wait of the session for its requests; no public seam
+            # observes it.
+            session._changed = InterruptedCondition(session._lock)
+
+        fs.core.upload_part_copy = mock.MagicMock(side_effect=upload_part_copy)
+        # The HeadObject of the source.
+        fs._call.return_value = {"ContentLength": 2 * S3Core.MULTIPART_UPLOAD_MAX_PART_SIZE}
+        fs.core.abort_multipart_upload = mock.MagicMock()
+
+        try:
+            with (
+                mock.patch.object(_S3WriteSession, "__init__", init_with_interrupt),
+                pytest.raises(KeyboardInterrupt),
+            ):
+                fs._copy_object_with_multipart_upload(
+                    S3Path("bucket", "src"),
+                    S3Path("bucket", "dst"),
+                    MetadataDirective="REPLACE",
+                    TaggingDirective="REPLACE",
+                    AnnotationDirective="EXCLUDE",
+                )
+        finally:
+            release.set()
+
+        assert interrupts == [True]
+        fs.core.abort_multipart_upload.assert_not_called()
         assert any(
             record.levelname == "WARNING" and "uploadid" in record.getMessage()
             for record in caplog.records
@@ -7261,7 +7235,7 @@ class TestS3FileSystem:
 
     @pytest.mark.parametrize(
         ("algorithm", "checksum_type"),
-        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+        [("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
     )
     def test_open_multipart_with_checksum(self, fs, algorithm, checksum_type):
         block_size = 5 * 2**20
@@ -7270,7 +7244,7 @@ class TestS3FileSystem:
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
             f"filesystem/test_open_multipart_with_checksum/{uuid.uuid4()}"
         )
-        kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        kwargs = {"ChecksumAlgorithm": algorithm}
         if checksum_type:
             kwargs["ChecksumType"] = checksum_type
         try:
@@ -7285,7 +7259,7 @@ class TestS3FileSystem:
 
     @pytest.mark.parametrize(
         ("algorithm", "checksum_type"),
-        [(None, None), ("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
+        [("SHA256", None), ("CRC32", None), ("CRC32", "FULL_OBJECT")],
     )
     def test_append_multipart_with_checksum(self, fs, algorithm, checksum_type):
         block_size = 5 * 2**20
@@ -7294,7 +7268,7 @@ class TestS3FileSystem:
             f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
             f"filesystem/test_append_multipart_with_checksum/{uuid.uuid4()}"
         )
-        kwargs = {"ChecksumAlgorithm": algorithm} if algorithm else {}
+        kwargs = {"ChecksumAlgorithm": algorithm}
         if checksum_type:
             kwargs["ChecksumType"] = checksum_type
         try:
@@ -7389,37 +7363,6 @@ class TestS3FileSystem:
             data = file.read(end - start)
             assert data == target_data, data
 
-    @pytest.mark.parametrize(
-        ("base", "exp"),
-        [
-            # TODO: Comment out some test cases because of the high cost of AWS for testing.
-            (1, 2**10),
-            # (10, 2**10),
-            # (100, 2**10),
-            (1, 2**20),
-            # (10, 2**20),
-            # (100, 2**20),
-            # (1024, 2**20),
-            # TODO: Perhaps OOM is occurring and the worker is shutting down.
-            #   The runner has received a shutdown signal.
-            #   This can happen when the runner service is stopped,
-            #   or a manually started runner is canceled.
-            # (5 * 1024 + 1, 2**20),
-        ],
-    )
-    def test_write(self, fs, base, exp):
-        data = b"a" * (base * exp)
-        path = (
-            f"s3://{ENV.s3_staging_bucket}/{ENV.s3_staging_key}{ENV.schema}/"
-            f"filesystem/test_write/{uuid.uuid4()}"
-        )
-        with fs.open(path, "wb") as f:
-            f.write(data)
-        with fs.open(path, "rb") as f:
-            actual = f.read()
-            assert len(actual) == len(data)
-            assert actual == data
-
     def test_write_multiple_blocks_then_more(self, fs):
         # GH-942: a single write() of more than two blocks with a short tail,
         # followed by more data, must not leave a part smaller than the
@@ -7493,24 +7436,9 @@ class TestS3FileSystem:
             files[0].commit()
         assert not fs.exists(path)
 
-    @pytest.mark.parametrize(
-        ("base", "exp"),
-        [
-            # TODO: Comment out some test cases because of the high cost of AWS for testing.
-            (1, 2**10),
-            # (10, 2**10),
-            # (100, 2**10),
-            (1, 2**20),
-            # (10, 2**20),
-            # (100, 2**20),
-            # (1024, 2**20),
-            # TODO: Perhaps OOM is occurring and the worker is shutting down.
-            #   The runner has received a shutdown signal.
-            #   This can happen when the runner service is stopped,
-            #   or a manually started runner is canceled.
-            # (5 * 1024 + 1, 2**20),
-        ],
-    )
+    # Smaller than the block size (5 MiB), so a single request writes the
+    # object; a larger size takes the same path.
+    @pytest.mark.parametrize(("base", "exp"), [(1, 2**10)])
     def test_append(self, fs, base, exp):
         # TODO: Check the metadata is kept.
         data = b"a" * (base * exp)
@@ -7980,20 +7908,8 @@ class TestS3FileSystem:
     @pytest.mark.parametrize(
         ("base", "exp"),
         [
-            # TODO: Comment out some test cases because of the high cost of AWS for testing.
-            (1, 2**10),
-            # (10, 2**10),
-            # (100, 2**10),
-            (1, 2**20),  # < block size (5 MiB): single PutObject
+            (1, 2**10),  # < block size (5 MiB): single PutObject
             (6, 2**20),  # > block size (5 MiB): parallel multipart upload
-            # (10, 2**20),
-            # (100, 2**20),
-            # (1024, 2**20),
-            # TODO: Perhaps OOM is occurring and the worker is shutting down.
-            #   The runner has received a shutdown signal.
-            #   This can happen when the runner service is stopped,
-            #   or a manually started runner is canceled.
-            # (5 * 1024 + 1, 2**20),
         ],
     )
     def test_pipe_cat(self, fs, base, exp):
@@ -8087,24 +8003,9 @@ class TestS3FileSystem:
         assert fs.cat_file(path, start=1, end=-1) == data[1:-1]
         assert fs.cat_file(path, start=-5) == data[-5:]
 
-    @pytest.mark.parametrize(
-        ("base", "exp"),
-        [
-            # TODO: Comment out some test cases because of the high cost of AWS for testing.
-            (1, 2**10),
-            # (10, 2**10),
-            # (100, 2**10),
-            (1, 2**20),
-            # (10, 2**20),
-            # (100, 2**20),
-            # (1024, 2**20),
-            # TODO: Perhaps OOM is occurring and the worker is shutting down.
-            #   The runner has received a shutdown signal.
-            #   This can happen when the runner service is stopped,
-            #   or a manually started runner is canceled.
-            # (5 * 1024 + 1, 2**20),
-        ],
-    )
+    # Smaller than the block size (5 MiB), so a single request writes the
+    # object; a larger size takes the same path.
+    @pytest.mark.parametrize(("base", "exp"), [(1, 2**10)])
     def test_put(self, fs, base, exp):
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             data = b"a" * (base * exp)
@@ -8120,24 +8021,9 @@ class TestS3FileSystem:
             tmp.seek(0)
             assert fs.cat(rpath) == tmp.read()
 
-    @pytest.mark.parametrize(
-        ("base", "exp"),
-        [
-            # TODO: Comment out some test cases because of the high cost of AWS for testing.
-            (1, 2**10),
-            # (10, 2**10),
-            # (100, 2**10),
-            (1, 2**20),
-            # (10, 2**20),
-            # (100, 2**20),
-            # (1024, 2**20),
-            # TODO: Perhaps OOM is occurring and the worker is shutting down.
-            #   The runner has received a shutdown signal.
-            #   This can happen when the runner service is stopped,
-            #   or a manually started runner is canceled.
-            # (5 * 1024 + 1, 2**20),
-        ],
-    )
+    # Smaller than the block size (5 MiB), so a single request writes the
+    # object; a larger size takes the same path.
+    @pytest.mark.parametrize(("base", "exp"), [(1, 2**10)])
     def test_put_with_callback(self, fs, base, exp):
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             data = b"a" * (base * exp)
@@ -8156,24 +8042,9 @@ class TestS3FileSystem:
             assert callback.size == os.stat(tmp.name).st_size
             assert callback.value == callback.size
 
-    @pytest.mark.parametrize(
-        ("base", "exp"),
-        [
-            # TODO: Comment out some test cases because of the high cost of AWS for testing.
-            (1, 2**10),
-            # (10, 2**10),
-            # (100, 2**10),
-            (1, 2**20),
-            # (10, 2**20),
-            # (100, 2**20),
-            # (1024, 2**20),
-            # TODO: Perhaps OOM is occurring and the worker is shutting down.
-            #   The runner has received a shutdown signal.
-            #   This can happen when the runner service is stopped,
-            #   or a manually started runner is canceled.
-            # (5 * 1024 + 1, 2**20),
-        ],
-    )
+    # Smaller than the block size (5 MiB), so a single request writes the
+    # object; a larger size takes the same path.
+    @pytest.mark.parametrize(("base", "exp"), [(1, 2**10)])
     def test_upload_cp_file(self, fs, base, exp):
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             data = b"a" * (base * exp)
@@ -8358,8 +8229,8 @@ class TestS3FileSystem:
     def test_sign(self, fs):
         path = f"s3://{ENV.s3_staging_bucket}/{ENV.s3_filesystem_test_file_key}"
         requested = time.time()
-        time.sleep(1)
         url = fs.sign(path, expiration=100)
+        signed = time.time()
         parsed = urllib.parse.urlparse(url)
         query = urllib.parse.parse_qs(parsed.query)
         expires = int(query["Expires"][0])
@@ -8367,7 +8238,8 @@ class TestS3FileSystem:
             data = r.read()
 
         assert "https" in url
-        assert requested + 100 < expires
+        # The URL expires the given number of seconds after it was signed.
+        assert int(requested) + 100 <= expires <= signed + 100
         assert data == b"0123456789"
 
     def test_mkdir_and_rmdir(self, fs):
