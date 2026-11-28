@@ -1418,6 +1418,18 @@ class TestSQLAlchemyAthena:
             pytest.skip(f"Athena formatted this view without a blank line: {rows!r}")
         assert definition == "\n".join(row or "" for row in rows)
 
+    def test_truediv_decimal(self, engine):
+        engine, conn = engine
+        decimal = types.DECIMAL(10, 2)
+        row = conn.execute(
+            select(
+                literal_column("5.52", decimal) / literal_column("2.4", decimal),
+                sqlalchemy.literal(Decimal("5.52")) / sqlalchemy.literal(Decimal("2.4")),
+            )
+        ).one()
+        # Rounding either operand to an integer would make each quotient 3.
+        assert tuple(row) == (Decimal("2.30"), Decimal("2.30"))
+
     def test_char_length(self, engine):
         engine, conn = engine
         one_row_complex = Table("one_row_complex", MetaData(schema=ENV.schema), autoload_with=conn)

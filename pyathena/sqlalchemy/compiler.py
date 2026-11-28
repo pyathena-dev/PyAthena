@@ -1017,7 +1017,22 @@ class AthenaStatementCompiler(SQLCompiler):
 
     @override
     def visit_truediv_binary(self, binary, operator, **kw):
-        """Render true division with explicit Athena numeric coercions."""
+        """Render true division with explicit Athena numeric coercions.
+
+        A FLOAT operand makes both operands DOUBLE. Otherwise, a DECIMAL operand
+        with a precision is cast to its own type, so it keeps its precision and
+        scale. A DECIMAL operand without a precision is left as is, since Athena
+        reads a bare ``DECIMAL`` as ``decimal(38, 0)``. An INTEGER divisor of an
+        INTEGER dividend is made DOUBLE.
+
+        Args:
+            binary: The division expression.
+            operator: The division operator.
+            **kw: Compiler keyword arguments.
+
+        Returns:
+            The division SQL.
+        """
         left_type = binary.left.type
         right_type = binary.right.type
 
@@ -1029,14 +1044,16 @@ class AthenaStatementCompiler(SQLCompiler):
                 + self.process(Cast(binary.right, division_type), **kw)
             )
 
-        left_is_numeric = isinstance(left_type, types.Numeric)
-        right_is_numeric = isinstance(right_type, types.Numeric)
-        if left_is_numeric or right_is_numeric:
-            division_type = binary.type
-            return (
-                self.process(Cast(binary.left, division_type), **kw)
-                + " / "
-                + self.process(Cast(binary.right, division_type), **kw)
+        if isinstance(left_type, types.Numeric) or isinstance(right_type, types.Numeric):
+            return " / ".join(
+                self.process(
+                    Cast(operand, operand.type)
+                    if isinstance(operand.type, types.Numeric)
+                    and operand.type.precision is not None
+                    else operand,
+                    **kw,
+                )
+                for operand in (binary.left, binary.right)
             )
 
         if isinstance(left_type, types.Integer) and isinstance(right_type, types.Integer):
