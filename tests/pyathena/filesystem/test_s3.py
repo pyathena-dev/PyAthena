@@ -3619,6 +3619,25 @@ class TestS3FileSystem:
             fs.get(["s3://bucket/p1/data", "s3://bucket/p2/data"], f"{tmp_path}/out/", **kwargs)
         fs.get_file.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("kwargs", "sources"),
+        [
+            # A prefix that a glob matches is left out as a directory.
+            ({}, []),
+            # GH-1467: with a requested version, it is handed to get_file(),
+            # which downloads the version of the object of that name. It was
+            # left out.
+            ({"version_id": "v1"}, ["bucket/key"]),
+        ],
+    )
+    def test_get_glob_version_of_a_prefix(self, tmp_path, kwargs, sources):
+        fs = self._make_fs()
+        self._serve_keys(fs, {"key/child"})
+        fs.get_file = mock.MagicMock()
+
+        fs.get("s3://bucket/k*", f"{tmp_path}/out/", **kwargs)
+        assert [str(c.args[0]) for c in fs.get_file.call_args_list] == sources
+
     def test_put_directories_with_one_destination(self, tmp_path):
         # GH-1398: put_file() uploads nothing for a local directory, so
         # directories with one destination do not conflict. They used to.
@@ -5884,10 +5903,13 @@ class TestS3FileSystem:
             ("s3://bucket/key", {}, {"VersionId": "v1"}),
         ],
     )
-    def test_get_file_version_of_a_prefix(self, tmp_path, rpath, kwargs, fs_params):
+    @pytest.mark.parametrize("method", ["get_file", "get"])
+    def test_get_file_version_of_a_prefix(self, tmp_path, rpath, kwargs, fs_params, method):
         # GH-1437: a requested version is downloaded, also one that a
         # VersionId parameter of the file names, as open() reads it, when the
         # latest name is a prefix. get_file() created a local directory.
+        # GH-1467: get() of the source downloads it too. It left the source
+        # out as a directory, and downloaded nothing.
         fs, _ = self._make_object_fs(b"data")
         fs.s3_additional_kwargs = fs_params
         version = self._file_object("key")
@@ -5901,7 +5923,7 @@ class TestS3FileSystem:
         fs._info_entry.side_effect = info_entry
         lpath = tmp_path / "key"
 
-        fs.get_file(rpath, str(lpath), **kwargs)
+        getattr(fs, method)(rpath, str(lpath), **kwargs)
         assert lpath.read_bytes() == b"data"
 
     def test_get_file_file_like(self, tmp_path):

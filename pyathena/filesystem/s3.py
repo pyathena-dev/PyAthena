@@ -2880,6 +2880,7 @@ class S3FileSystem(AbstractFileSystem):
         self,
         pairing: S3PathPairing,
         local: bool = False,
+        file_kwargs: Mapping[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[tuple[str | S3Path, str | S3Path]]:
         """Expand and pair the paths of a copy (see :meth:`S3PathPairing.s3_copy_pairs`).
@@ -2893,7 +2894,11 @@ class S3FileSystem(AbstractFileSystem):
             pairing: The paths of the copy.
             local: Whether the destinations are the local paths of ``get()``,
                 which the local filesystem looks up, and which are named as
-                :meth:`S3PathPairing.copy_pairs` names them.
+                :meth:`S3PathPairing.copy_pairs` names them. The directories
+                left out among the sources are then those that ``get_file()``
+                creates as local directories (see :meth:`_is_directory_source`).
+            file_kwargs: The arguments of ``get_file()`` when ``local``, whose
+                requested version the directory check follows.
             **kwargs: Passed to the expansion, as fsspec's ``get()`` passes its
                 keyword arguments to ``expand_path()``.
 
@@ -2902,12 +2907,19 @@ class S3FileSystem(AbstractFileSystem):
         """
         if not pairing.expands:
             return list(pairing.copy_pairs())
+        # For get(), the directories that get_file() creates as local
+        # directories, which a requested version never is.
+        is_directory = (
+            functools.partial(self._is_directory_source, file_kwargs=file_kwargs)
+            if local
+            else self.isdir
+        )
         sources = [
             target
             for name, target in self._expand_paths(
                 pairing.path1, recursive=pairing.recursive, maxdepth=pairing.maxdepth, **kwargs
             )
-            if not (pairing.skips_directories and (trailing_sep(name) or self.isdir(target)))
+            if not (pairing.skips_directories and (trailing_sep(name) or is_directory(target)))
         ]
         isdir = LocalFileSystem().isdir if local else self.isdir
         destination_is_dir = (
@@ -3054,7 +3066,11 @@ class S3FileSystem(AbstractFileSystem):
         one after another, in order. A sequence of local destinations, such
         as a tuple, is paired as a list is: in order with a list of sources,
         or with the expanded sources, which are sorted. Its paths are made
-        absolute, with ``~`` expanded, as one destination path is.
+        absolute, with ``~`` expanded, as one destination path is. A version
+        that the arguments of ``get_file()`` request (``version_id``, or a
+        ``VersionId`` parameter) names the version of every source, which
+        ``get_file()`` downloads as an object, so no source is left out as a
+        directory.
 
         A failed download starts no further one, the running ones read and
         write no further block, and the error is raised once they have ended.
@@ -3159,7 +3175,7 @@ class S3FileSystem(AbstractFileSystem):
                 :meth:`_local_root`).
             file_kwargs: The arguments of ``get_file()``, whose ``outfile``
                 and requested version (see :meth:`_is_directory_source`) the
-                checks follow.
+                pairing and the checks follow.
             recursive: Whether to copy the directories with their contents.
             maxdepth: Maximum depth of a recursive copy.
             **kwargs: Passed to the expansion of the sources.
@@ -3175,7 +3191,7 @@ class S3FileSystem(AbstractFileSystem):
         pairing = S3PathPairing(
             rpath, self._local_root(lpath), recursive=recursive, maxdepth=maxdepth
         )
-        pairs = self._copy_pairs(pairing, local=True, **kwargs)
+        pairs = self._copy_pairs(pairing, local=True, file_kwargs=file_kwargs, **kwargs)
         if isinstance(pairing.path2, str):
             check_contained(pairing.path2, [lp for _, lp in pairs])
         if pairs and file_kwargs.get("outfile") is None:

@@ -607,7 +607,10 @@ non-empty `VersionId` parameter names when the suffix and `version_id` name none
 `open()` and `get_file()` raise `ValueError` if they name another version. When neither
 names a version, an empty `VersionId` is sent as given, also instead of the version
 that `version_aware` pins. A file opened for writing drops the parameter, which its
-requests do not accept.
+requests do not accept. `get()` passes `version_id` and the parameter to `get_file()`
+for each source, also each one that a glob pattern or `maxdepth` expands, so a source
+whose current name is a prefix downloads that version, and one without that version
+raises as `get_file()` does.
 Only a
 `?versionId=` (or `?versionID=`, `?versionid=`, `?version_id=`) query at the end of a
 path is a version; any other `?` is part of the key. A path with a version is not a
