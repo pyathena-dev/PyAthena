@@ -151,6 +151,19 @@ class S3ClientError:
             return cls(cause).code
         return None
 
+    @classmethod
+    def is_no_such_upload(cls, error: BaseException) -> bool:
+        """Return whether an error is that of a multipart upload that no longer exists.
+
+        Args:
+            error: An error, such as that of ``S3Core.abort_multipart_upload``.
+
+        Returns:
+            True for the ``FileNotFoundError`` raised from a ``NoSuchUpload``
+            ``ClientError``.
+        """
+        return isinstance(error, FileNotFoundError) and cls.code_of(error) == "NoSuchUpload"
+
     @property
     def code(self) -> str:
         """The S3 error code that uniquely identifies the error condition."""

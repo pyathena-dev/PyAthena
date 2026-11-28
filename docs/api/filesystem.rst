@@ -96,9 +96,6 @@ S3 Core
 .. autoclass:: pyathena.filesystem.s3_core.S3Core
    :members:
 
-.. autoclass:: pyathena.filesystem.s3_core.S3DeleteBatch
-   :members:
-
 .. autoclass:: pyathena.filesystem.s3_core.S3MultipartCopyPlan
    :members:
 
@@ -160,6 +157,9 @@ S3 Operation Results
    :members:
 
 .. autoclass:: pyathena.filesystem.s3_object.S3DeleteObject
+   :members:
+
+.. autoclass:: pyathena.filesystem.s3_object.S3DeleteBatch
    :members:
 
 .. autoclass:: pyathena.filesystem.s3_object.S3DeleteResult

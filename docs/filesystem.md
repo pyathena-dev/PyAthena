@@ -804,7 +804,7 @@ of up to 1,000 objects per bucket. The objects that S3 could not delete are in t
 does not exist is not an error.
 
 ```python
-from pyathena.filesystem.s3_core import S3DeleteBatch
+from pyathena.filesystem.s3_object import S3DeleteBatch
 
 paths = [
     S3Path.parse("s3://YOUR_S3_BUCKET/path/to/a"),

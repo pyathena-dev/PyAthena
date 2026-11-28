@@ -14,7 +14,7 @@ import functools
 import logging
 import math
 import traceback
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, cast
 from urllib.parse import urlencode
@@ -36,6 +36,7 @@ from pyathena.filesystem.s3_object import (
     S3MultipartUploadPart,
     S3PutObject,
 )
+from pyathena.filesystem.s3_object import S3DeleteBatch as S3DeleteBatch
 from pyathena.filesystem.s3_object import S3DeleteError as S3DeleteError
 from pyathena.filesystem.s3_object import S3DeleteResult as S3DeleteResult
 from pyathena.filesystem.s3_object import S3ListBucketsPage as S3ListBucketsPage
@@ -56,64 +57,6 @@ from pyathena.filesystem.s3_retry import (
 )
 
 _logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class S3DeleteBatch:
-    """The objects of one bucket that one DeleteObjects request deletes.
-
-    A batch is valid by construction: it has 1 to ``MAX_KEYS`` objects, each
-    with a key in the bucket of the batch. A path with a version ID deletes
-    that version.
-
-    Attributes:
-        bucket: The bucket of the objects.
-        objects: The paths of the objects to delete.
-        quiet: Whether S3 omits the deleted objects from the response.
-    """
-
-    # https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html
-    MAX_KEYS: ClassVar[int] = 1000
-
-    bucket: str
-    objects: tuple[S3Path, ...]
-    quiet: bool = True
-
-    def __post_init__(self) -> None:
-        """Validate the objects of the batch.
-
-        Raises:
-            ValueError: If the batch has no objects or more than
-                ``MAX_KEYS``, or an object has no key or another bucket.
-        """
-        if not 0 < len(self.objects) <= self.MAX_KEYS:
-            raise ValueError(f"A batch has 1 to {self.MAX_KEYS} objects, not {len(self.objects)}.")
-        for path in self.objects:
-            if not path.key or path.bucket != self.bucket:
-                raise ValueError(f"Not an object of the bucket {self.bucket}: {path.uri}.")
-
-    @classmethod
-    def from_paths(cls, paths: Iterable[S3Path], quiet: bool = True) -> list[S3DeleteBatch]:
-        """Group the paths into batches by bucket, in the order of the paths.
-
-        Args:
-            paths: The paths of the objects to delete.
-            quiet: Whether S3 omits the deleted objects from the responses.
-
-        Returns:
-            The batches of up to ``MAX_KEYS`` objects of one bucket each.
-
-        Raises:
-            ValueError: If a path has no key.
-        """
-        objects: dict[str, list[S3Path]] = {}
-        for path in paths:
-            objects.setdefault(path.bucket, []).append(path)
-        return [
-            cls(bucket=bucket, objects=tuple(paths_[i : i + cls.MAX_KEYS]), quiet=quiet)
-            for bucket, paths_ in objects.items()
-            for i in range(0, len(paths_), cls.MAX_KEYS)
-        ]
 
 
 @dataclass(frozen=True)
@@ -169,6 +112,17 @@ _COPY_SOURCE_PARAMS = {
     "CopySourceSSECustomerKey": "SSECustomerKey",
     "CopySourceSSECustomerKeyMD5": "SSECustomerKeyMD5",
 }
+
+# The request parameters that authorize the access to an object or a bucket.
+_AUTHORIZATION_PARAMS = frozenset(
+    {
+        "ExpectedBucketOwner",
+        "RequestPayer",
+        "SSECustomerAlgorithm",
+        "SSECustomerKey",
+        "SSECustomerKeyMD5",
+    }
+)
 
 
 class S3Core:
@@ -713,17 +667,6 @@ class S3Core:
         # Keep the request identity for every subsequent upload operation.
         return S3MultipartUpload({**response, "Bucket": path.bucket, "Key": path.key})
 
-    @staticmethod
-    def _multipart_upload_request(upload: S3MultipartUpload) -> dict[str, Any]:
-        """Return the upload identity, rejecting incomplete upload objects."""
-        if not upload.bucket:
-            raise ValueError("The multipart upload has no bucket.")
-        if not upload.key:
-            raise ValueError("The multipart upload has no key.")
-        if not upload.upload_id:
-            raise ValueError("The multipart upload has no upload ID.")
-        return {"Bucket": upload.bucket, "Key": upload.key, "UploadId": upload.upload_id}
-
     def upload_part(
         self, upload: S3MultipartUpload, part_number: int, body: bytes, **params
     ) -> S3MultipartUploadPart:
@@ -745,7 +688,7 @@ class S3Core:
             ValueError: If the upload has no bucket, key, or upload ID.
         """
         request: dict[str, Any] = {
-            **self._multipart_upload_request(upload),
+            **upload.request_identity(),
             "PartNumber": part_number,
             "Body": body,
         }
@@ -789,7 +732,7 @@ class S3Core:
             OSError: With ``EINVAL`` for an invalid request, such as a source
                 version that is a delete marker.
         """
-        request = self._multipart_upload_request(upload)
+        request = upload.request_identity()
         if not source.key:
             raise ValueError(f"The source has no key: {source.uri}.")
         copy_source: dict[str, Any] = {"Bucket": source.bucket, "Key": source.key}
@@ -833,7 +776,7 @@ class S3Core:
         Raises:
             ValueError: If the upload has no bucket, key, or upload ID.
         """
-        request = self._multipart_upload_request(upload)
+        request = upload.request_identity()
         part_fields = {"ETag", "PartNumber"}
         if upload.checksum_algorithm is not None:
             part_fields.add(f"Checksum{upload.checksum_algorithm}")
@@ -866,9 +809,32 @@ class S3Core:
             FileNotFoundError: If the upload does not exist, for example
                 because it was completed or aborted.
         """
-        request = self._multipart_upload_request(upload)
+        request = upload.request_identity()
         with unstoppable_retries():
             self.call(self._client.abort_multipart_upload, **{**params, **request})
+
+    def check_block_size(self, block_size: int) -> None:
+        """Check that a block size is a valid size of the parts of a multipart upload.
+
+        Args:
+            block_size: The size in bytes.
+
+        Raises:
+            ValueError: If the size is not between
+                ``MULTIPART_UPLOAD_MIN_PART_SIZE`` and
+                ``MULTIPART_UPLOAD_MAX_PART_SIZE``, inclusive.
+        """
+        if (
+            not self.MULTIPART_UPLOAD_MIN_PART_SIZE
+            <= block_size
+            <= self.MULTIPART_UPLOAD_MAX_PART_SIZE
+        ):
+            raise ValueError(
+                "Block size must be between "
+                f"5 MiB ({self.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
+                f"5 GiB ({self.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), "
+                f"inclusive: {block_size}."
+            )
 
     def part_ranges(self, size: int, block_size: int) -> list[tuple[int, int]]:
         """Split an object into the source ranges of the parts that copy it.
@@ -1033,16 +999,7 @@ class S3Core:
         if destination.version_id:
             raise ValueError(f"Cannot write to a version: {destination.uri}.")
         block_size = block_size if block_size else self.MULTIPART_UPLOAD_MAX_PART_SIZE
-        if (
-            block_size < self.MULTIPART_UPLOAD_MIN_PART_SIZE
-            or block_size > self.MULTIPART_UPLOAD_MAX_PART_SIZE
-        ):
-            raise ValueError(
-                "Block size must be between "
-                f"5 MiB ({self.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
-                f"5 GiB ({self.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), "
-                f"inclusive: {block_size}."
-            )
+        self.check_block_size(block_size)
         metadata_directive = params.get("MetadataDirective", "COPY")
         tagging_directive = params.get("TaggingDirective", "COPY")
         annotation_directive = params.get("AnnotationDirective", "COPY")
@@ -1433,6 +1390,19 @@ class S3Core:
                 ExpiresIn=expires_in,
             ),
         )
+
+    @staticmethod
+    def authorization_params(params: Mapping[str, Any]) -> dict[str, Any]:
+        """Select the request parameters that authorize the access to an object or a bucket.
+
+        Args:
+            params: The parameters to select from.
+
+        Returns:
+            ``ExpectedBucketOwner``, ``RequestPayer`` and the SSE-C
+            parameters (``SSECustomer*``), where given.
+        """
+        return {k: v for k, v in params.items() if k in _AUTHORIZATION_PARAMS}
 
     @staticmethod
     def copy_source_params(params: Mapping[str, Any]) -> dict[str, Any]:

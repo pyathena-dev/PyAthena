@@ -174,14 +174,14 @@ class TestS3FileSystem:
                 cache.put_buckets([] if value is None else value)
             elif kind == "listing":
                 cache.put_listing(
-                    *args, [fs._directory_object("bucket", "dir")] if value is None else value
+                    *args, [S3Object.directory("bucket", "dir")] if value is None else value
                 )
             else:
                 (path,) = args
                 cache.put_lookup(
                     path,
                     TestS3FileSystem.LOOKUP_KWARGS if kind == "lookups" else {},
-                    fs._directory_object(path.bucket, path.key) if value is None else value,
+                    S3Object.directory(path.bucket, path.key) if value is None else value,
                 )
 
     @staticmethod
@@ -326,7 +326,7 @@ class TestS3FileSystem:
         # uncached lookup with HeadObject finds.
         fs = self._make_fs()
         fs._listing_cache.put_listing(
-            "bucket", "/", [fs._directory_object("bucket", "d"), self._file_object("d")]
+            "bucket", "/", [S3Object.directory("bucket", "d"), self._file_object("d")]
         )
 
         assert fs.isfile("s3://bucket/d")
@@ -440,7 +440,7 @@ class TestS3FileSystem:
     def test_info_bucket_missing_from_bucket_listing(self):
         # GH-980: the bucket listing holds only the buckets of the caller.
         fs = self._make_fs()
-        fs._listing_cache.put_buckets([fs._directory_object("mine", None)])
+        fs._listing_cache.put_buckets([S3Object.directory("mine")])
         fs.core.call.return_value = {}
 
         info = fs.info("s3://other-account-bucket")
@@ -459,6 +459,7 @@ class TestS3FileSystem:
 
         info = fs.info(path)
         assert (info.name, info.type, info.size) == ("", S3ObjectType.S3_OBJECT_TYPE_DIRECTORY, 0)
+        assert info.storage_class == S3StorageClass.S3_STORAGE_CLASS_BUCKET
         assert fs.isdir(path)
         assert not fs.isfile(path)
         assert fs.size(path) == 0
@@ -810,7 +811,7 @@ class TestS3FileSystem:
         if kind in ("buckets", "listing"):
             cached = [self._file_object("dir/a")]
         elif args[0].key is None:
-            cached = fs._directory_object("bucket", None)
+            cached = S3Object.directory("bucket")
         else:
             cached = self._file_object("key")
         self._cache(fs, entry, value=cached)
@@ -1049,7 +1050,7 @@ class TestS3FileSystem:
         file = self._file_object("dir/a")
         file["metadata"] = {"k": "v"}
         fs._listing_cache.put_listing(
-            "bucket/dir", "/", [file, fs._directory_object("bucket", "dir/sub")]
+            "bucket/dir", "/", [file, S3Object.directory("bucket", "dir/sub")]
         )
         fs._listing_cache.put_listing("bucket/dir", "", [file])
         fs._listing_cache.put_listing("bucket/dir/sub", "/", [self._file_object("dir/sub/b")])
@@ -1087,9 +1088,7 @@ class TestS3FileSystem:
         fs = self._make_fs()
         # A listing of another prefix fails, which the walk skips.
         fs.core.call.side_effect = FileNotFoundError
-        fs._listing_cache.put_listing(
-            "bucket/dir", "/", [fs._directory_object("bucket", "dir/sub")]
-        )
+        fs._listing_cache.put_listing("bucket/dir", "/", [S3Object.directory("bucket", "dir/sub")])
         fs._listing_cache.put_listing("bucket/dir/sub", "/", [self._file_object("dir/sub/b")])
 
         walked = []
@@ -1804,7 +1803,7 @@ class TestS3FileSystem:
 
     def test_refresh_evicts_cached_object_and_bucket_not_found(self):
         fs = self._make_fs()
-        bucket = fs._directory_object("bucket", None)
+        bucket = S3Object.directory("bucket")
         fs._listing_cache.put_lookup(S3Path("bucket", "key"), {}, self._file_object("key"))
         fs._listing_cache.put_lookup(S3Path("bucket"), {}, bucket)
         fs._listing_cache.put_buckets([bucket])
@@ -1828,7 +1827,7 @@ class TestS3FileSystem:
 
     def test_exists_refresh_bypasses_cache(self):
         fs = self._make_fs()
-        bucket = fs._directory_object("bucket", None)
+        bucket = S3Object.directory("bucket")
         fs._listing_cache.put_lookup(S3Path("bucket", "key"), {}, self._file_object("key"))
         fs._listing_cache.put_lookup(S3Path("bucket"), {}, bucket)
         fs._listing_cache.put_buckets([bucket])
@@ -1849,7 +1848,7 @@ class TestS3FileSystem:
 
     def test_missing_bucket_keeps_bucket_listing_without_it(self):
         fs = self._make_fs()
-        fs._listing_cache.put_buckets([fs._directory_object("bucket", None)])
+        fs._listing_cache.put_buckets([S3Object.directory("bucket")])
         fs.core.call.side_effect = FileNotFoundError
 
         assert not fs.exists("s3://missing")
@@ -2600,9 +2599,7 @@ class TestS3FileSystem:
         # GH-1008: recursive copy() passes the directories, which used to be
         # sent to CopyObject and fail with NoSuchKey.
         fs = self._make_fs()
-        fs._info_entry = mock.MagicMock(
-            return_value=S3FileSystem._directory_object("bucket", "src")
-        )
+        fs._info_entry = mock.MagicMock(return_value=S3Object.directory("bucket", "src"))
         fs.core.copy_object = mock.MagicMock()
 
         fs.cp_file("s3://bucket/src", "s3://bucket/dst")
@@ -5527,7 +5524,7 @@ class TestS3FileSystem:
         # bucket listing nor the result of a lookup without them.
         fs = self._make_fs()
         fs.core.call.return_value = {}
-        fs._listing_cache.put_buckets([fs._directory_object("bucket", None)])
+        fs._listing_cache.put_buckets([S3Object.directory("bucket")])
 
         for _ in range(2):
             assert fs.exists("s3://bucket")
@@ -5735,7 +5732,7 @@ class TestS3FileSystem:
     def test_cat_file_suffix_range_key_ending_in_slash(self):
         fs, _ = self._make_object_fs(b"abc")
         # info() reports a key ending in "/" as a directory.
-        fs._info_entry.return_value = S3FileSystem._directory_object("bucket", "dir")
+        fs._info_entry.return_value = S3Object.directory("bucket", "dir")
 
         assert fs.cat_file("s3://bucket/dir/", start=-2) == b"bc"
         fs.core.client.get_object.assert_called_once_with(
@@ -5778,9 +5775,7 @@ class TestS3FileSystem:
     @pytest.mark.parametrize(("start", "end"), [(-5, 3), (0, -1), (5, 5)])
     def test_cat_file_range_directory(self, start, end):
         fs = self._make_fs()
-        fs._info_entry = mock.MagicMock(
-            return_value=S3FileSystem._directory_object("bucket", "dir")
-        )
+        fs._info_entry = mock.MagicMock(return_value=S3Object.directory("bucket", "dir"))
 
         # A prefix is not read as an empty object.
         with pytest.raises(FileNotFoundError):
@@ -5812,7 +5807,7 @@ class TestS3FileSystem:
         # which become local directories as with fsspec's get_file().
         fs = self._make_fs()
         fs.default_cache_type = "bytes"
-        fs._info_entry = mock.MagicMock(return_value=S3FileSystem._directory_object("bucket", key))
+        fs._info_entry = mock.MagicMock(return_value=S3Object.directory("bucket", key))
         rpath = f"s3://bucket/{key}" if key else "s3://bucket"
         lpath = tmp_path / "out" / "dir"
 
@@ -5896,7 +5891,7 @@ class TestS3FileSystem:
         def info_entry(path, version_id=None, **_kwargs):
             if version_id or S3Path.of(path).version_id:
                 return version
-            return S3FileSystem._directory_object("bucket", "key")
+            return S3Object.directory("bucket", "key")
 
         fs._info_entry.side_effect = info_entry
         lpath = tmp_path / "key"
@@ -6608,9 +6603,7 @@ class TestS3FileSystem:
     @pytest.mark.parametrize("cache_type", ["bytes", "all", "first"])
     def test_open_directory(self, cache_type):
         fs = self._make_fs()
-        fs._info_entry = mock.MagicMock(
-            return_value=S3FileSystem._directory_object("bucket", "dir")
-        )
+        fs._info_entry = mock.MagicMock(return_value=S3Object.directory("bucket", "dir"))
 
         # A prefix is not read as an empty object.
         with pytest.raises(FileNotFoundError):
@@ -9325,7 +9318,6 @@ class TestS3File:
             "complete_multipart_upload",
         ):
             setattr(fs.core, name, mock.MagicMock())
-        fs._get_lookup_kwargs.side_effect = S3FileSystem._get_lookup_kwargs
         # The request pool, whose scopes the files take by default.
         fs.max_workers = 4
         fs._request_pool = S3ThreadPool(fs.max_workers)

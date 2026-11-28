@@ -283,9 +283,7 @@ class TestAioS3FileSystem:
         )
         fs._copy_object_with_multipart_upload = mock.AsyncMock(side_effect=PermissionError)
         cache = fs._sync_fs._listing_cache
-        cache.put_lookup(
-            S3Path("bucket", "dst"), {}, fs._sync_fs._directory_object("bucket", "dst")
-        )
+        cache.put_lookup(S3Path("bucket", "dst"), {}, S3Object.directory("bucket", "dst"))
 
         with pytest.raises(PermissionError):
             await fs._cp_file("s3://bucket/src", "s3://bucket/dst")
@@ -2100,7 +2098,7 @@ class TestAioS3FileSystem:
             cache = fs._sync_fs._listing_cache
             paths = {bucket: S3Path(bucket, key) for bucket, key in (("b1", "a"), ("b2", "b"))}
             for path in paths.values():
-                cache.put_lookup(path, {}, fs._sync_fs._directory_object(path.bucket, path.key))
+                cache.put_lookup(path, {}, S3Object.directory(path.bucket, path.key))
             task.cancel()
             release["b1"].set()
             await wait_until(lambda: cache.get_lookup(paths["b1"], {}) is None)
@@ -3333,9 +3331,7 @@ class TestAioS3FileSystem:
         # GH-1008: recursive copy() passes the directories, which used to be
         # sent to CopyObject and fail with NoSuchKey.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
-        fs._sync_fs._info_entry = mock.MagicMock(
-            return_value=S3FileSystem._directory_object("bucket", "src")
-        )
+        fs._sync_fs._info_entry = mock.MagicMock(return_value=S3Object.directory("bucket", "src"))
         fs.core.call = mock.MagicMock()
 
         await fs._cp_file("s3://bucket/src", "s3://bucket/dst")
@@ -3376,7 +3372,7 @@ class TestAioS3FileSystem:
             key="dir/a",
         )
         cache = sync_fs._listing_cache
-        cache.put_listing("bucket/dir", "/", [file, sync_fs._directory_object("bucket", "dir/sub")])
+        cache.put_listing("bucket/dir", "/", [file, S3Object.directory("bucket", "dir/sub")])
         cache.put_listing("bucket/dir", "", [file])
         cache.put_listing(
             "bucket/dir/sub",
@@ -3421,7 +3417,7 @@ class TestAioS3FileSystem:
         # A listing of another prefix fails, which the walk yields empty.
         sync_fs.core.call = mock.MagicMock(side_effect=FileNotFoundError)
         cache = sync_fs._listing_cache
-        cache.put_listing("bucket/dir", "/", [sync_fs._directory_object("bucket", "dir/sub")])
+        cache.put_listing("bucket/dir", "/", [S3Object.directory("bucket", "dir/sub")])
         cache.put_listing(
             "bucket/dir/sub",
             "/",

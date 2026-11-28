@@ -105,7 +105,7 @@ class TestS3MultipartWriter:
 
     @pytest.mark.parametrize("block_size", [0, 3, 9])
     def test_writer_invalid_block_size(self, block_size):
-        with pytest.raises(ValueError, match="block_size"):
+        with pytest.raises(ValueError, match="Block size must be between"):
             _make_writer(block_size)
 
     @pytest.mark.parametrize("path", [S3Path("bucket"), S3Path("bucket", "key", "version")])

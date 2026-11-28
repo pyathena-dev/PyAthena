@@ -12,7 +12,6 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
-from glob import has_magic
 
 from fsspec.implementations.local import trailing_sep
 from fsspec.utils import other_paths
@@ -93,7 +92,7 @@ class S3PathPairing:
         """
         return (
             isinstance(self.path1, str)
-            and not self._is_glob(self.path1)
+            and not S3Path.is_glob(self.path1)
             and not trailing_sep(self.path1)
             and isinstance(self.path2, str)
             and not trailing_sep(self.path2)
@@ -137,7 +136,7 @@ class S3PathPairing:
         if destination_is_dir is None and self.looks_up_destination:
             raise ValueError("destination_is_dir is needed to pair the paths.")
         source_is_str = isinstance(path1, str)
-        glob = isinstance(path1, str) and self._is_glob(path1)
+        glob = isinstance(path1, str) and S3Path.is_glob(path1)
         # As in fsspec's copy(); destination_is_dir is None only when
         # looks_up_destination is false, where the other terms decide.
         dest_is_dir = isinstance(path2, str) and (trailing_sep(path2) or bool(destination_is_dir))
@@ -333,9 +332,7 @@ class S3PathPairing:
             raise ValueError("missing is needed to check the pairs.")
         # A source without an object at its key, such as a directory, writes
         # no destination.
-        skipped = {
-            self._target(S3Path.of(path), versioning_enabled_buckets) for path in missing or ()
-        }
+        skipped = {S3Path.of(path).target_for(versioning_enabled_buckets) for path in missing or ()}
         # A path with a version always names an object, so it writes its
         # destination even when the key has no current object.
         writers = Counter(
@@ -366,43 +363,11 @@ class S3PathPairing:
             ValueError: If a path is a bucket.
         """
         paths = [path] if isinstance(path, str) else list(path)
-        versioned_paths, unversioned_paths = [], []
         for p in paths:
-            s3_path = S3Path.parse(p)
             # expand_path strips the slashes of "bucket//" to the bucket.
-            if s3_path.is_bucket:
+            if S3Path.parse(p).is_bucket:
                 raise ValueError("Cannot delete the bucket.")
-            if s3_path.version_id:
-                versioned_paths.append(p)
-            else:
-                unversioned_paths.append(p)
-        return versioned_paths, unversioned_paths
-
-    @staticmethod
-    def _is_glob(path: str) -> bool:
-        """Return whether a path is a glob pattern; a version ID query is not one.
-
-        Args:
-            path: The path.
-
-        Returns:
-            True if the path has glob characters and no version ID query.
-        """
-        return has_magic(path) and not S3Path.has_version_id(path)
-
-    @staticmethod
-    def _target(path: S3Path, versioning_enabled_buckets: Collection[str]) -> S3Path:
-        """Return a move target using the caller's bucket versioning state.
-
-        Args:
-            path: The path of the source or destination.
-            versioning_enabled_buckets: Buckets whose versioning is enabled.
-
-        Returns:
-            The path, retaining a ``null`` version only when its bucket has
-            versioning enabled.
-        """
-        return path if path.bucket in versioning_enabled_buckets else path.target
+        return S3Path.partition_by_version(paths)
 
     @staticmethod
     def _moves(
@@ -436,8 +401,8 @@ class S3PathPairing:
                     p1,
                     p2,
                     bool(source_path.version_id),
-                    S3PathPairing._target(source_path, versioning_enabled_buckets),
-                    S3PathPairing._target(S3Path.of(p2), versioning_enabled_buckets),
+                    source_path.target_for(versioning_enabled_buckets),
+                    S3Path.of(p2).target_for(versioning_enabled_buckets),
                 )
             )
         # The sources left in place count too; a copy onto one overwrites it.
@@ -461,7 +426,7 @@ class _NamedPair:
         path1: The source, as given in the pairs.
         path2: The destination, as given in the pairs.
         versioned: Whether the source has a version.
-        source: The target of the source (see ``S3PathPairing._target``).
+        source: The target of the source (see :meth:`S3Path.target_for`).
         destination: The target of the destination.
     """
 
