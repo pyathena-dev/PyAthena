@@ -18,6 +18,7 @@ Keep unrelated worktrees and changes intact.
 ## Prepare and publish
 
 1. Establish the intended behavior and affected surfaces before editing.
+   For a change to shared behavior, build the [differential check](#check-shared-behavior-differentially) first.
    Create one dedicated worktree per PR from the fetched `origin/master`, or from the agreed parent branch for a stacked PR.
 2. Implement and validate the change using the applicable checks below.
    Inspect the complete diff, changed paths, and deletions before committing and pushing.
@@ -63,6 +64,17 @@ For a full recipe, use `uv run --env-file .env just test sqla` (or `sqla-async`)
 Do not cancel someone else's run or increase retry limits merely to obtain green CI.
 After a failure, identify the failing API, error, retry layer, and run before deciding whether a retry is informative.
 Markdown-only changes need no live AWS tests; inspect the actual workflow path filters when interpreting absent jobs.
+
+## Check shared behavior differentially
+
+A change to a rule that many callers depend on, such as path normalization or parsing, path pairing, cache keys, request parameter selection, or a shared default, needs a differential check.
+Build it before implementing, from a matrix of the inputs that the change targets and the neighboring inputs that it must leave unchanged.
+Cover the public operations that consume the rule, synchronous and asynchronous variants, and subclasses or configurations that the rule reads.
+Run the same matrix through the merge base and the branch with the same fake service, and compare the results and the requests of each case.
+Run it twice on the merge base first; make any order-dependent case deterministic, such as with one worker, and record why.
+List the intended differences with the agreed design.
+Rerun the check after the implementation and after every repair; a difference outside the intended rows is a defect to fix or a design change to agree, not a review finding to wait for.
+Keep the harness outside tracked files, record its matrix and result in the PR, and give the matrix to reviewers.
 
 ## Freeze review scope and preserve evidence
 
