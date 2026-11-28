@@ -227,6 +227,9 @@ compression
 
   Description: Specifies the compression format.
 
+  When the file format or the row format is set, the value is stored in the `parquet.compression` table property for Parquet, `orc.compress` for ORC, and `write.compression` for other formats.
+  It replaces a property of the same name given in a `tblproperties` dict.
+
   Value:
 
 - BZIP2

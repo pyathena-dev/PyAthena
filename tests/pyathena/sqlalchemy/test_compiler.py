@@ -1242,6 +1242,25 @@ class TestAthenaDDLCompiler:
         assert expected in ddl
         assert ddl.count("compress") == 1
 
+    def test_create_table_compression_replaces_table_property(self):
+        # Reflection returns the compression both as an option and as a table property.
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+            awsathena_location="s3://bucket/path/to/",
+            awsathena_file_format="PARQUET",
+            awsathena_compression="SNAPPY",
+            awsathena_tblproperties={"parquet.compression": "GZIP", "classification": "parquet"},
+        )
+        ddl = str(CreateTable(table).compile(dialect=AthenaDialect()))
+        assert (
+            "TBLPROPERTIES (\n"
+            "\t'classification' = 'parquet',\n"
+            "\t'parquet.compression' = 'SNAPPY'\n"
+            ")"
+        ) in ddl
+
     def test_create_table_renders_hive_struct_syntax(self):
         ddl = self._ddl(
             Column("id", Integer),

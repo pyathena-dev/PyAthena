@@ -1625,20 +1625,50 @@ class AthenaDDLCompiler(DDLCompiler):
             compression = None
         return compression
 
+    def _get_compression_property(
+        self, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
+    ) -> str | None:
+        """Return the name of the table property that holds the compression.
+
+        The property is ``parquet.compression`` for Parquet, ``orc.compress`` for
+        ORC, and ``write.compression`` for other formats. The format comes from
+        the file format keyword, matched case-insensitively, and otherwise from
+        the row format's SerDe, so a file format given as
+        ``INPUTFORMAT '...' OUTPUTFORMAT '...'``, as reflection returns it, uses
+        the SerDe.
+
+        Args:
+            dialect_opts: The table's ``awsathena_*`` dialect options.
+            connect_opts: The connection options, used for unset dialect options.
+
+        Returns:
+            The property name, or ``None`` if neither the file format nor the row
+            format is set.
+        """
+        file_format = self._get_file_format(dialect_opts, connect_opts)
+        row_format = self._get_row_format(dialect_opts, connect_opts)
+        if not file_format and not row_format:
+            return None
+        if file_format and AthenaFileFormat.is_parquet(file_format):
+            return "parquet.compression"
+        if file_format and AthenaFileFormat.is_orc(file_format):
+            return "orc.compress"
+        if row_format and AthenaRowFormatSerde.is_parquet(row_format):
+            return "parquet.compression"
+        if row_format and AthenaRowFormatSerde.is_orc(row_format):
+            return "orc.compress"
+        return "write.compression"
+
     def _get_table_properties_specification(
         self, dialect_opts: _DialectArgDict, connect_opts: Mapping[str, Any]
     ) -> str:
         """Build the TBLPROPERTIES clause, including the compression property.
 
-        The properties are rendered as described in ``_get_property_entries()``,
-        and the compression value is quoted as a string literal.
-
-        The compression property is ``parquet.compression`` for Parquet,
-        ``orc.compress`` for ORC, and ``write.compression`` for other formats.
-        The format comes from the file format keyword, matched case-insensitively,
-        and otherwise from the row format's SerDe, so a file format given as
-        ``INPUTFORMAT '...' OUTPUTFORMAT '...'``, as reflection returns it, uses
-        the SerDe. No compression property is added when neither is set.
+        The properties are rendered as described in ``_get_property_entries()``.
+        The compression value is added last, quoted as a string literal, under the
+        name from ``_get_compression_property()``, and replaces an entry of that
+        name in a dict, such as the one that reflection returns. No compression
+        property is added when neither the file format nor the row format is set.
 
         Args:
             dialect_opts: The table's ``awsathena_*`` dialect options.
@@ -1648,24 +1678,13 @@ class AthenaDDLCompiler(DDLCompiler):
             The TBLPROPERTIES clause, or an empty string if there are no properties.
         """
         properties = self._get_table_properties(dialect_opts, connect_opts)
-        table_properties = self._get_property_entries(properties) if properties else []
-
         compression = self._get_compression(dialect_opts, connect_opts)
-        if compression:
-            file_format = self._get_file_format(dialect_opts, connect_opts)
-            row_format = self._get_row_format(dialect_opts, connect_opts)
-            if file_format or row_format:
-                if file_format and AthenaFileFormat.is_parquet(file_format):
-                    key = "parquet.compression"
-                elif file_format and AthenaFileFormat.is_orc(file_format):
-                    key = "orc.compress"
-                elif row_format and AthenaRowFormatSerde.is_parquet(row_format):
-                    key = "parquet.compression"
-                elif row_format and AthenaRowFormatSerde.is_orc(row_format):
-                    key = "orc.compress"
-                else:
-                    key = "write.compression"
-                table_properties.append(self._get_property_specification(key, compression))
+        key = self._get_compression_property(dialect_opts, connect_opts) if compression else None
+        if key and isinstance(properties, dict):
+            properties = {k: v for k, v in properties.items() if str(k) != key}
+        table_properties = self._get_property_entries(properties) if properties else []
+        if key:
+            table_properties.append(self._get_property_specification(key, compression))
 
         text = []
         if table_properties:
