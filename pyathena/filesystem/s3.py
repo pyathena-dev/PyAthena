@@ -1311,10 +1311,6 @@ class S3FileSystem(AbstractFileSystem):
                         refresh = True
                     else:
                         return cache
-                else:
-                    return self._directory_object(
-                        path.bucket, path.key.rstrip("/") if path.key else None, version_id
-                    )
         if path.key:
             object_info = self._head_object(path, refresh=refresh, lookup_kwargs=lookup_kwargs)
             if object_info:
@@ -4176,8 +4172,6 @@ class S3FileSystem(AbstractFileSystem):
                 max_workers=max_workers,
                 s3_additional_kwargs=s3_additional_kwargs,
             )._write_file_and_close(local, callback)
-
-        self._invalidate(s3_path)
 
     def get_file(
         self,
