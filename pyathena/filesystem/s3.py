@@ -383,7 +383,6 @@ class S3FileSystem(AbstractFileSystem):
     DEFAULT_BLOCK_SIZE: int = 5 * 2**20  # 5MiB
 
     protocol = ("s3", "s3a")
-    _extra_tokenize_attributes = ("default_block_size",)
     # The boto3 session arguments of the client that the filesystem builds.
     _SESSION_PASSING_ARGS: ClassVar[frozenset[str]] = frozenset(
         {

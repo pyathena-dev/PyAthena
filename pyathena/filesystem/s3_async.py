@@ -303,7 +303,6 @@ class AioS3FileSystem(AsyncFileSystem):
     protocol = ("s3", "s3a")
     mirror_sync_methods = True
     async_impl = True
-    _extra_tokenize_attributes = ("default_block_size",)
 
     def __init__(
         self,
