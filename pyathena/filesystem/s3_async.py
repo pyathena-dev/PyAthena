@@ -459,7 +459,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
     @property
     def s3_additional_kwargs(self) -> dict[str, Any]:
-        """The ``s3_additional_kwargs`` of the wrapped ``S3FileSystem``."""
+        """The ``s3_additional_kwargs`` of the wrapped ``S3FileSystem``, the same dictionary."""
         return self._sync_fs.s3_additional_kwargs
 
     @property
@@ -479,7 +479,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
     @property
     def request_kwargs(self) -> dict[str, Any]:
-        """The ``request_kwargs`` of the wrapped ``S3FileSystem``."""
+        """A copy of the ``request_kwargs`` of the wrapped ``S3FileSystem``."""
         return self._sync_fs.request_kwargs
 
     def close(self) -> None:
