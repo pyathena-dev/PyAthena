@@ -358,8 +358,8 @@ filesystem. A file sends each of its requests only the parameters that the S3 op
 accepts, so, for example, `ServerSideEncryption` for writes is not sent with reads. The
 parameters yield to the fields that a request sets itself, such as `Bucket`, `Key` and
 `Body`. A `pipe` of data up to the block size sends the parameters of the call with a
-single PutObject request as given, except those fields. `put` sets `ContentType` from the file extension unless the call or
-the filesystem gives one.
+single PutObject request as given, except those fields. `put` sets `ContentType` from
+the file extension unless the call or the filesystem gives one.
 
 The parameters in the `s3_additional_kwargs` argument of `S3FileSystem` that authorize
 the access to the objects, `RequestPayer`, `ExpectedBucketOwner`, and the `SSECustomer*`

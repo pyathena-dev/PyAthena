@@ -1068,9 +1068,11 @@ class S3Core:
                 ``MULTIPART_UPLOAD_MAX_PART_SIZE`` (the default); see
                 :meth:`part_ranges`.
             **params: The CopyObject parameters of the copy. Each request
-                receives those that it accepts; CreateMultipartUpload also
-                receives those that CopyObject does not accept either, so
-                that botocore rejects them as it would for CopyObject. The
+                receives those that it accepts, so CreateMultipartUpload
+                also receives those that only it accepts, such as
+                ``ChecksumType``. It receives as well those that CopyObject
+                does not accept either, so that botocore rejects them as it
+                would for CopyObject. The
                 fields that CopyObject derives from the paths raise
                 ``TypeError``, as for :meth:`copy_object`.
 
