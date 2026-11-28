@@ -21,7 +21,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from glob import has_magic
-from io import BufferedRandom, BufferedWriter, BytesIO, FileIO
+from io import BufferedRandom, BufferedReader, BufferedWriter, BytesIO, FileIO
 from stat import S_ISREG
 from typing import Any, BinaryIO, ClassVar, Protocol, cast
 from urllib.parse import unquote_plus
@@ -2080,10 +2080,8 @@ class S3FileSystem(AbstractFileSystem):
                 matches nothing.
         """
         assume_literal = kwargs.pop("assume_literal", False)
-        # The expansion asks glob() for the entries, and find() for the
-        # directories too, as a caller's get() may pass these.
+        # The expansion asks glob() for the entries.
         kwargs.pop("detail", None)
-        kwargs.pop("withdirs", None)
         out: dict[tuple[str, str | S3Path], None] = {}
         names: set[str] = set()
 
@@ -2121,7 +2119,11 @@ class S3FileSystem(AbstractFileSystem):
                             add(f.name, target)
                 continue
             if recursive:
-                for f, target in self._find_paths(p, maxdepth=maxdepth, withdirs=True, **kwargs):
+                # With the directories, also when a caller's get() passes
+                # withdirs, which glob() above follows.
+                for f, target in self._find_paths(
+                    p, maxdepth=maxdepth, **{**kwargs, "withdirs": True}
+                ):
                     add(f.name, target)
             if p not in names and (not recursive or self.exists(p)):
                 add(p, p)
@@ -3163,15 +3165,15 @@ class S3FileSystem(AbstractFileSystem):
 
         In a sequence, file-like objects are kept, also when they are
         ``os.PathLike``, as ``get_file()`` writes into them. One
-        ``os.PathLike`` destination is a path, as in fsspec's ``get()``.
+        ``os.PathLike`` destination is a path, as in fsspec's ``_get()``.
 
         Args:
             lpath: Local destination path, or sequence of paths or file-like
                 objects.
 
         Returns:
-            The absolute path, ``lpath`` if it is neither a path nor a
-            sequence, or a list of the destinations.
+            The absolute path, ``lpath`` if it is file-like, or a list of
+            the destinations.
         """
         if isinstance(lpath, (str, os.PathLike)):
             return make_path_posix(lpath)
@@ -3207,7 +3209,7 @@ class S3FileSystem(AbstractFileSystem):
                 and ``version_id`` the checks follow.
             recursive: Whether to copy the directories with their contents.
             maxdepth: Maximum depth of a recursive copy.
-            **kwargs: Passed to ``expand_path()``.
+            **kwargs: Passed to the expansion of the sources.
 
         Returns:
             The S3 sources and their local destinations.
@@ -3234,10 +3236,11 @@ class S3FileSystem(AbstractFileSystem):
 
         Destinations are compared by the file for existing paths, such as
         hard links to one file, and for the regular files that ``open()``
-        returns; by the object for other file-like objects; and by the
-        resolved path otherwise. A source that ``get_file()`` creates as a
-        local directory writes no file, so several of them may share a local
-        path; the sources are looked up only when their local path is shared.
+        returns, also read-only; by the object for other file-like objects;
+        and by the resolved path otherwise. A source that ``get_file()``
+        creates as a local directory writes no file, so several of them may
+        share a local path; the sources are looked up only when their local
+        path is shared.
 
         Args:
             pairs: The S3 sources and their local paths or file-like objects.
@@ -3257,8 +3260,8 @@ class S3FileSystem(AbstractFileSystem):
                 # Other streams are not asked for a file descriptor, which
                 # some create, such as a spooled temporary file.
                 raw = (
-                    destination.raw
-                    if isinstance(destination, (BufferedRandom, BufferedWriter))
+                    getattr(destination, "raw", None)
+                    if isinstance(destination, (BufferedRandom, BufferedReader, BufferedWriter))
                     else destination
                 )
                 key = ("object", id(destination))

@@ -3444,6 +3444,24 @@ class TestS3FileSystem:
         fs.copy(["s3://bucket/dir", "s3://bucket/x"], ["s3://bucket/x", "s3://bucket/y"])
         assert fs.cp_file.call_count == 2
 
+    def test_expand_path_withdirs(self):
+        # GH-1425: the expansion follows withdirs for a glob pattern, as
+        # glob() does, and lists the directories below a recursive path
+        # whatever withdirs, which get() may pass. A recursive path raised
+        # TypeError for withdirs.
+        fs = S3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs, {"d/a", "d/sub/b"})
+
+        assert fs.expand_path("bucket/d/*", withdirs=False) == ["bucket/d/a"]
+        assert fs.expand_path("bucket/d", recursive=True, withdirs=False) == [
+            "bucket/d",
+            "bucket/d/a",
+            "bucket/d/sub",
+            "bucket/d/sub/b",
+        ]
+
     def test_get_put_pass_kwargs_to_expansion(self, tmp_path):
         # GH-1322: as in fsspec, get() and put() pass their keyword arguments
         # to the expansion of the sources, such as prefix or assume_literal.
