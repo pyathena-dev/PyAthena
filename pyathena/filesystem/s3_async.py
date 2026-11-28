@@ -1138,7 +1138,8 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Returns:
             The bytes of a single path, or a dictionary of the paths and
-            their bytes.
+            their bytes. As in fsspec, the error of the read of a single
+            path is returned unless ``on_error`` is ``"raise"``.
         """
         return await _S3BatchTasks().run(
             self._cat_paths(
@@ -1151,9 +1152,10 @@ class AioS3FileSystem(AsyncFileSystem):
     ) -> Any:
         """Read the contents of one or more paths as fsspec's ``_cat()`` does.
 
-        Unlike fsspec, each path that the expansion returns is read by its
+        Unlike fsspec, each path that a listing returns is read by its
         bucket and key (see :meth:`S3FileSystem._expand_paths`), never by
-        parsing its name.
+        parsing its name, and the keyword arguments of the expansion, such as
+        ``prefix``, select the paths, as in :meth:`S3FileSystem.cat`.
 
         Args:
             path: S3 path, glob pattern, or list of them.
@@ -1165,7 +1167,8 @@ class AioS3FileSystem(AsyncFileSystem):
 
         Returns:
             The bytes of a single path, or a dictionary of the paths and
-            their bytes.
+            their bytes. As in fsspec, the error of the read of a single
+            path is returned unless ``on_error`` is ``"raise"``.
         """
         targets = self._sync_fs._first_targets(
             await self._thread_pool.run(

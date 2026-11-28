@@ -121,8 +121,10 @@ _LOOKUP_REQUEST_PARAMETERS = frozenset(
         "SSECustomerKeyMD5",
     }
 )
-# The keyword arguments of the expansion of paths (``expand_path()``,
-# ``glob()`` and ``find()``), which are not request parameters.
+# The keyword arguments of the expansion of paths, which are not request
+# parameters: those that _expand_unversioned(), glob() (also fsspec's) and
+# _find_paths() take or pop. A new one belongs here, or cat() sends it with
+# GetObject.
 _EXPANSION_KWARGS = frozenset(
     {"assume_literal", "detail", "maxdepth", "prefix", "refresh", "withdirs"}
 )
@@ -3681,7 +3683,8 @@ class S3FileSystem(AbstractFileSystem):
             recursive: Whether to read the files below the directories.
             on_error: ``"raise"`` to raise an error of a read, ``"omit"`` to
                 leave out the paths whose read failed, or ``"return"`` to
-                return the error in place of their contents.
+                return the error in place of their contents. As in fsspec,
+                the error of a single path that is not expanded is raised.
             batch_size: Number of reads to run at the same time, as in
                 ``copy()``.
             **kwargs: Additional parameters passed to ``expand_path()``, such
@@ -3836,7 +3839,7 @@ class S3FileSystem(AbstractFileSystem):
                 counts from the end of the object.
             **kwargs: Additional parameters passed to the GetObject API,
                 except ``version_id``: the version ID to read when the path
-                has none.
+                has none, which takes precedence over ``VersionId``.
 
         Returns:
             The bytes read from the object.
@@ -3882,8 +3885,11 @@ class S3FileSystem(AbstractFileSystem):
         if not path.key:
             raise FileNotFoundError(name or str(path))
         version_id = kwargs.pop("version_id", None)
-        if path.version_id:
-            version_id = path.version_id
+        request_version_id = kwargs.pop("VersionId", None)
+        # The version that GetObject reads, which also sizes a negative
+        # offset: that of the path, then version_id, then the VersionId
+        # parameter.
+        version_id = path.version_id or version_id or request_version_id
         ranges: tuple[int, int | None] | None = None
         if start is not None and start < 0 and end is None:
             # S3 returns the last bytes, or the whole object when it is

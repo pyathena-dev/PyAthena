@@ -3465,17 +3465,23 @@ class TestS3FileSystem:
     def test_cat_kwargs_of_expansion(self):
         # GH-1425: the keyword arguments of the expansion, such as prefix and
         # withdirs, select the paths and are not sent with GetObject, as
-        # with get(). cat() sent them, which botocore rejected.
+        # with get(), while the request parameters are. cat() sent them all,
+        # which botocore rejected.
         fs = S3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
         _, requests = serve_s3_keys(fs, {"d/a1", "d/a2/b", "d/b1"})
 
-        assert fs.cat("s3://bucket/d/*", prefix="a", withdirs=False, maxdepth=1, refresh=True) == {
-            "bucket/d/a1": b"aa"
-        }
+        assert fs.cat(
+            "s3://bucket/d/*",
+            prefix="a",
+            withdirs=False,
+            maxdepth=1,
+            refresh=True,
+            RequestPayer="requester",
+        ) == {"bucket/d/a1": b"aa"}
         assert [r for name, r in requests if name == "get_object"] == [
-            {"Bucket": "bucket", "Key": "d/a1"}
+            {"RequestPayer": "requester", "Bucket": "bucket", "Key": "d/a1"}
         ]
 
     def test_get_put_pass_kwargs_to_expansion(self, tmp_path):
@@ -5236,20 +5242,23 @@ class TestS3FileSystem:
             assert f.blocksize == block_size
 
     @pytest.mark.parametrize(
-        ("path", "expected"),
+        ("path", "kwargs", "expected"),
         [
-            ("s3://bucket/key", "v1"),
+            ("s3://bucket/key", {"version_id": "v1"}, "v1"),
             # The version in the path takes precedence, as in info().
-            ("s3://bucket/key?versionId=v2", "v2"),
+            ("s3://bucket/key?versionId=v2", {"version_id": "v1"}, "v2"),
+            # GH-1425: also the VersionId parameter selects the version that
+            # sizes a negative offset. The current object was looked up.
+            ("s3://bucket/key", {"VersionId": "v1"}, "v1"),
         ],
     )
-    def test_cat_file_version_id(self, path, expected):
+    def test_cat_file_version_id(self, path, kwargs, expected):
         fs = self._make_fs()
         fs._info_entry = mock.MagicMock(return_value=self._file_object("key"))
         fs._info_entry.return_value.size = 10
 
         fs._call.return_value = {"Body": io.BytesIO(b"data")}
-        assert fs.cat_file(path, version_id="v1") == b"data"
+        assert fs.cat_file(path, **kwargs) == b"data"
         fs._call.assert_called_once_with(
             fs._client.get_object, Bucket="bucket", Key="key", VersionId=expected
         )
@@ -5257,7 +5266,7 @@ class TestS3FileSystem:
         # A negative offset is resolved against the size of the same version.
         fs._call.reset_mock()
         fs._call.return_value = {"Body": io.BytesIO(b"ta")}
-        assert fs.cat_file(path, start=-8, end=-6, version_id="v1") == b"ta"
+        assert fs.cat_file(path, start=-8, end=-6, **kwargs) == b"ta"
         fs._info_entry.assert_called_once_with(path, version_id=expected)
         fs._call.assert_called_once_with(
             fs._client.get_object,
