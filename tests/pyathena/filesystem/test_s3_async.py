@@ -2614,6 +2614,83 @@ class TestAioS3FileSystem:
         assert await fs._put(str(local), PurePosixPath("bucket/b")) == [None]
         assert store == {"a", "b"}
 
+    @pytest.mark.parametrize(
+        ("call", "expected", "sizes"),
+        [
+            pytest.param(
+                lambda fs, tmp, cb: fs._get("s3://bucket/dir/a", str(tmp / "out"), callback=cb),
+                [("done", None)],
+                [1],
+                id="get-file",
+            ),
+            pytest.param(
+                lambda fs, tmp, cb: fs._get([], [], callback=cb), [], [0], id="get-no-pairs"
+            ),
+            pytest.param(
+                lambda fs, tmp, cb: fs._get("s3://bucket/dir", str(tmp / "out"), callback=cb),
+                None,
+                [],
+                id="get-directory",
+            ),
+            pytest.param(
+                lambda fs, tmp, cb: fs._put(str(tmp / "src" / "a"), "s3://bucket/up", callback=cb),
+                [("done", None)],
+                [1],
+                id="put-file",
+            ),
+            pytest.param(
+                lambda fs, tmp, cb: fs._put(
+                    str(tmp / "empty"), "s3://bucket/up/", recursive=True, callback=cb
+                ),
+                [],
+                [0],
+                id="put-recursive-empty-directory",
+            ),
+            pytest.param(
+                lambda fs, tmp, cb: fs._put(str(tmp / "src"), "s3://bucket/up/", callback=cb),
+                None,
+                [],
+                id="put-directory",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_get_put_return_values(self, tmp_path, call, expected, sizes):
+        # GH-1429: _get() and _put() return what fsspec's return: the results
+        # of the transfers as the callback's branch_coro() wraps them, or
+        # None, without a use of the callback, when a string source copied
+        # without recursive names only directories. _get() returned None,
+        # and _put() of only such directories set the size of the callback
+        # to 0 and returned [].
+        fs = AioS3FileSystem(
+            key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
+        )
+        serve_s3_keys(fs._sync_fs, {"dir/a"})
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "a").write_bytes(b"a")
+        (tmp_path / "empty").mkdir()
+
+        class Recording(Callback):
+            def __init__(self):
+                super().__init__()
+                self.sizes = []
+
+            def set_size(self, size):
+                self.sizes.append(size)
+                super().set_size(size)
+
+            def branch_coro(self, fn):
+                run = super().branch_coro(fn)
+
+                async def wrapped(path1, path2, **kwargs):
+                    return "done", await run(path1, path2, **kwargs)
+
+                return wrapped
+
+        callback = Recording()
+        assert await await_bounded(call(fs, tmp_path, callback)) == expected
+        assert callback.sizes == sizes
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("files", "kwargs", "expected"),

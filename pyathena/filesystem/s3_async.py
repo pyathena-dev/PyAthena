@@ -834,7 +834,7 @@ class AioS3FileSystem(AsyncFileSystem):
 
     async def _get(
         self, rpath, lpath, recursive=False, callback=_DEFAULT_CALLBACK, maxdepth=None, **kwargs
-    ) -> None:
+    ) -> list[Any] | None:
         """Copy files from S3 to the local filesystem.
 
         See :meth:`S3FileSystem.get`. The paths are paired and checked as
@@ -859,6 +859,12 @@ class AioS3FileSystem(AsyncFileSystem):
                 :meth:`S3FileSystem.get`, and ``batch_size``, the number of
                 downloads that fsspec runs at once.
 
+        Returns:
+            The return values of the ``_get_file()`` calls, as in fsspec, or
+            None, without a use of the callback, when ``rpath`` is a string
+            copied without ``recursive``, or with ``maxdepth``, and names only
+            directories.
+
         Raises:
             ValueError: If a destination named after a source lies outside
                 ``lpath``, or two downloads write the same local file.
@@ -873,8 +879,10 @@ class AioS3FileSystem(AsyncFileSystem):
             maxdepth=maxdepth,
             **kwargs,
         )
-        if not pairs:
-            return
+        if not pairs and isinstance(rpath, str) and (not recursive or maxdepth is not None):
+            # As fsspec's _get() returns when it leaves out every source, all
+            # of them directories.
+            return None
         if kwargs.get("outfile") is not None:
             # _get_file() writes to the outfile instead of the local paths,
             # so the files are downloaded one after another, in order.
@@ -887,7 +895,9 @@ class AioS3FileSystem(AsyncFileSystem):
             for _, lp in pairs:
                 if not isfilelike(lp):
                     os.makedirs(os.path.dirname(cast(str, lp)), exist_ok=True)
-        await _S3BatchTasks().run(self._transfer_pairs(self._get_file, pairs, callback, **kwargs))
+        return await _S3BatchTasks().run(
+            self._transfer_pairs(self._get_file, pairs, callback, **kwargs)
+        )
 
     async def _put(
         self,
@@ -898,7 +908,7 @@ class AioS3FileSystem(AsyncFileSystem):
         batch_size=None,
         maxdepth=None,
         **kwargs,
-    ) -> list[Any]:
+    ) -> list[Any] | None:
         """Copy files from the local filesystem to S3.
 
         See :meth:`S3FileSystem.put`. The paths are paired and checked as
@@ -924,7 +934,10 @@ class AioS3FileSystem(AsyncFileSystem):
             **kwargs: Additional parameters passed to ``_put_file()``.
 
         Returns:
-            The return values of the ``_put_file()`` calls, as in fsspec.
+            The return values of the ``_put_file()`` calls, as in fsspec, or
+            None, without a use of the callback, when ``lpath`` is a string
+            copied without ``recursive``, or with ``maxdepth``, and names only
+            directories.
 
         Raises:
             ValueError: If two files have the same destination, or the
@@ -934,9 +947,13 @@ class AioS3FileSystem(AsyncFileSystem):
         lpath, rpath = self._sync_fs._stringify_paths(lpath), self._sync_fs._stringify_paths(rpath)
         # The local directories, which upload nothing, are left out in the
         # thread, as fsspec's _put() leaves them out.
-        _, files = await self._thread_pool.run(
+        pairs, files = await self._thread_pool.run(
             self._sync_fs._put_pairs, lpath, rpath, recursive=recursive, maxdepth=maxdepth, **kwargs
         )
+        if not pairs and isinstance(lpath, str) and (not recursive or maxdepth is not None):
+            # As fsspec's _put() returns when it leaves out every source, all
+            # of them directories.
+            return None
         return await _S3BatchTasks().run(
             # As fsspec's _put() resolves the batch size.
             self._transfer_pairs(
@@ -1013,7 +1030,8 @@ class AioS3FileSystem(AsyncFileSystem):
                 number of transfers to run at once.
 
         Returns:
-            The results of the transfers, as fsspec's ``_put()`` returns them.
+            The results of the transfers, as fsspec's ``_get()`` and ``_put()``
+            return them.
         """
         # As fsspec's _get() resolves the batch size.
         batch_size = kwargs.pop("batch_size", self.batch_size)
