@@ -516,8 +516,13 @@ class TestS3FileSystem:
             ("s3://bucket/a/c.txt?version_id=v1", S3Path("bucket", "a/c.txt", "v1")),
             # A directory marker object keeps the trailing slash before the query.
             ("s3://bucket/a/c.txt/?versionId=v1", S3Path("bucket", "a/c.txt/", "v1")),
-            # GH-1469: a slash after the version ID belongs to it.
-            ("s3://bucket/a/c.txt?versionId=v1/", S3Path("bucket", "a/c.txt", "v1/")),
+            # GH-1469: a slash after the version ID belongs to it. (The ID of
+            # the row it was, before a row that dropped the slash was removed.)
+            pytest.param(
+                "s3://bucket/a/c.txt?versionId=v1/",
+                S3Path("bucket", "a/c.txt", "v1/"),
+                id="s3://bucket/a/c.txt?versionId=v1/-cache_key5",
+            ),
             # Without a version ID after it, the query is part of the key.
             pytest.param(
                 "s3://bucket/a/c.txt?versionId=/",
@@ -544,7 +549,7 @@ class TestS3FileSystem:
     def test_invalidate_cache_version_ending_in_a_slash(self):
         # GH-1469: the path names the version v1/, whose slash is not one of
         # a directory, so the versions v1 and v1// stay cached. The version
-        # v1 was invalidated, and v1/ was not.
+        # v1 was invalidated too.
         fs = self._make_fs()
         versions = [("lookup", S3Path("bucket", "a/c.txt", v)) for v in ("v1", "v1/", "v1//")]
         self._cache(fs, *versions)
@@ -558,6 +563,7 @@ class TestS3FileSystem:
             # stripped, which named the version v1.
             ("s3://bucket/key?versionId=v1/", "bucket/key?versionId=v1/", "bucket"),
             ("s3a://bucket/a/key?versionId=x/y//", "bucket/a/key?versionId=x/y//", "bucket/a"),
+            ("s3://bucket/a/key?versionId=x/y", "bucket/a/key?versionId=x/y", "bucket/a"),
             # A query that names no version without the slash is a key.
             ("s3://bucket/key?versionId=/", "bucket/key?versionId=", "bucket"),
             ("s3://bucket/dir//", "bucket/dir", "bucket"),
@@ -5129,9 +5135,10 @@ class TestS3FileSystem:
         self._serve_keys(fs, {"abversionId=v1/x", "acversionId=v1"})
 
         assert fs.glob("s3://bucket/a?versionId=v1/") == ["bucket/abversionId=v1"]
-        assert list(fs.glob("s3://bucket/a?versionId=v1/", detail=True)) == [
-            "bucket/abversionId=v1"
-        ]
+        found = fs.glob("s3://bucket/a?versionId=v1/", detail=True)
+        assert {name: info["type"] for name, info in found.items()} == {
+            "bucket/abversionId=v1": "directory"
+        }
 
     def test_open_empty_version_id_parameter_is_sent(self):
         # GH-1437: an empty VersionId parameter is sent as given, as

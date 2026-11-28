@@ -3405,14 +3405,18 @@ class TestAioS3FileSystem:
         assert AioS3FileSystem._strip_protocol(path) == "bucket/a/key?versionId=v1/"
         assert AioS3FileSystem._parent(path) == "bucket/a"
 
-        # The protocols of a subclass are stripped, as fsspec strips them.
+        # The protocols and the root marker of a subclass are used, as fsspec
+        # uses them.
         class Filesystem(AioS3FileSystem):
             protocol = ("s3", "s3a", "other")
+            root_marker = "/"
 
         assert Filesystem._strip_protocol("other://bucket/key?versionId=v1/") == (
             "bucket/key?versionId=v1/"
         )
-        assert Filesystem._parent("other://bucket/a/key") == "bucket/a"
+        assert Filesystem._parent("other://bucket/a/key") == "/bucket/a"
+        assert Filesystem._parent("other://bucket/a/key?versionId=x/y") == "/bucket/a"
+        assert Filesystem._parent("s3://bucket?versionId=v1/") == "/"
 
     @pytest.mark.asyncio
     async def test_glob_pattern_ending_in_a_slash_after_a_query(self):

@@ -702,6 +702,8 @@ named after the file, also when its name ends in such a query. The names that th
 methods return are strings, so the name of such a key, passed back to a method as a
 path string, names the version. The same holds for the compositions that pass path
 strings, such as `fsspec.open()`, `fsspec.open_files()` and `get_mapper()` (`FSMap`).
+`FSMap` removes a trailing slash from its keys, so a version ID that ends in a slash
+cannot be named through `get_mapper()`.
 
 A file opened with an `S3Path` of such a key, without a version, has the name of the
 key as its `path`. Its `url()`, `metadata()`, `getxattr()` and `setxattr()` address its

@@ -1887,7 +1887,14 @@ class AioS3FileSystem(AsyncFileSystem):
         Returns:
             The parent path, without the protocol.
         """
-        return S3FileSystem._parent(cls._strip_protocol(path))
+        stripped = cls._strip_protocol(path)
+        name, version_id = S3Path.split_version_id(stripped)
+        if version_id is None:
+            return super()._parent(stripped)
+        if "/" not in name:
+            return cls.root_marker
+        # As fsspec joins the parent to the root marker.
+        return cls.root_marker + name.rsplit("/", 1)[0].lstrip(cls.root_marker)
 
     def unstrip_protocol(self, name: str | os.PathLike[str]) -> str:
         """Add the protocol to a path, as fsspec's ``unstrip_protocol()`` does.
