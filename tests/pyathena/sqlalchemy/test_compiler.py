@@ -842,6 +842,7 @@ class TestAthenaDDLCompiler:
             MetaData(),
             Column("id", Integer),
             awsathena_location="s3://bucket/events/",
+            awsathena_row_format="SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'",
             **{option: {"it's %": "a\\b 100%", "skip.header.line.count": 1}},
         )
         expected = "\n".join(

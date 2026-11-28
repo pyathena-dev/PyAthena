@@ -2107,8 +2107,8 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
             Column("col", types.VARCHAR(10)),
             awsathena_location=f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/",
             awsathena_row_format="SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'",
-            awsathena_serdeproperties=serde_properties,
-            awsathena_tblproperties=table_properties,
+            awsathena_serdeproperties=dict(serde_properties),
+            awsathena_tblproperties=dict(table_properties),
         )
         table.create(bind=conn)
         actual = Table(table_name, MetaData(schema=ENV.schema), autoload_with=conn)
