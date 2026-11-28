@@ -2690,9 +2690,10 @@ class TestAioS3FileSystem:
         # of the transfers as the callback's branch_coro() wraps them, or
         # None, without a use of the callback, when a source given as a str
         # copied without recursive, or with maxdepth, names only directories.
-        # A source of another type returns a list, whose length the callback
-        # receives as its size; expected=list checks only that, as the
-        # pairing of a path-like S3 directory differs from fsspec's. _get()
+        # A source of another type than str that names only a directory
+        # returns a list, whose length the callback receives as its size;
+        # expected=list checks only that, as the pairing of a path-like S3
+        # directory differs from fsspec's. _get()
         # returned None, and _put() of only such str sources set the size of
         # the callback to 0 and returned [].
         fs = AioS3FileSystem(
