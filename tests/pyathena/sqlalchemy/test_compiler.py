@@ -244,12 +244,34 @@ class TestAthenaStatementCompiler:
                 "SELECT count(filter(data, x -> x['timestamp'] <= '2023-10-10' "
                 "AND x['timestamp'] >= '2023-10-01' AND x['action_count'] >= 2)) AS count_1",
             ),
+            (
+                func.filter(column("numbers", ARRAY(Integer)), "x -> x % 2 = 1"),
+                "SELECT filter(numbers, x -> x %% 2 = 1) AS filter_1",
+            ),
         ],
-        ids=["basic", "array_literal", "complex_lambda", "nested_access", "integration_example"],
+        ids=[
+            "basic",
+            "array_literal",
+            "complex_lambda",
+            "nested_access",
+            "integration_example",
+            "percent",
+        ],
     )
     def test_visit_filter_func(self, expression, expected):
-        # A string literal is the lambda itself, so it is rendered unquoted.
-        assert str(select(expression).compile(dialect=self.dialect)) == expected
+        # A string literal is the lambda itself, so it is rendered unquoted, with
+        # percent signs escaped for the pyformat parameter style.
+        compiled = select(expression).compile(
+            dialect=self.dialect, compile_kwargs={"render_postcompile": True}
+        )
+        assert str(compiled) == expected
+
+    def test_visit_filter_func_literal_binds(self):
+        expression = func.filter(column("numbers", ARRAY(Integer)), literal("x -> x > 0"))
+        compiled = select(expression).compile(
+            dialect=self.dialect, compile_kwargs={"literal_binds": True}
+        )
+        assert str(compiled) == "SELECT filter(numbers, x -> x > 0) AS filter_1"
 
     def test_visit_filter_func_wrong_argument_count(self):
         """Test filter() function with wrong number of arguments."""

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy import exc, select, types, util
 from sqlalchemy.sql import operators, visitors
 from sqlalchemy.sql import util as sql_util
+from sqlalchemy.sql.base import NO_ARG
 from sqlalchemy.sql.compiler import (
     DDLCompiler,
     GenericTypeCompiler,
@@ -640,6 +641,11 @@ class AthenaStatementCompiler(SQLCompiler):
         """The type compiler for the Trino types of CAST expressions."""
         return AthenaDMLTypeCompiler(self.dialect)
 
+    @util.memoized_property
+    def _lambda_bindparams(self) -> set[BindParameter[Any]]:
+        """The string bind parameters rendered as lambda expressions."""
+        return set()
+
     def visit_char_length_func(self, fn: Function[Any], **kw: Any) -> str:
         """Render ``char_length()`` as Athena ``length()``.
 
@@ -989,10 +995,20 @@ class AthenaStatementCompiler(SQLCompiler):
         return outer._annotate({"_pyathena_array_result": True})
 
     def visit_filter_func(self, fn: Function[Any], **kw: Any) -> str:
-        """Compile Athena filter() function with lambda expressions.
+        """Render Athena ``filter()`` with a lambda expression.
 
-        Supports syntax: filter(array_expr, lambda_expr)
-        Example: filter(ARRAY[1, 2, 3], x -> x > 1)
+        A string second argument, such as ``"x -> x > 1"``, is the lambda itself
+        and is rendered unquoted when the statement runs, so pass only trusted text.
+
+        Args:
+            fn: The function expression.
+            **kw: Compiler keyword arguments.
+
+        Returns:
+            The ``filter()`` function call, such as ``filter(ARRAY[1, 2, 3], x -> x > 1)``.
+
+        Raises:
+            CompileError: If the function does not have exactly two arguments.
         """
         if len(fn.clauses.clauses) != 2:
             raise exc.CompileError(
@@ -1005,15 +1021,51 @@ class AthenaStatementCompiler(SQLCompiler):
         # Process the array expression normally
         array_sql = self.process(array_expr, **kw)
 
-        # Process lambda expression - handle string literals as lambda expressions
         if isinstance(lambda_expr, BindParameter) and isinstance(lambda_expr.value, str):
-            # Handle string literal lambda expressions like 'x -> x > 0'
-            lambda_sql = lambda_expr.value
+            # A string such as 'x -> x > 0' is the lambda itself. Its value is not
+            # part of the statement cache key, so it is rendered when the statement
+            # runs, like any literal_execute parameter, not into the cached SQL.
+            self._lambda_bindparams.add(lambda_expr)
+            lambda_sql = self.process(lambda_expr, **{**kw, "literal_execute": True})
         else:
             # Process as regular SQL expression
             lambda_sql = self.process(lambda_expr, **kw)
 
         return f"filter({array_sql}, {lambda_sql})"
+
+    @override
+    def render_literal_bindparam(
+        self,
+        bindparam,
+        render_literal_value=NO_ARG,
+        bind_expression_template=None,
+        **kw,
+    ):
+        """Render a bind parameter as a literal, and a lambda bind as its text.
+
+        Args:
+            bindparam: The bind parameter.
+            render_literal_value: The value to render instead of the parameter's own.
+            bind_expression_template: The bind expression of an expanding parameter.
+            **kw: Compiler keyword arguments.
+
+        Returns:
+            The literal SQL, or the unquoted lambda expression of ``filter()``.
+        """
+        if bindparam in self._lambda_bindparams:
+            value = (
+                bindparam.effective_value
+                if render_literal_value is NO_ARG
+                else render_literal_value
+            )
+            if isinstance(value, str):
+                return self.post_process_text(value)
+        return super().render_literal_bindparam(
+            bindparam,
+            render_literal_value=render_literal_value,
+            bind_expression_template=bind_expression_template,
+            **kw,
+        )
 
     @override
     def visit_truediv_binary(self, binary, operator, **kw):

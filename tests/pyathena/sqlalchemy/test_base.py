@@ -1429,15 +1429,16 @@ class TestSQLAlchemyAthena:
     def test_filter_func(self, engine):
         engine, conn = engine
         one_row_complex = Table("one_row_complex", MetaData(schema=ENV.schema), autoload_with=conn)
-        result = conn.execute(
-            sqlalchemy.select(
-                sqlalchemy.func.filter(
-                    one_row_complex.c.col_array, sqlalchemy.literal("x -> x > 1")
-                )
-            )
-        ).scalar()
+        # The statements share one cache key, so the second one reuses the
+        # compiled form of the first and still runs its own lambda.
+        results = [
+            conn.execute(
+                sqlalchemy.select(sqlalchemy.func.filter(one_row_complex.c.col_array, lambda_))
+            ).scalar()
+            for lambda_ in ("x -> x > 1", "x -> x % 2 = 1")
+        ]
         # col_array is [1, 2].
-        assert result == [2]
+        assert results == [[2], [1]]
 
     def test_reflect_select(self, engine):
         engine, conn = engine
