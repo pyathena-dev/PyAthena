@@ -1,14 +1,14 @@
-"""Model classes for S3 objects and S3 API responses used by the S3 filesystem."""
+"""Model classes for S3 objects, S3 API requests and responses used by the S3 filesystem."""
 
 from __future__ import annotations
 
 import copy
 import dataclasses
 import logging
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.util import override
@@ -242,6 +242,34 @@ class S3Object(dict[str, Any]):
             entry["metadata"] = dict(metadata)
         return entry
 
+    def to_path(self) -> S3Path:
+        """Return the path that the entry names, from its bucket and key as they are.
+
+        The name of the entry is never parsed. A listing of the current
+        objects, and a lookup of a path without a version, name no version,
+        also when a ``version_aware`` lookup records the version of the
+        object, so the path never has a version.
+
+        Returns:
+            The path of the bucket, the directory or the object.
+        """
+        return S3Path(self.bucket, self.key)
+
+    def listing_prefix(self) -> str:
+        """Return the key prefix that a listed directory or bucket lists.
+
+        A directory is named after its common prefix without the final
+        delimiter, which may leave the name with a version ID query or with
+        trailing slashes. The prefix is taken from its key instead, so that
+        the directory is listed as it was listed.
+
+        Returns:
+            The key prefix: ``""`` for a bucket, and otherwise the key of the
+            directory followed by ``/``.
+        """
+        key = self.get("key")
+        return "" if key is None else f"{key}/"
+
     def to_dict(self) -> dict[str, Any]:
         """Convert S3Object to dictionary representation.
 
@@ -397,19 +425,95 @@ class S3Object(dict[str, Any]):
         Returns:
             The directory entry, named after the bucket.
         """
+        return cls._zero_size(bucket.name, None, None, S3StorageClass.S3_STORAGE_CLASS_BUCKET)
+
+    @classmethod
+    def root(cls) -> S3Object:
+        """Build the directory entry of the root path, which names no bucket.
+
+        Returns:
+            The directory entry, with an empty bucket and name.
+        """
+        return cls._zero_size("", None, None, S3StorageClass.S3_STORAGE_CLASS_BUCKET)
+
+    @classmethod
+    def directory(
+        cls, bucket: str, key: str | None = None, version_id: str | None = None
+    ) -> S3Object:
+        """Build the entry of a directory, such as a common prefix of a listing.
+
+        Args:
+            bucket: The bucket of the directory.
+            key: The key of the directory, without the final delimiter, or
+                None for the bucket itself.
+            version_id: The version ID that the entry records, if any.
+
+        Returns:
+            The zero-size directory entry.
+        """
+        return cls._zero_size(bucket, key, version_id, S3StorageClass.S3_STORAGE_CLASS_DIRECTORY)
+
+    @classmethod
+    def _zero_size(
+        cls, bucket: str, key: str | None, version_id: str | None, storage_class: str
+    ) -> S3Object:
+        """Build a zero-size directory entry.
+
+        Args:
+            bucket: The bucket of the entry.
+            key: The key of the entry, or None.
+            version_id: The version ID of the entry, or None.
+            storage_class: The storage class of the entry.
+
+        Returns:
+            The directory entry.
+        """
         return cls(
             init={
                 "ContentLength": 0,
                 "ContentType": None,
-                "StorageClass": S3StorageClass.S3_STORAGE_CLASS_BUCKET,
+                "StorageClass": storage_class,
                 "ETag": None,
                 "LastModified": None,
             },
             type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
-            bucket=bucket.name,
-            key=None,
-            version_id=None,
+            bucket=bucket,
+            key=key,
+            version_id=version_id,
         )
+
+    @classmethod
+    def parent_directories(
+        cls, files: Iterable[S3Object], bucket: str, base_prefix: str
+    ) -> list[S3Object]:
+        """Return the directory entries that the keys of listed files imply.
+
+        A listing without a delimiter returns no directory entries; the
+        directories between ``base_prefix`` and each file are derived from
+        its key instead.
+
+        Args:
+            files: The entries of the listing. Only the files whose key starts
+                with ``base_prefix`` are read.
+            bucket: The bucket of the listing.
+            base_prefix: The key prefix below which the directories are
+                derived: ``""``, or a prefix that ends in ``/``, such as
+                ``a//`` for the keys ``a//x/y``.
+
+        Returns:
+            One directory entry per derived directory, in no particular order.
+        """
+        dirs = set()
+        for f in files:
+            if (
+                f.key
+                and f.type == S3ObjectType.S3_OBJECT_TYPE_FILE
+                and f.key.startswith(base_prefix)
+            ):
+                parts = f.key[len(base_prefix) :].split("/")
+                for i in range(1, len(parts)):
+                    dirs.add(base_prefix + "/".join(parts[:i]))
+        return [cls.directory(bucket, dir_path) for dir_path in dirs]
 
 
 class _S3Response:
@@ -958,6 +1062,64 @@ class S3ListMultipartUploadsPage:
 
 
 @dataclass(frozen=True)
+class S3DeleteBatch:
+    """The objects of one bucket that one DeleteObjects request deletes.
+
+    A batch is valid by construction: it has 1 to ``MAX_KEYS`` objects, each
+    with a key in the bucket of the batch. A path with a version ID deletes
+    that version.
+
+    Attributes:
+        bucket: The bucket of the objects.
+        objects: The paths of the objects to delete.
+        quiet: Whether S3 omits the deleted objects from the response.
+    """
+
+    # https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObjects.html
+    MAX_KEYS: ClassVar[int] = 1000
+
+    bucket: str
+    objects: tuple[S3Path, ...]
+    quiet: bool = True
+
+    def __post_init__(self) -> None:
+        """Validate the objects of the batch.
+
+        Raises:
+            ValueError: If the batch has no objects or more than
+                ``MAX_KEYS``, or an object has no key or another bucket.
+        """
+        if not 0 < len(self.objects) <= self.MAX_KEYS:
+            raise ValueError(f"A batch has 1 to {self.MAX_KEYS} objects, not {len(self.objects)}.")
+        for path in self.objects:
+            if not path.key or path.bucket != self.bucket:
+                raise ValueError(f"Not an object of the bucket {self.bucket}: {path.uri}.")
+
+    @classmethod
+    def from_paths(cls, paths: Iterable[S3Path], quiet: bool = True) -> list[S3DeleteBatch]:
+        """Group the paths into batches by bucket, in the order of the paths.
+
+        Args:
+            paths: The paths of the objects to delete.
+            quiet: Whether S3 omits the deleted objects from the responses.
+
+        Returns:
+            The batches of up to ``MAX_KEYS`` objects of one bucket each.
+
+        Raises:
+            ValueError: If a path has no key.
+        """
+        objects: dict[str, list[S3Path]] = {}
+        for path in paths:
+            objects.setdefault(path.bucket, []).append(path)
+        return [
+            cls(bucket=bucket, objects=tuple(paths_[i : i + cls.MAX_KEYS]), quiet=quiet)
+            for bucket, paths_ in objects.items()
+            for i in range(0, len(paths_), cls.MAX_KEYS)
+        ]
+
+
+@dataclass(frozen=True)
 class S3DeleteError:
     """An object that DeleteObjects could not delete (an ``Errors`` entry).
 
@@ -1034,6 +1196,33 @@ class S3DeleteResult:
                 S3DeleteError.from_response(bucket, e) for e in response.get("Errors", [])
             ),
         )
+
+    @staticmethod
+    def raise_for_outcomes(outcomes: Iterable[S3DeleteResult | BaseException]) -> None:
+        """Raise an error for the batches of a deletion that S3 could not delete.
+
+        Args:
+            outcomes: The result, or the exception raised, of each batch.
+
+        Raises:
+            BaseException: The first exception of the batches, with a note
+                that lists the errors of the results, if any.
+            OSError: If no batch raised and a result has errors.
+        """
+        exceptions: list[BaseException] = []
+        errors: list[str] = []
+        for outcome in outcomes:
+            if isinstance(outcome, BaseException):
+                exceptions.append(outcome)
+            else:
+                errors.extend(str(e) for e in outcome.errors)
+        message = f"Failed to delete objects: {', '.join(sorted(errors))}" if errors else None
+        if exceptions:
+            if message:
+                exceptions[0].add_note(message)
+            raise exceptions[0]
+        if message:
+            raise OSError(message)
 
 
 @dataclass(frozen=True, init=False)
@@ -1309,6 +1498,25 @@ class S3MultipartUpload(_S3Response):
             owner=S3Owner(owner) if owner else None,
             initiator=S3Owner(initiator) if initiator else None,
         )
+
+    def request_identity(self) -> dict[str, Any]:
+        """Return the parameters that identify the upload in its requests.
+
+        Returns:
+            ``Bucket``, ``Key`` and ``UploadId``, as UploadPart,
+            UploadPartCopy, CompleteMultipartUpload and AbortMultipartUpload
+            take them.
+
+        Raises:
+            ValueError: If the upload has no bucket, key, or upload ID.
+        """
+        if not self.bucket:
+            raise ValueError("The multipart upload has no bucket.")
+        if not self.key:
+            raise ValueError("The multipart upload has no key.")
+        if not self.upload_id:
+            raise ValueError("The multipart upload has no upload ID.")
+        return {"Bucket": self.bucket, "Key": self.key, "UploadId": self.upload_id}
 
 
 @dataclass(frozen=True, init=False)

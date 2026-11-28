@@ -38,7 +38,7 @@ from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import check_contained, isfilelike, other_paths, stringify_path, tokenize
 
 from pyathena.filesystem.s3_cache import S3ListingCache
-from pyathena.filesystem.s3_core import S3Core, S3DeleteBatch
+from pyathena.filesystem.s3_core import S3Core
 from pyathena.filesystem.s3_errors import S3ClientError
 from pyathena.filesystem.s3_executor import (
     ItemT,
@@ -49,6 +49,7 @@ from pyathena.filesystem.s3_executor import (
     _S3PoolScope,
 )
 from pyathena.filesystem.s3_object import (
+    S3DeleteBatch,
     S3DeleteResult,
     S3Metadata,
     S3MultipartUpload,
@@ -56,7 +57,6 @@ from pyathena.filesystem.s3_object import (
     S3Object,
     S3ObjectType,
     S3ObjectVersion,
-    S3StorageClass,
 )
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
@@ -113,17 +113,6 @@ _collecting = threading.local()
 _handed_over_closes: set[threading.Event] = set()
 _handed_over_closes_waited = False
 
-# The request parameters on which the authorization of a lookup (HeadObject,
-# HeadBucket, or ListObjectsV2) depends.
-_LOOKUP_REQUEST_PARAMETERS = frozenset(
-    {
-        "ExpectedBucketOwner",
-        "RequestPayer",
-        "SSECustomerAlgorithm",
-        "SSECustomerKey",
-        "SSECustomerKeyMD5",
-    }
-)
 # The keyword arguments of the expansion of paths, which are not request
 # parameters: those that _expand_unversioned(), glob() (also fsspec's) and
 # _find_paths() take or pop. A new one belongs here, or cat() sends it with
@@ -279,7 +268,7 @@ class _S3TreeListing:
     a version ID query or an empty segment at the end of the name changes.
     This object runs fsspec's ``tree()`` in place of the filesystem: a
     directory that a listing of the same ``tree()`` returned is listed by
-    its key prefix (see :meth:`S3FileSystem._directory_prefix`), and any
+    its key prefix (see :meth:`S3Object.listing_prefix`), and any
     other path with ``ls()``.
     """
 
@@ -543,7 +532,7 @@ class S3FileSystem(AbstractFileSystem):
         requester_pays = kwargs.pop("requester_pays", False)
         # The parameters that authorize the access to the objects, sent with
         # every request that accepts them, and with a copy for its source.
-        request_kwargs = self._get_lookup_kwargs(self.s3_additional_kwargs)
+        request_kwargs = S3Core.lookup_params(self.s3_additional_kwargs)
         if requester_pays:
             request_kwargs.setdefault("RequestPayer", "requester")
         self._core = S3Core(
@@ -752,23 +741,6 @@ class S3FileSystem(AbstractFileSystem):
             **{k: v for k, v in client_kwargs.items() if k in self._CLIENT_PASSING_ARGS},
         )
 
-    @staticmethod
-    def _directory_object(bucket: str, key: str | None, version_id: str | None = None) -> S3Object:
-        """Build an S3Object representing a directory entry."""
-        return S3Object(
-            init={
-                "ContentLength": 0,
-                "ContentType": None,
-                "StorageClass": S3StorageClass.S3_STORAGE_CLASS_DIRECTORY,
-                "ETag": None,
-                "LastModified": None,
-            },
-            type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
-            bucket=bucket,
-            key=key,
-            version_id=version_id,
-        )
-
     def _head_bucket(
         self,
         bucket,
@@ -784,7 +756,7 @@ class S3FileSystem(AbstractFileSystem):
         Args:
             bucket: The bucket name.
             refresh: If True, bypass the cache and call HeadBucket.
-            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
+            lookup_kwargs: The lookup parameters (see :meth:`S3Core.lookup_params`)
                 to send with the request.
 
         Returns:
@@ -822,7 +794,7 @@ class S3FileSystem(AbstractFileSystem):
         Args:
             path: The path of the object, optionally with a version ID.
             refresh: If True, bypass the cache and call HeadObject.
-            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
+            lookup_kwargs: The lookup parameters (see :meth:`S3Core.lookup_params`)
                 to send with the request.
 
         Returns:
@@ -893,29 +865,11 @@ class S3FileSystem(AbstractFileSystem):
         """
         s3_path = S3Path.parse(path)
         return self._ls_prefix(
-            self._directory_object(s3_path.bucket, s3_path.key),
+            S3Object.directory(s3_path.bucket, s3_path.key),
             prefix=prefix,
             delimiter=delimiter,
             refresh=refresh,
         )
-
-    @staticmethod
-    def _directory_prefix(directory: S3Object) -> str:
-        """Return the key prefix that a listed directory or bucket lists.
-
-        A directory is named after its common prefix without the final
-        delimiter, which may leave the name with a version ID query or with
-        trailing slashes. The prefix is taken from its key instead, so that
-        the directory is listed as it was listed.
-
-        Args:
-            directory: A directory or bucket entry of a listing.
-
-        Returns:
-            The key prefix: ``""`` for a bucket, and otherwise the key of the
-            directory followed by ``/``.
-        """
-        return "" if directory.key is None else f"{directory.key}/"
 
     def _ls_prefix(
         self,
@@ -936,11 +890,11 @@ class S3FileSystem(AbstractFileSystem):
         delimiter, so the common prefix ``dir//`` of a key with an empty
         segment, such as ``dir//x``, is the directory ``bucket/dir/``, and
         ``/`` at the top of the bucket is ``bucket/``. Its key is the prefix
-        without the final delimiter (see :meth:`_directory_prefix`).
+        without the final delimiter (see :meth:`S3Object.listing_prefix`).
 
         Args:
             directory: The bucket or directory to list, as a listing or
-                :meth:`_directory_object` returns it.
+                :meth:`S3Object.directory` returns it.
             prefix: Key prefix to filter by, relative to the directory. A
                 prefixed listing is neither read from nor written to the
                 cache.
@@ -963,11 +917,11 @@ class S3FileSystem(AbstractFileSystem):
         try:
             for page in self.core.list_objects(
                 bucket,
-                prefix=self._directory_prefix(directory) + prefix,
+                prefix=directory.listing_prefix() + prefix,
                 delimiter=delimiter,
             ):
                 files.extend(
-                    self._directory_object(bucket, c.prefix[:-1]) for c in page.common_prefixes
+                    S3Object.directory(bucket, c.prefix[:-1]) for c in page.common_prefixes
                 )
                 files.extend(S3Object.from_summary(o) for o in page.objects)
         except FileNotFoundError:
@@ -1099,7 +1053,7 @@ class S3FileSystem(AbstractFileSystem):
             The listed directories and versions.
         """
         s3_path = S3Path.parse(path)
-        files = self._ls_prefix_versions(self._directory_object(s3_path.bucket, s3_path.key))
+        files = self._ls_prefix_versions(S3Object.directory(s3_path.bucket, s3_path.key))
         if not files and s3_path.key:
             # The path may point at an object rather than a key prefix.
             files = [
@@ -1117,7 +1071,7 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             directory: The bucket or directory to list (see
-                :meth:`_directory_prefix`).
+                :meth:`S3Object.listing_prefix`).
 
         Returns:
             The listed directories and versions, not cached.
@@ -1125,11 +1079,9 @@ class S3FileSystem(AbstractFileSystem):
         bucket = directory.bucket
         files: list[S3Object] = []
         for page in self.core.list_object_versions(
-            bucket, prefix=self._directory_prefix(directory), delimiter="/"
+            bucket, prefix=directory.listing_prefix(), delimiter="/"
         ):
-            files.extend(
-                self._directory_object(bucket, c.prefix[:-1]) for c in page.common_prefixes
-            )
+            files.extend(S3Object.directory(bucket, c.prefix[:-1]) for c in page.common_prefixes)
             files.extend(S3Object.from_version(v) for v in page.versions)
         return files
 
@@ -1140,7 +1092,7 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             directory: A directory or bucket entry of a listing (see
-                :meth:`_directory_prefix`).
+                :meth:`S3Object.listing_prefix`).
             refresh: If True, bypass the cache and list from S3.
             versions: Whether to list all versions of the objects, as
                 ``ls(versions=True)`` does.
@@ -1234,24 +1186,12 @@ class S3FileSystem(AbstractFileSystem):
             name = self._strip_protocol(path)
             if name in ["/", ""]:
                 # S3Path.parse rejects the root path.
-                return S3Object(
-                    init={
-                        "ContentLength": 0,
-                        "ContentType": None,
-                        "StorageClass": S3StorageClass.S3_STORAGE_CLASS_BUCKET,
-                        "ETag": None,
-                        "LastModified": None,
-                    },
-                    type=S3ObjectType.S3_OBJECT_TYPE_DIRECTORY,
-                    bucket="",
-                    key=None,
-                    version_id=None,
-                )
+                return S3Object.root()
             s3_path = S3Path.parse(name)
         if version_id and not s3_path.version_id:
             s3_path = s3_path.with_version_id(version_id)
         return self._path_info(
-            s3_path, refresh=refresh, lookup_kwargs=self._get_lookup_kwargs(kwargs)
+            s3_path, refresh=refresh, lookup_kwargs=self.core.lookup_params(kwargs)
         )
 
     def _path_info(
@@ -1269,7 +1209,7 @@ class S3FileSystem(AbstractFileSystem):
         Args:
             path: The path, with the version to look up, if any.
             refresh: If True, bypass the cache and query S3.
-            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``).
+            lookup_kwargs: The lookup parameters (see :meth:`S3Core.lookup_params`).
 
         Returns:
             S3Object describing the bucket, directory, or file.
@@ -1327,7 +1267,7 @@ class S3FileSystem(AbstractFileSystem):
 
         page = self.core.list_objects_page(
             path.bucket,
-            prefix=f"{path.key.rstrip('/')}/" if path.key else "",
+            prefix=path.subtree_prefix,
             delimiter="/",
             max_keys=1,
             **self.core.operation_params("list_objects_v2", lookup_kwargs),
@@ -1336,40 +1276,10 @@ class S3FileSystem(AbstractFileSystem):
             # Nothing caches the key prefix, and the cached listing of the
             # parent may predate it.
             self._listing_cache.evict_parent_listing(path)
-            return self._directory_object(
+            return S3Object.directory(
                 path.bucket, path.key.rstrip("/") if path.key else None, version_id
             )
         raise FileNotFoundError(str(path))
-
-    def _extract_parent_directories(
-        self, files: list[S3Object], bucket: str, base_prefix: str
-    ) -> list[S3Object]:
-        """Extract parent directory objects from file paths.
-
-        When listing files without delimiter, S3 doesn't return directory entries.
-        This method creates directory objects by analyzing file paths.
-
-        Args:
-            files: List of S3Object instances representing files.
-            bucket: S3 bucket name.
-            base_prefix: The key prefix below which the directories are
-                derived: ``""``, or a prefix that ends in ``/``, such as
-                ``a//`` for the keys ``a//x/y``.
-
-        Returns:
-            List of S3Object instances representing directories.
-        """
-        dirs = set()
-        for f in files:
-            if (
-                f.key
-                and f.type == S3ObjectType.S3_OBJECT_TYPE_FILE
-                and f.key.startswith(base_prefix)
-            ):
-                parts = f.key[len(base_prefix) :].split("/")
-                for i in range(1, len(parts)):
-                    dirs.add(base_prefix + "/".join(parts[:i]))
-        return [self._directory_object(bucket, dir_path) for dir_path in dirs]
 
     def _find(
         self,
@@ -1405,7 +1315,7 @@ class S3FileSystem(AbstractFileSystem):
     ) -> list[tuple[S3Object, str | S3Path]]:
         """List the objects below a path as :meth:`_find` does, with the paths they name.
 
-        A listed entry names its bucket and key (see :meth:`_entry_path`),
+        A listed entry names its bucket and key (see :meth:`S3Object.to_path`),
         and the path itself, also a version that its entry names after its
         key alone, is named by the path string as given (see
         :meth:`_find_under`).
@@ -1437,7 +1347,7 @@ class S3FileSystem(AbstractFileSystem):
         if s3_path.key and s3_path.version_id:
             return [(f, path) for f in self._ls_version(s3_path, refresh=refresh)]
         return self._find_under(
-            self._directory_object(s3_path.bucket, s3_path.key),
+            S3Object.directory(s3_path.bucket, s3_path.key),
             maxdepth=maxdepth,
             withdirs=withdirs,
             prefix=prefix,
@@ -1457,12 +1367,12 @@ class S3FileSystem(AbstractFileSystem):
         """List the objects below a directory, as described in ``find``, with the paths they name.
 
         The directory is listed by its key prefix (see
-        :meth:`_directory_prefix`), never by parsing its name. A listed entry
-        names its bucket and key (see :meth:`_entry_path`).
+        :meth:`S3Object.listing_prefix`), never by parsing its name. A listed entry
+        names its bucket and key (see :meth:`S3Object.to_path`).
 
         Args:
             directory: The bucket, the directory or the object to search
-                under, as a listing or :meth:`_directory_object` returns it.
+                under, as a listing or :meth:`S3Object.directory` returns it.
             maxdepth: Maximum number of levels to descend, at least 1
                 (None for unlimited).
             withdirs: Whether to include directories in the result.
@@ -1492,19 +1402,19 @@ class S3FileSystem(AbstractFileSystem):
             # directories are derived from the listed keys, below the last
             # slash of the listed key prefix, as with maxdepth.
             if withdirs:
-                listed = self._directory_prefix(directory) + prefix
+                listed = directory.listing_prefix() + prefix
                 # Build a new list; files may be the cached listing.
-                files = files + self._extract_parent_directories(
+                files = files + S3Object.parent_directories(
                     files, bucket, listed[: listed.rfind("/") + 1]
                 )
 
-        found: list[tuple[S3Object, str | S3Path]] = [(f, self._entry_path(f)) for f in files]
+        found: list[tuple[S3Object, str | S3Path]] = [(f, f.to_path()) for f in files]
         if found:
             # Something is listed below the path, so the path is a directory,
             # which fsspec includes with the directories. A bucket is not
             # included, since cp_file() cannot copy it in a recursive copy.
             if withdirs and key:
-                found = [(self._directory_object(bucket, key), own), *found]
+                found = [(S3Object.directory(bucket, key), own), *found]
         elif key:
             # As in fsspec, the path itself is returned if it is an object,
             # or with withdirs if it is a directory.
@@ -1526,7 +1436,7 @@ class S3FileSystem(AbstractFileSystem):
         """List the entries below a directory level by level with ``Delimiter="/"``.
 
         Each listed directory is listed by its key prefix, never by parsing
-        its name (see :meth:`_directory_prefix`).
+        its name (see :meth:`S3Object.listing_prefix`).
 
         Args:
             directory: The bucket or directory to search under.
@@ -1602,7 +1512,7 @@ class S3FileSystem(AbstractFileSystem):
         """Walk the directories below a path, as fsspec's ``walk()`` does.
 
         Unlike fsspec, a listed directory is listed by its key prefix rather
-        than by its name (see :meth:`_directory_prefix`), so a directory whose
+        than by its name (see :meth:`S3Object.listing_prefix`), so a directory whose
         name ends in a version ID query or in an empty segment is walked as
         it was listed. Its name in the listing of its parent is the part of
         its name after the parent's name, such as ``""`` for the directory
@@ -1774,7 +1684,7 @@ class S3FileSystem(AbstractFileSystem):
         """Return the sizes of the objects below a path, as fsspec's ``du()`` does.
 
         Unlike fsspec, each entry that ``find()`` returns is looked up by its
-        bucket and key (see :meth:`_entry_path`), never by parsing its name.
+        bucket and key (see :meth:`S3Object.to_path`), never by parsing its name.
 
         Args:
             path: The path to search under.
@@ -1953,7 +1863,7 @@ class S3FileSystem(AbstractFileSystem):
 
         A path that the caller passes names itself, as the string that
         :meth:`expand_path` returns. A path that a listing returns names the
-        bucket and key of its entry (see :meth:`_entry_path`), also when its
+        bucket and key of its entry (see :meth:`S3Object.to_path`), also when its
         name ends in what looks like a version ID query, and the expansion
         below a matched directory lists it by its key prefix. As in fsspec,
         the directories are expanded below the matches of a recursive glob
@@ -2050,7 +1960,7 @@ class S3FileSystem(AbstractFileSystem):
                     dict[str, S3Object], self.glob(p, maxdepth=maxdepth, detail=True, **kwargs)
                 )
                 for name, match in matches.items():
-                    add(name, self._entry_path(match))
+                    add(name, match.to_path())
                 # As fsspec expands the matches, one level fewer deep.
                 if recursive and not (maxdepth is not None and maxdepth <= 1):
                     if not matches:
@@ -2080,24 +1990,6 @@ class S3FileSystem(AbstractFileSystem):
             raise FileNotFoundError(paths)
         return out
 
-    @staticmethod
-    def _entry_path(entry: S3Object) -> S3Path:
-        """Return the path that an entry of a listing or a lookup names.
-
-        The bucket and the key of the entry are taken as they are, never
-        parsed from its name. A listing of the current objects, and a
-        lookup of a path without a version, name no version, also when a
-        ``version_aware`` lookup records the version of the object.
-
-        Args:
-            entry: An entry that ``find()``, ``glob()`` or ``info()`` of a path
-                without a version returns.
-
-        Returns:
-            The path of the bucket, the directory or the object.
-        """
-        return S3Path(entry.bucket, entry.key)
-
     def _split_version_paths(self, path) -> tuple[list[str], list[str]]:
         """Split paths into those with a version ID and the others.
 
@@ -2108,15 +2000,10 @@ class S3FileSystem(AbstractFileSystem):
             Tuple of the paths with a version ID and the other paths, without
             the protocol.
         """
-        paths = [
+        return S3Path.partition_by_version(
             self._strip_protocol(p)
             for p in ([path] if isinstance(path, (str, os.PathLike)) else path)
-        ]
-        versions: list[str] = []
-        others: list[str] = []
-        for p in paths:
-            (versions if S3Path.has_version_id(p) else others).append(p)
-        return versions, others
+        )
 
     def exists(self, path: str | os.PathLike[str], **kwargs) -> bool:
         """Check if an S3 path exists.
@@ -2154,7 +2041,7 @@ class S3FileSystem(AbstractFileSystem):
             # The root always exists.
             return True
         s3_path = S3Path.parse(path)
-        lookup_kwargs = self._get_lookup_kwargs(kwargs)
+        lookup_kwargs = self.core.lookup_params(kwargs)
         # The cached listings are made without lookup parameters.
         use_listings = not refresh and not lookup_kwargs
         if s3_path.key:
@@ -2470,7 +2357,7 @@ class S3FileSystem(AbstractFileSystem):
             max_workers=max_workers,
             stop_on_failure=False,
         )
-        self._raise_delete_errors(results.outcomes)
+        S3DeleteResult.raise_for_outcomes(results.outcomes)
 
     @staticmethod
     def _delete_batches(
@@ -2495,6 +2382,8 @@ class S3FileSystem(AbstractFileSystem):
                 raise TypeError(f"rm() got an unexpected keyword argument '{name}'")
         quiet = kwargs.pop("Quiet", True)
         s3_paths = [S3Path.parse(p) if isinstance(p, str) else p for p in paths]
+        # The expansion of a pattern such as "bucket/**" names the bucket
+        # itself when a key starts with "/" (the directory "bucket/").
         batches = S3DeleteBatch.from_paths([p for p in s3_paths if p.key], quiet=quiet)
         return batches, kwargs
 
@@ -2516,33 +2405,6 @@ class S3FileSystem(AbstractFileSystem):
         finally:
             for path in batch.objects:
                 self._invalidate(path)
-
-    @staticmethod
-    def _raise_delete_errors(results: list[S3DeleteResult | BaseException]) -> None:
-        """Raise an error for the batches that S3 could not delete.
-
-        Args:
-            results: The result or the exception of each batch.
-
-        Raises:
-            BaseException: The first exception of the batches, with a note
-                that lists the errors of the results, if any.
-            OSError: If no batch raised and a result has errors.
-        """
-        exceptions: list[BaseException] = []
-        errors: list[str] = []
-        for result in results:
-            if isinstance(result, BaseException):
-                exceptions.append(result)
-            else:
-                errors.extend(str(e) for e in result.errors)
-        message = f"Failed to delete objects: {', '.join(sorted(errors))}" if errors else None
-        if exceptions:
-            if message:
-                exceptions[0].add_note(message)
-            raise exceptions[0]
-        if message:
-            raise OSError(message)
 
     def mkdir(self, path: str | os.PathLike[str], create_parents: bool = True, **kwargs) -> None:
         """Create an S3 bucket.
@@ -2700,7 +2562,7 @@ class S3FileSystem(AbstractFileSystem):
             raise ValueError("Cannot touch the file with the version specified.")
         if "Body" in kwargs:
             raise TypeError("touch() creates an empty object; use pipe_file() to write data.")
-        if not truncate and self._key_exists(s3_path, self._get_lookup_kwargs(kwargs)):
+        if not truncate and self._key_exists(s3_path, self.core.lookup_params(kwargs)):
             raise ValueError("Cannot touch the existing file without specifying truncate.")
         if not s3_path.key:
             raise ValueError("Cannot touch the bucket.")
@@ -2866,7 +2728,7 @@ class S3FileSystem(AbstractFileSystem):
         versioned_buckets = {
             bucket for bucket in buckets if self.core.get_bucket_versioning(bucket) == "Enabled"
         }
-        lookup_kwargs = self._get_lookup_kwargs(source_params or {})
+        lookup_kwargs = self.core.lookup_params(source_params or {})
         missing = {
             source
             for source in pairing.conflict_candidates(
@@ -3659,7 +3521,7 @@ class S3FileSystem(AbstractFileSystem):
         if mode == "create":
             # Checked up front, as open() does in "xb" mode, and with
             # IfNoneMatch for an object created since.
-            if self._object_exists(path, self._get_lookup_kwargs(request_kwargs)):
+            if self._object_exists(path, self.core.lookup_params(request_kwargs)):
                 raise FileExistsError(path)
             request_kwargs["IfNoneMatch"] = "*"
         if not isinstance(value, bytes):
@@ -3902,7 +3764,7 @@ class S3FileSystem(AbstractFileSystem):
                 # A negative offset needs the size of the object, and an
                 # empty range sends no GetObject request that would report a
                 # missing object.
-                lookup_kwargs = self._get_lookup_kwargs(kwargs)
+                lookup_kwargs = self.core.lookup_params(kwargs)
                 info = self._info_entry(
                     # A version of the path is looked up as parsed, also one
                     # that ends in a slash, which the name would drop.
@@ -4570,17 +4432,12 @@ class S3FileSystem(AbstractFileSystem):
         """
         path = stringify_path(path)
         s3_path = S3Path.parse(path)
-        # S3 matches Prefix as a plain string, so the uploads are filtered to
-        # the key itself and the keys under it.
-        prefix = f"{s3_path.key.rstrip('/')}/" if s3_path.key else ""
-
         _logger.debug(f"List multipart uploads: {s3_path.uri}")
         return [
             upload
             for page in self.core.list_multipart_uploads(s3_path.bucket, prefix=s3_path.key or None)
             for upload in page.uploads
-            if upload.key is not None
-            and (upload.key == s3_path.key or upload.key.startswith(prefix))
+            if upload.key is not None and s3_path.covers(upload.key)
         ]
 
     def object_version_info(
@@ -4608,10 +4465,6 @@ class S3FileSystem(AbstractFileSystem):
         """
         path = stringify_path(path)
         s3_path = S3Path.parse(path)
-        # S3 matches Prefix as a plain string, so the versions are filtered to
-        # the key itself or the keys under it.
-        prefix = f"{s3_path.key.rstrip('/')}/" if s3_path.key else ""
-
         _logger.debug(f"List object versions: {s3_path.uri}")
         versions: list[S3ObjectVersion] = []
         # Explicit markers start the listing, which the pages then advance.
@@ -4635,6 +4488,7 @@ class S3FileSystem(AbstractFileSystem):
         if s3_path.key and not s3_path.key.endswith("/") and s3_path.key in keys:
             selected = [v for v, k in zip(versions, keys, strict=True) if k == s3_path.key]
         else:
+            prefix = s3_path.subtree_prefix
             selected = [v for v, k in zip(versions, keys, strict=True) if k.startswith(prefix)]
         return [v for v in selected if delete_markers or not v.is_delete_marker]
 
@@ -4659,24 +4513,10 @@ class S3FileSystem(AbstractFileSystem):
             self.core.abort_multipart_upload,
             uploads,
             stop_on_failure=False,
-            counts=self._is_not_no_such_upload,
+            counts=lambda e: not S3ClientError.is_no_such_upload(e),
         )
         if results.failure is not None:
             raise results.failure
-
-    @staticmethod
-    def _is_not_no_such_upload(error: BaseException) -> bool:
-        """Return whether an error of an abort is other than an upload that no longer exists.
-
-        Args:
-            error: The error of ``abort_multipart_upload``.
-
-        Returns:
-            False for the ``FileNotFoundError`` of a ``NoSuchUpload`` error.
-        """
-        return not (
-            isinstance(error, FileNotFoundError) and S3ClientError.code_of(error) == "NoSuchUpload"
-        )
 
     def created(self, path: str | os.PathLike[str]) -> datetime:
         """Return the creation time of the path.
@@ -4751,7 +4591,7 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             path: The path of the object.
-            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
+            lookup_kwargs: The lookup parameters (see :meth:`S3Core.lookup_params`)
                 to send with the requests.
 
         Returns:
@@ -4773,7 +4613,7 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             path: S3 path (s3://bucket/key).
-            lookup_kwargs: The lookup parameters (see ``_get_lookup_kwargs``)
+            lookup_kwargs: The lookup parameters (see :meth:`S3Core.lookup_params`)
                 to send with the requests.
 
         Returns:
@@ -4799,24 +4639,6 @@ class S3FileSystem(AbstractFileSystem):
             The keyword arguments of ``cat_file()``.
         """
         return {k: v for k, v in kwargs.items() if k not in _EXPANSION_KWARGS}
-
-    @staticmethod
-    def _get_lookup_kwargs(kwargs: Mapping[str, Any]) -> dict[str, Any]:
-        """Select the request parameters that lookups send.
-
-        Lookups (``info()`` and ``exists()``) send only the parameters on
-        which their authorization depends, which also select their cached
-        results. Other parameters that HeadObject accepts, such as
-        ``IfMatch``, ``PartNumber`` or ``ResponseContentType``, are not sent,
-        because the result would depend on them.
-
-        Args:
-            kwargs: The parameters to select from.
-
-        Returns:
-            The lookup parameters.
-        """
-        return {k: v for k, v in kwargs.items() if k in _LOOKUP_REQUEST_PARAMETERS}
 
     def _ls_from_cache(self, path: S3Path) -> list[S3Object] | S3Object | None:
         """Check the listing cache for a cached entry of the path.
@@ -5058,25 +4880,17 @@ class S3FileTarget:
             # A version is looked up by its bucket, key and version, also one
             # that ends in a slash, which the lookup of a path string drops.
             target = s3_path.with_version_id(version_id)
-        if "r" not in mode and not (
-            fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE
-            <= block_size
-            <= fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        ):
+        if "r" not in mode:
             # When writing, every full block is uploaded as a part of a
             # multipart upload.
-            raise ValueError(
-                "Block size for writing must be between "
-                f"5 MiB ({fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE} bytes) and "
-                f"5 GiB ({fs.core.MULTIPART_UPLOAD_MAX_PART_SIZE} bytes), inclusive: {block_size}."
-            )
+            fs.core.check_block_size(block_size)
 
         details: S3Object | dict[str, Any] = {}
         appended: S3Object | None = None
         append_data: bytes | None = None
         # The lookups need the parameters of the file on which their
         # authorization depends, such as the customer-provided key.
-        lookup_kwargs = fs._get_lookup_kwargs(kwargs)
+        lookup_kwargs = fs.core.lookup_params(kwargs)
         if "r" in mode:
             # Looked up here; the base class initializer of a file would
             # otherwise take the size from the latest version of the object.
@@ -5894,11 +5708,11 @@ class S3File(AbstractBufferedFile):
 
         Returns:
             The lookup parameters of the file (see
-            ``S3FileSystem._get_lookup_kwargs``), such as ``RequestPayer`` or
+            ``S3Core.lookup_params``), such as ``RequestPayer`` or
             the ``SSECustomer*`` parameters of an object encrypted with a
             customer-provided key.
         """
-        return self.fs._get_lookup_kwargs(self.s3_additional_kwargs)
+        return self.fs.core.lookup_params(self.s3_additional_kwargs)
 
     def url(self, expiration: int = 3600, **kwargs) -> str:
         """Generate a presigned HTTP URL to read this file (if it already exists).

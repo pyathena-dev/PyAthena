@@ -43,6 +43,7 @@ from pyathena.filesystem.s3_core import S3Core
 from pyathena.filesystem.s3_executor import ItemT, S3Executor, S3MapResult, S3ThreadPool, T
 from pyathena.filesystem.s3_object import (
     S3CompleteMultipartUpload,
+    S3DeleteResult,
     S3Metadata,
     S3MultipartUpload,
     S3Object,
@@ -646,7 +647,7 @@ class AioS3FileSystem(AsyncFileSystem):
             max_workers=max_workers,
             stop_on_failure=False,
         )
-        self._sync_fs._raise_delete_errors(results.outcomes)
+        S3DeleteResult.raise_for_outcomes(results.outcomes)
 
     async def _map_async(
         self,

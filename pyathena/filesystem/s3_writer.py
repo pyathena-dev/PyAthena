@@ -68,12 +68,7 @@ class S3MultipartWriter:
             raise ValueError(f"The path has no key: {path.uri}.")
         if path.version_id:
             raise ValueError(f"Cannot write to a version: {path.uri}.")
-        if (
-            not core.MULTIPART_UPLOAD_MIN_PART_SIZE
-            <= block_size
-            <= core.MULTIPART_UPLOAD_MAX_PART_SIZE
-        ):
-            raise ValueError("block_size must be between the minimum and maximum part sizes.")
+        core.check_block_size(block_size)
         self._core = core
         self._path = path
         self._block_size = block_size

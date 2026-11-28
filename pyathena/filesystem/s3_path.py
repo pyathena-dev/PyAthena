@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, replace
+from glob import has_magic
 from re import Pattern
 from typing import ClassVar
 
@@ -151,6 +153,37 @@ class S3Path:
         """
         return cls.split_version_id(os.fspath(path))[1] is not None
 
+    @classmethod
+    def is_glob(cls, path: str) -> bool:
+        """Return whether a path string is a glob pattern; a version ID query is not one.
+
+        Args:
+            path: The path string.
+
+        Returns:
+            True if the path has glob characters and no version ID query.
+        """
+        return has_magic(path) and not cls.has_version_id(path)
+
+    @classmethod
+    def partition_by_version(cls, paths: Iterable[str]) -> tuple[list[str], list[str]]:
+        """Split path strings into those with a version ID query and the others.
+
+        Each list keeps the order of the paths. As with
+        :meth:`has_version_id`, any string is accepted.
+
+        Args:
+            paths: The path strings.
+
+        Returns:
+            Tuple of the paths with a version ID query and the other paths.
+        """
+        versions: list[str] = []
+        others: list[str] = []
+        for path in paths:
+            (versions if cls.has_version_id(path) else others).append(path)
+        return versions, others
+
     @property
     def is_bucket(self) -> bool:
         """Whether the path names the bucket: it has no key, or a key of only slashes."""
@@ -185,6 +218,47 @@ class S3Path:
         version distinct from its key. Any other path is its own target.
         """
         return self.with_version_id(None) if self.version_id == "null" else self
+
+    def target_for(self, versioning_enabled_buckets: Collection[str]) -> S3Path:
+        """Return the move target of the path for a known bucket versioning state.
+
+        As :attr:`target`, except that a ``null`` version in a bucket whose
+        versioning is enabled stays distinct from its key.
+
+        Args:
+            versioning_enabled_buckets: The names of the buckets whose
+                versioning is enabled: a collection, not a single name, which
+                ``in`` would match as a substring.
+
+        Returns:
+            The path, keeping a ``null`` version only when its bucket has
+            versioning enabled.
+        """
+        return self if self.bucket in versioning_enabled_buckets else self.target
+
+    @property
+    def subtree_prefix(self) -> str:
+        """The key prefix of the keys under the path.
+
+        ``""`` for a bucket path, and otherwise the key without its trailing
+        slashes, followed by ``/``. S3 matches a ``Prefix`` as a plain
+        string, so a listing by the key also returns sibling keys that merely
+        start with the same characters (e.g., ``key.bak``); the keys under the
+        path start with this prefix.
+        """
+        return f"{self.key.rstrip('/')}/" if self.key else ""
+
+    def covers(self, key: str) -> bool:
+        """Return whether a key is the key of the path or a key under it.
+
+        Args:
+            key: The key.
+
+        Returns:
+            True for the key of the path and for the keys that start with
+            :attr:`subtree_prefix`; any key for a bucket path.
+        """
+        return key == self.key or key.startswith(self.subtree_prefix)
 
     def with_key_suffix(self, suffix: str) -> S3Path:
         """Return the path that a suffix names below this one, with the suffix as it is.
