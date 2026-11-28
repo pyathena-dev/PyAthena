@@ -277,13 +277,13 @@ class AioS3FileSystem(AsyncFileSystem):
     The implementation uses composition: an internal ``S3FileSystem`` instance handles
     all boto3 calls, while this class delegates to it in the threads of its pool.
     This avoids diamond inheritance issues and keeps all boto3 logic in one place.
-    The synchronous methods that have no fsspec coroutine, such as
-    :meth:`metadata`, :meth:`get_tags` and :meth:`tree`, call it on the
-    caller's thread, so that they work inside a running event loop; their
-    coroutine forms, such as :meth:`_metadata`, run in the threads of the
-    pool. The s3fs attributes of ``S3FileSystem``, such as ``max_workers``
-    and ``version_aware``, are read-only properties that return those of the
-    internal filesystem.
+    Some synchronous methods, such as :meth:`metadata`, :meth:`get_tags`
+    and :meth:`tree`, call it on the caller's thread instead of through
+    fsspec's event loop, so that they also work inside a running event loop;
+    their coroutine forms, such as :meth:`_metadata`, run in the threads of
+    the pool. The s3fs attributes of ``S3FileSystem``, such as
+    ``max_workers`` and ``version_aware``, are read-only properties that
+    return those of the internal filesystem.
 
     File handles created by ``_open`` run their parallel operations (range
     reads, multipart uploads) in that request pool, as ``S3File`` does.
@@ -353,9 +353,10 @@ class AioS3FileSystem(AsyncFileSystem):
             loop: Passed to ``fsspec.asyn.AsyncFileSystem``.
             batch_size: Passed to ``fsspec.asyn.AsyncFileSystem``: the
                 default batch size of fsspec's batch coroutines, such as
-                ``_get()``, ``_put()``, ``_copy()`` and ``_mv()``. It does not
-                apply to ``_rm()``, whose number of DeleteObjects requests at
-                once defaults to ``max_workers``.
+                ``_get()``, ``_put()``, ``_copy()`` and ``_mv()``. It is not
+                passed to the internal ``S3FileSystem``, whose ``batch_size``
+                ``_rm()`` follows: ``max_workers`` unless fsspec's
+                configuration for the protocol sets one.
             client: Passed to the internal ``S3FileSystem``. A filesystem with
                 a given client cannot be pickled.
             retry_config: Passed to the internal ``S3FileSystem``.
@@ -2101,7 +2102,11 @@ class AioS3FileSystem(AsyncFileSystem):
             **kwargs: Key-value pairs of metadata to set; a None value deletes the
                 key.
         """
-        await self._thread_pool.run(self._sync_fs.setxattr, path, copy_kwargs=copy_kwargs, **kwargs)
+        # Bound before it is submitted, so that a metadata key named as an
+        # argument of the pool, such as "fn", is passed to setxattr().
+        await self._thread_pool.run(
+            functools.partial(self._sync_fs.setxattr, path, copy_kwargs=copy_kwargs, **kwargs)
+        )
 
     def setxattr(
         self,
@@ -2319,7 +2324,7 @@ class AioS3FileSystem(AsyncFileSystem):
         """
         return cast(int, self._sync_fs.checksum(path, **kwargs))
 
-    async def _created(self, path: str | os.PathLike[str]) -> datetime:
+    async def _created(self, path: str | os.PathLike[str]) -> datetime | None:
         """Return the creation time of the path, in the threads of the filesystem.
 
         See :meth:`created`.
@@ -2328,11 +2333,12 @@ class AioS3FileSystem(AsyncFileSystem):
             path: S3 path (s3://bucket/key).
 
         Returns:
-            The last-modified time of the object.
+            The last-modified time of the object, or None for a bucket or a
+            directory, which have none.
         """
         return await self._thread_pool.run(self._sync_fs.created, path)
 
-    def created(self, path: str | os.PathLike[str]) -> datetime:
+    def created(self, path: str | os.PathLike[str]) -> datetime | None:
         """Return the creation time of the path.
 
         See :meth:`S3FileSystem.created`.
@@ -2341,11 +2347,12 @@ class AioS3FileSystem(AsyncFileSystem):
             path: S3 path (s3://bucket/key).
 
         Returns:
-            The last-modified time of the object.
+            The last-modified time of the object, or None for a bucket or a
+            directory, which have none.
         """
         return self._sync_fs.created(path)
 
-    async def _modified(self, path: str | os.PathLike[str]) -> datetime:
+    async def _modified(self, path: str | os.PathLike[str]) -> datetime | None:
         """Return the last-modified time of the path, in the threads of the filesystem.
 
         See :meth:`modified`.
@@ -2354,11 +2361,12 @@ class AioS3FileSystem(AsyncFileSystem):
             path: S3 path (s3://bucket/key).
 
         Returns:
-            The last-modified time of the object.
+            The last-modified time of the object, or None for a bucket or a
+            directory, which have none.
         """
         return await self._thread_pool.run(self._sync_fs.modified, path)
 
-    def modified(self, path: str | os.PathLike[str]) -> datetime:
+    def modified(self, path: str | os.PathLike[str]) -> datetime | None:
         """Return the last-modified time of the path.
 
         See :meth:`S3FileSystem.modified`.
@@ -2367,7 +2375,8 @@ class AioS3FileSystem(AsyncFileSystem):
             path: S3 path (s3://bucket/key).
 
         Returns:
-            The last-modified time of the object.
+            The last-modified time of the object, or None for a bucket or a
+            directory, which have none.
         """
         return self._sync_fs.modified(path)
 

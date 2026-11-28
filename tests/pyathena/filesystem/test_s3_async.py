@@ -3,6 +3,7 @@ import asyncio
 import collections
 import contextlib
 import copy
+import dataclasses
 import gc
 import gzip
 import io
@@ -121,10 +122,6 @@ def release_blocked_waits():
     with mock.patch("pyathena.filesystem.s3_async.wait", new=recording_wait):
         yield release
     release()
-
-
-# The coroutine forms that return None, as their synchronous forms do.
-_NO_RESULT_COROUTINES = frozenset(["_setxattr", "_put_tags", "_chmod", "_clear_multipart_uploads"])
 
 
 @pytest.mark.usefixtures("release_blocked_waits")
@@ -536,9 +533,11 @@ class TestAioS3FileSystem:
                 ("s3://bucket/key",),
                 {"copy_kwargs": {"ContentType": "text/csv"}, "m": "2"},
             ),
+            # A metadata key named as an argument of the thread pool.
+            ("_setxattr", "setxattr", ("s3://bucket/key",), {"fn": "2"}),
             ("_list_multipart_uploads", "list_multipart_uploads", ("s3://bucket/dir",), {}),
             ("_clear_multipart_uploads", "clear_multipart_uploads", ("s3://bucket/dir",), {}),
-            ("_checksum", "checksum", ("s3://bucket/key",), {"refresh": True}),
+            ("_checksum", "checksum", ("s3://bucket/key",), {}),
             ("_created", "created", ("s3://bucket/key",), {}),
             ("_modified", "modified", ("s3://bucket/key",), {}),
             ("_tree", "tree", ("s3://bucket/dir",), {"recursion_limit": 1, "display_size": True}),
@@ -567,7 +566,8 @@ class TestAioS3FileSystem:
             if isinstance(value, (S3Metadata, S3ObjectVersion, S3MultipartUpload)):
                 cls = type(value)
                 properties = [n for n in dir(cls) if isinstance(getattr(cls, n), property)]
-                return cls, {n: getattr(value, n) for n in properties}
+                fields = [f.name for f in dataclasses.fields(value)]
+                return cls, {n: getattr(value, n) for n in [*properties, *fields]}
             return value
 
         outcomes = []
@@ -633,26 +633,97 @@ class TestAioS3FileSystem:
     async def test_coroutine_forms_leave_the_event_loop_running(
         self, method, sync_method, args, returns
     ):
-        # GH-1457: the coroutine forms of the methods that send their requests
-        # on the caller's thread run them in the threads of the filesystem, so
-        # that the event loop runs while they wait: here, until the loop
-        # releases the call. Each returns what its synchronous form returns,
-        # None for those that return nothing.
+        # GH-1457: the coroutine forms of the methods that run on the
+        # caller's thread run them in the threads of the filesystem, neither
+        # on the thread of the event loop nor in its default executor, which
+        # is held here, so that the loop runs while they wait: here, until
+        # the loop releases the call. Each returns what its synchronous form
+        # returns.
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
+        entered = threading.Event()
         released = threading.Event()
-        result = object()
+        result = object() if returns else None
+        blocker = loop.run_in_executor(None, released.wait, EVENT_TIMEOUT)
 
         def blocking(*_args, **_kwargs):
+            entered.set()
             if not released.wait(EVENT_TIMEOUT):
                 raise TimeoutError("the event loop did not run")
             return result
 
+        async def wait_entered():
+            while not entered.is_set():
+                await asyncio.sleep(0.01)
+
         setattr(fs._sync_fs, sync_method, blocking)
         task = asyncio.ensure_future(getattr(fs, method)(*args))
+        try:
+            await asyncio.wait_for(wait_entered(), EVENT_TIMEOUT)
+        finally:
+            released.set()
+            await blocker
+        assert await asyncio.wait_for(task, EVENT_TIMEOUT) is result
+        fs.close()
+
+    @pytest.mark.parametrize(
+        ("method", "args"),
+        [
+            ("metadata", ("s3://bucket/key",)),
+            ("getxattr", ("s3://bucket/key", "m")),
+            ("setxattr", ("s3://bucket/key",)),
+            ("get_tags", ("s3://bucket/key",)),
+            ("put_tags", ("s3://bucket/key", {"b": "2"})),
+            ("chmod", ("s3://bucket/key", "private")),
+            ("object_version_info", ("s3://bucket/key",)),
+            ("list_multipart_uploads", ("s3://bucket",)),
+            ("clear_multipart_uploads", ("s3://bucket",)),
+            ("checksum", ("s3://bucket/key",)),
+            ("created", ("s3://bucket/key",)),
+            ("modified", ("s3://bucket/key",)),
+            ("tree", ("s3://bucket/dir",)),
+            ("touch", ("s3://bucket/key",)),
+            ("rmdir", ("s3://bucket",)),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_sync_forms_run_inside_the_event_loop(self, method, args):
+        # GH-1457: the synchronous forms of these methods run on the caller's
+        # thread, not through fsspec's event loop, so that they also work on
+        # an asynchronous filesystem inside a running event loop, where
+        # fsspec's sync() raises.
+        fs = AioS3FileSystem(asynchronous=True, client=mock_client(), skip_instance_cache=True)
+        setattr(fs._sync_fs, method, mock.MagicMock())
+
+        getattr(fs, method)(*args)
+        getattr(fs._sync_fs, method).assert_called_once()
+        assert getattr(fs._sync_fs, method).call_args.args == args
+        fs.close()
+
+    @pytest.mark.asyncio
+    async def test_clear_multipart_uploads_cancelled_while_listing(self):
+        # GH-1457: cancelling _clear_multipart_uploads() while it lists the
+        # uploads aborts none of the uploads that the listing returns.
+        fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
+        entered = threading.Event()
+        released = threading.Event()
+
+        def list_uploads(path):
+            entered.set()
+            released.wait(EVENT_TIMEOUT)
+            return [mock.sentinel.upload]
+
+        fs._sync_fs.list_multipart_uploads = list_uploads
+        abort = fs._sync_fs.core.abort_multipart_upload = mock.MagicMock()
+        task = asyncio.ensure_future(fs._clear_multipart_uploads("s3://bucket"))
+        await asyncio.to_thread(entered.wait, EVENT_TIMEOUT)
+        task.cancel()
         await asyncio.sleep(0)
         released.set()
-        returned = await asyncio.wait_for(task, EVENT_TIMEOUT)
-        assert returned is (result if returns else None)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, EVENT_TIMEOUT)
+        abort.assert_not_called()
         fs.close()
 
     @pytest.mark.parametrize(
@@ -3841,7 +3912,7 @@ class TestAioS3FileSystem:
             max_workers=3,
             s3_additional_kwargs=s3_additional_kwargs,
             allow_bucket_creation=True,
-            allow_bucket_deletion=True,
+            allow_bucket_deletion=False,
             version_aware=True,
             requester_pays=True,
             skip_instance_cache=True,
@@ -3852,10 +3923,13 @@ class TestAioS3FileSystem:
         assert fs.s3_additional_kwargs is fs._sync_fs.s3_additional_kwargs
         assert fs.s3_additional_kwargs == {"ContentType": "text/csv"}
         assert fs.allow_bucket_creation is True
-        assert fs.allow_bucket_deletion is True
+        assert fs.allow_bucket_deletion is False
         assert fs.version_aware is True
         assert fs.request_kwargs["RequestPayer"] == "requester"
         assert fs.request_kwargs == fs._sync_fs.request_kwargs
+        # A copy, which does not change the parameters of the requests.
+        fs.request_kwargs.clear()
+        assert fs.request_kwargs["RequestPayer"] == "requester"
         for name in (
             "default_block_size",
             "default_cache_type",

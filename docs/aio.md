@@ -310,12 +310,15 @@ configured, as for `S3FileSystem`.
 `metadata()`, `getxattr()`, `setxattr()`, `get_tags()`, `put_tags()`, `chmod()`,
 `object_version_info()`, `list_multipart_uploads()`, `clear_multipart_uploads()`,
 `checksum()`, `created()`, `modified()`, `walk()`, `tree()`, `touch()`, and `rmdir()`
-send their requests from the caller's thread, as with `S3FileSystem`, so they also work
-inside a running event loop. Their coroutines, `_metadata()`, `_getxattr()`,
-`_setxattr()`, `_get_tags()`, `_put_tags()`, `_chmod()`, `_object_version_info()`,
-`_list_multipart_uploads()`, `_clear_multipart_uploads()`, `_checksum()`, `_created()`,
-`_modified()`, `_walk()`, `_tree()`, `_touch()`, and `_rmdir()`, run them in the threads
-of the filesystem.
+run on the caller's thread, as with `S3FileSystem`, instead of through fsspec's event
+loop, so they also work inside a running event loop; the parallel requests of a
+recursive `chmod()` and of `clear_multipart_uploads()` run in the request pool. The
+coroutines `_metadata()`, `_getxattr()`, `_setxattr()`, `_get_tags()`, `_put_tags()`,
+`_chmod()`, `_object_version_info()`, `_list_multipart_uploads()`,
+`_clear_multipart_uploads()`, `_checksum()`, `_created()`, `_modified()`, `_tree()`,
+`_touch()`, and `_rmdir()` run them in the threads of the filesystem, and so do the
+listings of the asynchronous generator `_walk()`. Cancelling
+`_clear_multipart_uploads()` during its listing aborts no upload.
 
 `default_block_size`, `default_cache_type`, `max_workers`, `s3_additional_kwargs`,
 `allow_bucket_creation`, `allow_bucket_deletion`, `version_aware`, and `request_kwargs`
@@ -375,8 +378,9 @@ order of the transfers raise `ValueError` before anything is transferred, as wit
 into it one after another, in order, with `n` = 1.
 A recursive `_put()` sends no request for the local directories. `_rm()` sends
 `batch_size` DeleteObjects requests at a time, `max_workers` by default and with `-1`; its
-`max_workers` argument is a deprecated alias of `batch_size`. The `batch_size` of the
-filesystem, fsspec's batch size of these coroutines, does not apply to `_rm()`.
+`max_workers` argument is a deprecated alias of `batch_size`. The `batch_size` argument
+of `AioS3FileSystem`, fsspec's batch size of these coroutines, does not apply to `_rm()`,
+which follows a `batch_size` in fsspec's configuration for the `s3` protocol.
 
 ### Executor strategy
 
