@@ -60,10 +60,10 @@ class S3ListingCache:
     The cache also keeps, outside the ``DirCache``, a weak reference to the
     current dictionary of lookups with parameters of each lookup key, and
     uses a dictionary from the ``DirCache`` only if it is that one. An
-    invalidation through this cache drops the reference, so once it returns,
-    a lookup does not return a result with parameters cached before it, even
-    if a lookup that was running stores the dictionary again. The cache adds
-    no lock. A lookup whose request was answered before a write can still
+    invalidation through this cache drops the reference, so a lookup that
+    starts after it returns does not return a result with parameters cached
+    before it, even if a lookup that was running stores the dictionary
+    again. The cache adds no lock. A lookup whose request was answered before a write can still
     cache its own answer after the invalidation, as in any filesystem cache.
 
     Attributes:
