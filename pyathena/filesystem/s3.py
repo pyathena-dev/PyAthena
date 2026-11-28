@@ -58,6 +58,9 @@ from pyathena.filesystem.s3_object import (
     S3ObjectType,
     S3ObjectVersion,
 )
+
+# Importable from here, as it was before the directory entries moved to S3Object.
+from pyathena.filesystem.s3_object import S3StorageClass as S3StorageClass
 from pyathena.filesystem.s3_path import S3Path
 from pyathena.filesystem.s3_path_pairing import S3PathPairing
 from pyathena.filesystem.s3_retry import (
