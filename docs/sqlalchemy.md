@@ -227,6 +227,10 @@ compression
 
   Description: Specifies the compression format.
 
+  When the file format or the row format is set, the value is stored in the `parquet.compression` table property for the `PARQUET` file format and in `orc.compress` for `ORC`, matched case-insensitively.
+  For any other file format, the row format `SERDE '<class>'` with the Parquet or ORC SerDe class, as reflection returns it, chooses the same properties, and other tables use `write.compression`.
+  It replaces a property of the same name given in a `tblproperties` dict.
+
   Value:
 
 - BZIP2
@@ -299,12 +303,22 @@ serdeproperties
   { "property_name": "property_value", "property_name": "property_value", ... }
   ```
 
+  Keys and values are the text to store.
+  They are quoted as string literals, so pass them without escaping, in the form that reflection returns.
+
   Example:
 
   ```python
-  Table("some_table", metadata, ..., awsathena_serdeproperties={
-      "separatorChar": ",", "escapeChar": "\\\\"
-  })
+  Table(
+      "some_table",
+      metadata,
+      ...,
+      awsathena_row_format="SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'",
+      awsathena_serdeproperties={
+          "separatorChar": ",",
+          "escapeChar": "\\",  # One backslash.
+      },
+  )
   ```
 
 tblproperties
@@ -317,6 +331,8 @@ tblproperties
   ```python
   { "property_name": "property_value", "property_name": "property_value", ... }
   ```
+
+  Keys and values are the text to store, as for `serdeproperties`.
 
   Example:
 
@@ -349,7 +365,13 @@ awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?s3_staging_dir=s3%
 ```
 
 `serdeproperties` and `tblproperties` must be converted to strings in the `'key'='value','key'='value'` format and url encoded.
-If single quotes are included, escape them with a backslash.
+These strings, and the `row_format` and `file_format` options, are inserted into the statement as given.
+Within a string literal, escape a backslash or a single quote with a backslash.
+Write `%` as `%%` under the default `pyformat` parameter style, which is `%25%25` when url encoded.
+Dicts given as `serdeproperties` or `tblproperties` in `connect_args` are quoted like the table options.
+
+Under the `pyformat` parameter style with the `no_parameters` execution option, the cursor does not format the statement.
+Write `%` once in these strings; a `%` in a dict key or value, a comment, or a location reaches Athena doubled.
 
 For example, if you configure a projection setting `'projection.enabled'='true','projection.dt.type'='date','projection.dt.range'='NOW-1YEARS,NOW','projection.dt.format'= 'yyyy-MM-dd'` in tblproperties, it would look like this
 

@@ -2007,7 +2007,7 @@ class TestSQLAlchemyAthena:
             awsathena_row_format="SERDE 'org.apache.hadoop.hive.serde2.OpenCSVSerde'",
             awsathena_serdeproperties={
                 "separatorChar": ",",
-                "escapeChar": "\\\\",
+                "escapeChar": "\\",
             },
         )
         ddl = CreateTable(table).compile(bind=conn)
@@ -2049,8 +2049,8 @@ class TestSQLAlchemyAthena:
             awsathena_row_format="SERDE 'com.amazonaws.glue.serde.GrokSerDe'",
             awsathena_serdeproperties={
                 "input.grokCustomPatterns": "POSTFIX_QUEUEID [0-9A-F]{7,12}",
-                "input.format": "%%{SYSLOGBASE} %%{POSTFIX_QUEUEID:queue_id}: "
-                "%%{GREEDYDATA:syslog_message}",
+                "input.format": "%{SYSLOGBASE} %{POSTFIX_QUEUEID:queue_id}: "
+                "%{GREEDYDATA:syslog_message}",
             },
             awsathena_file_format="INPUTFORMAT 'org.apache.hadoop.mapred.TextInputFormat' "
             "OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'",
@@ -2091,6 +2091,33 @@ OUTPUTFORMAT 'org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat'
             "%{GREEDYDATA:syslog_message}"
         )
         assert dialect_opts["tblproperties"] is not None
+
+    def test_create_table_property_values(self, engine):
+        engine, conn = engine
+        table_name = "test_create_table_property_values"
+        serde_properties = {
+            "field.delim": "\t",
+            "custom.quote": "it's",
+            "custom.pattern": "^\\d+%$",
+        }
+        table_properties = {"custom.note": "it's 100% \\ done"}
+        table = Table(
+            table_name,
+            MetaData(schema=ENV.schema),
+            Column("col", types.VARCHAR(10)),
+            awsathena_location=f"{ENV.s3_staging_dir}{ENV.schema}/{table_name}/",
+            awsathena_row_format="SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'",
+            awsathena_serdeproperties=dict(serde_properties),
+            awsathena_tblproperties=dict(table_properties),
+        )
+        table.create(bind=conn)
+        actual = Table(table_name, MetaData(schema=ENV.schema), autoload_with=conn)
+
+        # Reflection also returns properties that Athena adds.
+        actual_serde = actual.dialect_options["awsathena"]["serdeproperties"]
+        actual_table = actual.dialect_options["awsathena"]["tblproperties"]
+        assert {k: actual_serde.get(k) for k in serde_properties} == serde_properties
+        assert {k: actual_table.get(k) for k in table_properties} == table_properties
 
     def test_create_table_json(self, engine):
         engine, conn = engine
