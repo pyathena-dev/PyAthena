@@ -1421,14 +1421,19 @@ class TestSQLAlchemyAthena:
     def test_truediv_decimal(self, engine):
         engine, conn = engine
         decimal = types.DECIMAL(10, 2)
+        large = sqlalchemy.cast(literal_column("99999999.99"), types.Numeric(10, 2))
         row = conn.execute(
             select(
                 literal_column("5.52", decimal) / literal_column("2.4", decimal),
                 sqlalchemy.literal(Decimal("5.52")) / sqlalchemy.literal(Decimal("2.4")),
+                # SQLAlchemy gives the bind the column's NUMERIC(10, 2).
+                literal_column("5.52", types.Numeric(10, 2)) / Decimal("1.2345"),
+                # SQLAlchemy types the sum NUMERIC(10, 2); Athena types it decimal(11, 2).
+                (large + large) / literal_column("2", types.Integer()),
             )
         ).one()
-        # Rounding either operand to an integer would make each quotient 3.
-        assert tuple(row) == (Decimal("2.30"), Decimal("2.30"))
+        # Each quotient has the larger scale of its operands.
+        assert [str(value) for value in row] == ["2.30", "2.30", "4.4714", "99999999.99"]
 
     def test_char_length(self, engine):
         engine, conn = engine

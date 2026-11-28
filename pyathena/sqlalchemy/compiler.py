@@ -1019,10 +1019,12 @@ class AthenaStatementCompiler(SQLCompiler):
     def visit_truediv_binary(self, binary, operator, **kw):
         """Render true division with explicit Athena numeric coercions.
 
-        A FLOAT operand makes both operands DOUBLE. Otherwise, a DECIMAL operand
-        with a precision is cast to its own type, so it keeps its precision and
-        scale. A DECIMAL operand without a precision is left as is, since Athena
-        reads a bare ``DECIMAL`` as ``decimal(38, 0)``. An INTEGER divisor of an
+        A FLOAT operand makes both operands DOUBLE. Otherwise, in a division with
+        a DECIMAL operand, an operand typed DECIMAL with a precision is cast to
+        ``DECIMAL(38, scale)`` with its own scale, since Athena reads a decimal
+        literal as DOUBLE, and the widest precision keeps the cast from
+        overflowing. Bind parameters, whose formatted values keep their own
+        scale, and other operands are left as they are. An INTEGER divisor of an
         INTEGER dividend is made DOUBLE.
 
         Args:
@@ -1045,16 +1047,17 @@ class AthenaStatementCompiler(SQLCompiler):
             )
 
         if isinstance(left_type, types.Numeric) or isinstance(right_type, types.Numeric):
-            return " / ".join(
-                self.process(
-                    Cast(operand, operand.type)
-                    if isinstance(operand.type, types.Numeric)
-                    and operand.type.precision is not None
-                    else operand,
-                    **kw,
-                )
-                for operand in (binary.left, binary.right)
-            )
+            operands = []
+            for operand in (binary.left, binary.right):
+                operand_type = operand.type
+                if (
+                    isinstance(operand_type, types.Numeric)
+                    and operand_type.precision is not None
+                    and not isinstance(operand, BindParameter)
+                ):
+                    operand = Cast(operand, types.DECIMAL(38, operand_type.scale or 0))
+                operands.append(self.process(operand, **kw))
+            return " / ".join(operands)
 
         if isinstance(left_type, types.Integer) and isinstance(right_type, types.Integer):
             return (

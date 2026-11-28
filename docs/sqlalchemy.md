@@ -778,6 +778,29 @@ Athena `FLOAT` and `REAL` are the same 32-bit floating-point type, which keeps a
 Use `Double` for 64-bit values.
 `Float(precision)` does not change the Athena type.
 
+## Division
+
+The `/` operator performs true division.
+
+| Operand types | SQL |
+|---|---|
+| `Integer` and `Integer` | `a / CAST(b AS DOUBLE)` |
+| A `Float` operand | `CAST(a AS DOUBLE) / CAST(b AS DOUBLE)` |
+| Otherwise, a `Numeric` operand | `CAST(a AS DECIMAL(38, s)) / b` for `a` typed `Numeric(p, s)` |
+
+In a `Numeric` division, an operand typed `Numeric` or `DECIMAL` with a precision is cast to `DECIMAL(38, s)` with its own scale `s`.
+Bind parameters keep the scale of their values, such as `DECIMAL '1.2345'`, and other operands are left as they are.
+The quotient's scale is the larger scale of the two operands.
+A quotient of two operands with scale 0, such as `DECIMAL '5' / DECIMAL '2'`, is rounded to an integer.
+Athena reads a decimal literal such as `5.52` as `DOUBLE`, so an operand typed `Numeric` without a precision, such as `literal_column("5.52", Numeric())`, divides as `DOUBLE`.
+Use `cast()` to divide with a given precision and scale:
+
+```python
+from sqlalchemy import Numeric, cast, select
+
+statement = select(cast(orders.c.quantity, Numeric(10, 2)) / orders.c.boxes)
+```
+
 ## Bulk inserts
 
 An insert executed with a list of parameter sets runs as multi-row `INSERT INTO ... VALUES (...), (...)` statements of up to 100 rows each, instead of one query per row.
