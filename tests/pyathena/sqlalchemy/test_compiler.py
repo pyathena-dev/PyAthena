@@ -851,25 +851,32 @@ class TestAthenaDDLCompiler:
         assert drop.strip() == f"DROP TABLE {expected_table}"
 
     @pytest.mark.parametrize(
-        ("cursor_kwargs", "expected"),
-        [(None, "default"), ({"schema_name": "tenant"}, "tenant")],
-        ids=["default_database", "cursor_kwargs_schema"],
+        ("schema", "schema_translate_map", "cursor_kwargs", "expected_table", "expected_location"),
+        [
+            ("logical", {"logical": None}, None, "default.events", "default"),
+            ("logical", {"logical": None}, {"schema_name": "tenant"}, "tenant.events", "tenant"),
+            (None, None, {"schema_name": "tenant"}, "events", "tenant"),
+        ],
+        ids=["none_target_default", "none_target_cursor_kwargs", "unqualified_cursor_kwargs"],
     )
-    def test_ddl_schema_translate_map_none_names_cursor_database(self, cursor_kwargs, expected):
-        # The table name and its default location name the same database, even
-        # when the cursor's database differs from the URL database.
+    def test_ddl_default_schema_names_cursor_database(
+        self, schema, schema_translate_map, cursor_kwargs, expected_table, expected_location
+    ):
+        # A table mapped to None or left without a schema is created in the
+        # database of the engine's first connection, and its default location
+        # names that database even when it differs from the URL database.
         engine, calls = recording_engine(
             query="s3_staging_dir=s3%3A%2F%2Fbucket%2Fpath%2F", cursor_kwargs=cursor_kwargs
         )
-        table = Table("events", MetaData(schema="logical"), Column("id", Integer))
-        with engine.connect().execution_options(schema_translate_map={"logical": None}) as conn:
+        table = Table("events", MetaData(schema=schema), Column("id", Integer))
+        with engine.connect().execution_options(schema_translate_map=schema_translate_map) as conn:
             conn.execute(CreateTable(table))
             conn.execute(DropTable(table))
 
         (_, create, _), (_, drop, _) = calls
-        assert f"CREATE EXTERNAL TABLE {expected}.events (" in create
-        assert f"LOCATION 's3://bucket/path/{expected}/events/'" in create
-        assert drop.strip() == f"DROP TABLE {expected}.events"
+        assert f"CREATE EXTERNAL TABLE {expected_table} (" in create
+        assert f"LOCATION 's3://bucket/path/{expected_location}/events/'" in create
+        assert drop.strip() == f"DROP TABLE {expected_table}"
 
     def test_create_table_location_is_escaped(self):
         table = Table(

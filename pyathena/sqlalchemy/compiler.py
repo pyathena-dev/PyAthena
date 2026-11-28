@@ -1585,11 +1585,13 @@ class AthenaDDLCompiler(DDLCompiler):
         Without it, the location is ``<base>/<schema>/<table>/``, where the base
         is the ``location`` connection option or the S3 staging directory, and
         the schema is the table's schema after the ``schema_translate_map``.
-        A map value of ``None`` gives the dialect's default schema, which also
-        qualifies the table name.
-        For a table left without a schema, it is the database of the
-        statement's cursor, taken from ``cursor_kwargs`` over the connection.
-        Without a database, the cursor runs in Athena's ``default`` database.
+        For a table left without a schema, or mapped to ``None``, it is the
+        dialect's default schema: the database that the engine's first
+        connection runs unqualified statements in.
+        Before the engine connects, the dialect has no default schema, so a
+        table left without a schema uses the ``schema_name`` of the connection
+        options, taken from ``cursor_kwargs`` over the connection, or Athena's
+        ``default`` database.
 
         Args:
             table: The table being created.
@@ -1611,10 +1613,12 @@ class AthenaDDLCompiler(DDLCompiler):
             base_location += "/" if not base_location.endswith("/") else ""
             schema = table.schema
             if self.schema_translate_map and schema in self.schema_translate_map:
-                # SQLAlchemy renders a None target as the default schema name.
-                schema = self.schema_translate_map[schema] or self.dialect.default_schema_name
+                schema = self.schema_translate_map[schema]
+            # A table left without a schema, or mapped to None, is in the default
+            # schema; SQLAlchemy qualifies a None target with the same name.
             schema = (
                 schema
+                or self.dialect.default_schema_name
                 or self._get_cursor_option(
                     connect_opts, "schema_name", connect_opts.get("schema_name")
                 )
