@@ -26,6 +26,7 @@ Perform these passes sequentially yourself; do not report them as independent re
 | Simplicity and test quality | Can an existing helper or fixture express this more directly? Does a regression test exercise the failing path and assert observable behavior? Could it pass because the fake omits the real service behavior or because only the happy path runs? Does each added test protect a contract that no other test checks with the same kind of evidence, as [Choose what to test](../../../docs/testing.md#choose-what-to-test) requires? Does each removed test of a behavior that remains supported leave that behavior covered by a test that fails without it? |
 
 Trace shared helpers into their actual callers rather than assuming every backend uses the same path.
+For a change to, or a refactor of, a caller-visible rule shared by more than one path, confirm that a [differential check](../development-workflow/SKILL.md#check-shared-behavior-differentially) with its expected differences exists, and rerun it on the reviewed head; a missing check, a missing expected difference, or any other difference is a finding.
 Check dependency behavior against the versions resolved by the repository and the supported compatibility range when relevant.
 Treat potential findings as hypotheses: verify the named code and a concrete failure scenario before editing.
 Apply verified defects and useful simplifications within the task's scope, and run affected checks.
