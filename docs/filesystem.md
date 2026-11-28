@@ -602,9 +602,10 @@ file handle keeps returning consistent data even if the object is overwritten wh
 reading. The file path carries the pinned version as a `?versionId=` suffix, which
 `metadata()`, `getxattr()` and `url()` of the file also use. Explicit versions can
 always be read with the `?versionId=` suffix or the `version_id` argument.
-`open()`, `get_file()` and `cat_file()` also read the version that a `VersionId`
-parameter names when the suffix and `version_id` name none; `open()` and `get_file()`
-raise `ValueError` if it differs from them. Only a
+`open()` in read mode, `get_file()` and `cat_file()` also read the version that a
+non-empty `VersionId` parameter names when the suffix and `version_id` name none;
+`open()` and `get_file()` raise `ValueError` if they name another version, and writes
+drop the parameter, as their requests do not accept it. Only a
 `?versionId=` (or `?versionID=`, `?versionid=`, `?version_id=`) query at the end of a
 path is a version; any other `?` is part of the key. A path with a version is not a
 glob pattern: `copy()`, `mv()` and `get()` copy that version to a destination named

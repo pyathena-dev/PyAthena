@@ -4023,7 +4023,7 @@ class TestAioS3File:
             assert f.version_id == "v1"
             assert f.size == 4
         fs._sync_fs._info_entry.assert_called_once_with(
-            "bucket/key?versionId=v1", version_id="v1", **sse_c
+            S3Path("bucket", "key", "v1"), version_id="v1", **sse_c
         )
 
 

@@ -3173,8 +3173,8 @@ class S3FileSystem(AbstractFileSystem):
             lpath: The local destination, as given to :meth:`get` (see
                 :meth:`_local_root`).
             file_kwargs: The arguments of ``get_file()``, whose ``outfile``
-                and version (``version_id`` or ``VersionId``) the checks
-                follow.
+                and requested version (see :meth:`_is_directory_source`) the
+                checks follow.
             recursive: Whether to copy the directories with their contents.
             maxdepth: Maximum depth of a recursive copy.
             **kwargs: Passed to the expansion of the sources.
@@ -3194,13 +3194,13 @@ class S3FileSystem(AbstractFileSystem):
         if isinstance(pairing.path2, str):
             check_contained(pairing.path2, [lp for _, lp in pairs])
         if pairs and file_kwargs.get("outfile") is None:
-            self._check_local_destinations(
-                pairs, file_kwargs.get("version_id") or file_kwargs.get("VersionId")
-            )
+            self._check_local_destinations(pairs, file_kwargs)
         return pairs
 
     def _check_local_destinations(
-        self, pairs: list[tuple[str | S3Path, Any]], version_id: str | None = None
+        self,
+        pairs: list[tuple[str | S3Path, Any]],
+        file_kwargs: Mapping[str, Any] | None = None,
     ) -> None:
         """Check that no two downloads of a batch write the same local file.
 
@@ -3215,8 +3215,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             pairs: The S3 sources and their local paths or file-like objects.
-            version_id: The version ID that ``get_file()`` receives, as
-                ``version_id`` or a ``VersionId`` parameter.
+            file_kwargs: The arguments of ``get_file()``, whose requested
+                version (see :meth:`_is_directory_source`) the check follows.
 
         Raises:
             ValueError: If two downloads write the same file, or one creates
@@ -3257,12 +3257,14 @@ class S3FileSystem(AbstractFileSystem):
         for key, rpaths in sources.items():
             if len(rpaths) > 1 and (
                 key in streams
-                or not all(self._is_directory_source(rp, version_id) for rp in rpaths)
+                or not all(self._is_directory_source(rp, file_kwargs) for rp in rpaths)
             ):
                 raise ValueError("Cannot get several paths to the same destination.")
 
     def _is_directory_source(
-        self, rpath: str | os.PathLike[str] | S3Path, version_id: str | None = None
+        self,
+        rpath: str | os.PathLike[str] | S3Path,
+        file_kwargs: Mapping[str, Any] | None = None,
     ) -> bool:
         """Return whether ``get_file()`` creates a local directory for a source.
 
@@ -3272,14 +3274,23 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             rpath: The S3 source, or an ``S3Path``, as for ``get_file()``.
-            version_id: The version ID that ``get_file()`` receives, as
-                ``version_id`` or a ``VersionId`` parameter.
+            file_kwargs: The arguments of ``get_file()``, which ``open()``
+                receives: its ``version_id``, or a non-empty ``VersionId``
+                among the request parameters of the file (see
+                :meth:`S3FileTarget.resolve`), requests a version.
 
         Returns:
             True if the source has no version and is a directory.
         """
         path = rpath if isinstance(rpath, S3Path) else S3Path.parse(self._strip_protocol(rpath))
-        if version_id or path.version_id:
+        file_kwargs = file_kwargs or {}
+        # The request parameters of the file, as open() merges them.
+        params = {
+            **self.s3_additional_kwargs,
+            **(file_kwargs.get("s3_additional_kwargs") or {}),
+            **file_kwargs,
+        }
+        if path.version_id or file_kwargs.get("version_id") or params.get("VersionId"):
             return False
         return bool(self.isdir(rpath))
 
@@ -4246,9 +4257,7 @@ class S3FileSystem(AbstractFileSystem):
         s3_path = S3Path.of(rpath if isinstance(rpath, S3Path) else self._strip_protocol(rpath))
         if outfile is None and isfilelike(lpath):
             outfile = lpath
-        elif outfile is None and self._is_directory_source(
-            rpath, kwargs.get("version_id") or kwargs.get("VersionId")
-        ):
+        elif outfile is None and self._is_directory_source(rpath, kwargs):
             os.makedirs(lpath, exist_ok=True)
             return
 
@@ -5015,12 +5024,13 @@ class S3FileTarget:
             block_size: The block size of the file.
             version_id: The version ID to read. Must match the version ID in
                 the path if both are given. A version cannot be given, in
-                any form, for writing or appending.
+                either form, for writing or appending.
             size: The size of the object to read, if known.
             request_kwargs: The parameters of the S3 requests of the file. A
-                copy is kept. A non-empty ``VersionId`` among them is taken
-                as ``version_id`` and must match the other forms of the
-                version.
+                copy is kept. When reading, a non-empty ``VersionId`` among
+                them names the version to read, as ``version_id`` does, and
+                must match ``version_id`` and the version ID in the path if
+                they are given; the write requests drop it.
 
         Returns:
             The resolved target.
@@ -5053,24 +5063,30 @@ class S3FileTarget:
                 )
         elif path_version_id:
             version_id = path_version_id
-        if requested_version_id := kwargs.get("VersionId"):
-            # A VersionId parameter names the version as version_id does, so
-            # that the lookup sizes the version that the reads get. An empty
-            # one is sent as given, as cat_file() sends it.
+        requested_version_id = kwargs.get("VersionId")
+        if requested_version_id and "r" in mode:
+            # A VersionId parameter names the version to read as version_id
+            # does, so that the lookup sizes the version that the reads get.
+            # It stays among the parameters, which a reopened file is given
+            # again. The write requests do not accept it and drop it, and an
+            # empty one is sent as given, as cat_file() sends it.
             if version_id and requested_version_id != version_id:
                 raise ValueError(
                     f"The VersionId: {requested_version_id} specified in the parameters and "
                     f"the version_id: {version_id} specified in the argument or the path "
                     "do not match."
                 )
-            version_id = kwargs.pop("VersionId")
+            version_id = requested_version_id
         if version_id and "r" not in mode:
             raise ValueError("Cannot write to the file with the version specified.")
         if version_id and not path_version_id:
             # Carry the version in the path, as with the ?versionId= suffix,
             # so that a reopened (e.g., unpickled) file reads the same version.
             path = f"{path}?versionId={version_id}"
-            target = s3_path.with_version_id(version_id) if isinstance(target, S3Path) else path
+        if version_id:
+            # A version is looked up by its bucket, key and version, also one
+            # that ends in a slash, which the lookup of a path string drops.
+            target = s3_path.with_version_id(version_id)
         if "r" not in mode and not (
             fs.core.MULTIPART_UPLOAD_MIN_PART_SIZE
             <= block_size
@@ -5097,10 +5113,11 @@ class S3FileTarget:
             if info.get("type") == S3ObjectType.S3_OBJECT_TYPE_DIRECTORY:
                 # A prefix has no object to read.
                 raise FileNotFoundError(path)
-            if fs.version_aware and not version_id:
+            if fs.version_aware and not version_id and requested_version_id is None:
                 # Pin the version observed at open time so that reads are
                 # consistent even if the object is overwritten. info() heads
-                # the object when the cached entry carries no version.
+                # the object when the cached entry carries no version. An
+                # empty VersionId parameter is sent instead, as given.
                 version_id = info.get("version_id")
                 if version_id:
                     # Carried in the path as an explicit version is, so that
@@ -5217,9 +5234,9 @@ class S3File(AbstractBufferedFile):
                 (see :meth:`S3FileTarget.resolve`).
             mode: The file mode: ``rb``, ``wb``, ``ab``, or ``xb``.
             version_id: The version ID to read. Must match the version ID in
-                the path, and a ``VersionId`` parameter, if they are given. A
-                version cannot be given, in any form, for writing or
-                appending.
+                the path, and a non-empty ``VersionId`` parameter, if they are
+                given. A version cannot be given, as an argument or in the
+                path, for writing or appending.
             max_workers: The number of parallel requests of the file: range
                 reads, part copies, and part uploads. A write keeps at most
                 ``max_workers`` parts, including the part copies of an append,
