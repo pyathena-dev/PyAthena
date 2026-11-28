@@ -5903,13 +5903,38 @@ class TestS3FileSystem:
             ("s3://bucket/key", {}, {"VersionId": "v1"}),
         ],
     )
-    @pytest.mark.parametrize("method", ["get_file", "get"])
-    def test_get_file_version_of_a_prefix(self, tmp_path, rpath, kwargs, fs_params, method):
+    def test_get_file_version_of_a_prefix(self, tmp_path, rpath, kwargs, fs_params):
         # GH-1437: a requested version is downloaded, also one that a
         # VersionId parameter of the file names, as open() reads it, when the
         # latest name is a prefix. get_file() created a local directory.
-        # GH-1467: get() of the source downloads it too. It left the source
-        # out as a directory, and downloaded nothing.
+        fs = self._make_version_of_a_prefix_fs(fs_params)
+        lpath = tmp_path / "key"
+
+        fs.get_file(rpath, str(lpath), **kwargs)
+        assert lpath.read_bytes() == b"data"
+
+    @pytest.mark.parametrize(
+        ("kwargs", "fs_params"),
+        [
+            ({"version_id": "v1"}, {}),
+            ({"VersionId": "v1"}, {}),
+            ({"s3_additional_kwargs": {"VersionId": "v1"}}, {}),
+            ({}, {"VersionId": "v1"}),
+        ],
+    )
+    def test_get_version_of_a_prefix(self, tmp_path, kwargs, fs_params):
+        # GH-1467: get() of a source whose version an argument requests
+        # downloads it, as get_file() does, when the latest name is a prefix.
+        # It left the source out as a directory, and downloaded nothing.
+        fs = self._make_version_of_a_prefix_fs(fs_params)
+        lpath = tmp_path / "key"
+
+        fs.get("s3://bucket/key", str(lpath), **kwargs)
+        assert lpath.read_bytes() == b"data"
+
+    def _make_version_of_a_prefix_fs(self, fs_params):
+        # A filesystem whose s3://bucket/key is the 4-byte object b"data" at
+        # any requested version, and a directory at the latest name.
         fs, _ = self._make_object_fs(b"data")
         fs.s3_additional_kwargs = fs_params
         version = self._file_object("key")
@@ -5921,10 +5946,7 @@ class TestS3FileSystem:
             return S3FileSystem._directory_object("bucket", "key")
 
         fs._info_entry.side_effect = info_entry
-        lpath = tmp_path / "key"
-
-        getattr(fs, method)(rpath, str(lpath), **kwargs)
-        assert lpath.read_bytes() == b"data"
+        return fs
 
     def test_get_file_file_like(self, tmp_path):
         # GH-974: a file-like lpath used to raise TypeError, and outfile was
