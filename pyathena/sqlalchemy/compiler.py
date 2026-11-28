@@ -998,7 +998,7 @@ class AthenaStatementCompiler(SQLCompiler):
         """Render Athena ``filter()`` with a lambda expression.
 
         A string second argument, such as ``"x -> x > 1"``, is the lambda itself
-        and is rendered unquoted when the statement runs, so pass only trusted text.
+        and is rendered unquoted, so pass only trusted text.
 
         Args:
             fn: The function expression.
