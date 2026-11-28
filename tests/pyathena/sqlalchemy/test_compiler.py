@@ -289,6 +289,12 @@ class TestAthenaStatementCompiler:
                 "SELECT CAST(5.52 AS DECIMAL(38, 2)) / 2 AS anon_1",
             ),
             (
+                # SQLAlchemy types the product NUMERIC(10, 2); Athena types it decimal(20, 4).
+                (column("x", type_=Numeric(10, 2)) * column("x", type_=Numeric(10, 2)))
+                / column("y", type_=Numeric(10, 4)),
+                "SELECT (x * x) / y AS anon_1",
+            ),
+            (
                 literal_column("5.52", type_=Float()) / literal_column("2.4", type_=Float()),
                 "SELECT CAST(5.52 AS DOUBLE) / CAST(2.4 AS DOUBLE) AS anon_1",
             ),

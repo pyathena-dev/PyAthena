@@ -21,6 +21,7 @@ from sqlalchemy.sql.elements import (
     BindParameter,
     Cast,
     CollectionAggregate,
+    ColumnClause,
     Null,
     Slice,
     TextClause,
@@ -1020,12 +1021,10 @@ class AthenaStatementCompiler(SQLCompiler):
         """Render true division with explicit Athena numeric coercions.
 
         A FLOAT operand makes both operands DOUBLE.
-        Otherwise, in a division with a DECIMAL operand, each operand typed DECIMAL
-        with a precision is cast to ``DECIMAL(38, scale)`` with its own scale.
-        The cast keeps a decimal literal from being read as DOUBLE, and the widest
-        precision keeps it from overflowing.
-        Bind parameters, whose formatted values keep their own scale, and other
-        operands are left as they are.
+        Otherwise, in a division with a DECIMAL operand, Athena types the operands.
+        Only a ``literal_column()`` typed DECIMAL with a precision is cast, to
+        ``DECIMAL(38, scale)`` with its own scale, since Athena reads a decimal
+        literal as DOUBLE; the widest precision keeps the cast from overflowing.
         An INTEGER divisor of an INTEGER dividend is made DOUBLE.
 
         Args:
@@ -1050,7 +1049,7 @@ class AthenaStatementCompiler(SQLCompiler):
         if isinstance(left_type, types.Numeric) or isinstance(right_type, types.Numeric):
 
             def decimal_operand(operand):
-                """Render an operand, cast to ``DECIMAL(38, scale)`` if it has a precision.
+                """Render an operand, casting a DECIMAL literal column to ``DECIMAL(38, scale)``.
 
                 Args:
                     operand: The left or right operand of the division.
@@ -1060,9 +1059,10 @@ class AthenaStatementCompiler(SQLCompiler):
                 """
                 operand_type = operand.type
                 if (
-                    isinstance(operand_type, types.Numeric)
+                    isinstance(operand, ColumnClause)
+                    and operand.is_literal
+                    and isinstance(operand_type, types.Numeric)
                     and operand_type.precision is not None
-                    and not isinstance(operand, BindParameter)
                 ):
                     operand = Cast(operand, types.DECIMAL(38, operand_type.scale or 0))
                 return self.process(operand, **kw)
