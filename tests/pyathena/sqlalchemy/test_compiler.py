@@ -24,6 +24,7 @@ from sqlalchemy import (
     bindparam,
     cast,
     column,
+    create_engine,
     exc,
     func,
     select,
@@ -920,6 +921,123 @@ class TestAthenaDDLCompiler:
             awsathena_tblproperties={"table_type": "ICEBERG"},
         )
         ddl = str(CreateTable(table).compile(dialect=dialect))
+        assert "LOCATION" not in ddl
+
+    @pytest.mark.parametrize(
+        ("query", "connect_args", "env_s3_staging_dir", "schema", "expected"),
+        [
+            ("location=s3://bucket/base", {}, None, None, "s3://bucket/base/shared/events/"),
+            (
+                "s3_staging_dir=s3://bucket/staging",
+                {},
+                "s3://bucket/env/",
+                None,
+                "s3://bucket/staging/shared/events/",
+            ),
+            (
+                "location=s3://bucket/base&s3_staging_dir=s3://bucket/staging/",
+                {},
+                None,
+                None,
+                "s3://bucket/base/shared/events/",
+            ),
+            ("work_group=wg", {}, "s3://bucket/env", None, "s3://bucket/env/shared/events/"),
+            (
+                "location=s3://bucket/base/",
+                {"cursor_kwargs": {"schema_name": "tenant"}},
+                None,
+                None,
+                "s3://bucket/base/tenant/events/",
+            ),
+            (
+                "location=s3://bucket/base/",
+                {"cursor_kwargs": {"schema_name": "tenant"}},
+                None,
+                "other",
+                "s3://bucket/base/other/events/",
+            ),
+            (
+                "location=s3://bucket/base/",
+                {"schema_name": "tenant"},
+                None,
+                None,
+                "s3://bucket/base/tenant/events/",
+            ),
+            (
+                "location=s3://bucket/base/",
+                {"cursor_kwargs": {"schema_name": None}},
+                None,
+                None,
+                "s3://bucket/base/default/events/",
+            ),
+            (
+                "s3_staging_dir=s3://bucket/staging/",
+                {"cursor_kwargs": {"s3_staging_dir": "s3://bucket/cursor/"}},
+                "s3://bucket/env/",
+                None,
+                "s3://bucket/cursor/shared/events/",
+            ),
+        ],
+    )
+    def test_create_table_default_location(
+        self, monkeypatch, query, connect_args, env_s3_staging_dir, schema, expected
+    ):
+        # Without awsathena_location, the location is <base>/<schema>/<table>/ in the
+        # database that the statement's cursor runs in.
+        if env_s3_staging_dir is None:
+            monkeypatch.delenv("AWS_ATHENA_S3_STAGING_DIR", raising=False)
+        else:
+            monkeypatch.setenv("AWS_ATHENA_S3_STAGING_DIR", env_s3_staging_dir)
+        engine = create_engine(
+            f"awsathena+rest://athena.us-west-2.amazonaws.com/shared?{query}",
+            connect_args=connect_args,
+        )
+        table = Table("events", MetaData(schema=schema), Column("id", Integer))
+        ddl = str(CreateTable(table).compile(engine))
+        assert f"LOCATION '{expected}'" in ddl
+
+    @pytest.mark.parametrize(
+        ("query", "connect_args", "env_s3_staging_dir"),
+        [
+            ("work_group=wg", {}, None),
+            ("work_group=wg", {"s3_staging_dir": ""}, "s3://bucket/env/"),
+            (
+                "work_group=wg&s3_staging_dir=s3://bucket/staging/",
+                {"cursor_kwargs": {"s3_staging_dir": None}},
+                None,
+            ),
+        ],
+    )
+    def test_create_table_without_base_location_raises(
+        self, monkeypatch, query, connect_args, env_s3_staging_dir
+    ):
+        if env_s3_staging_dir is None:
+            monkeypatch.delenv("AWS_ATHENA_S3_STAGING_DIR", raising=False)
+        else:
+            monkeypatch.setenv("AWS_ATHENA_S3_STAGING_DIR", env_s3_staging_dir)
+        engine = create_engine(
+            f"awsathena+rest://athena.us-west-2.amazonaws.com/shared?{query}",
+            connect_args=connect_args,
+        )
+        table = Table("events", MetaData(), Column("id", Integer))
+        with pytest.raises(exc.CompileError):
+            CreateTable(table).compile(engine)
+
+    def test_create_table_s3tables_catalog_from_cursor_kwargs(self):
+        # The cursor's catalog_name, not the connection's, decides the catalog the
+        # statement runs in.
+        engine = create_engine(
+            "awsathena+rest://athena.us-west-2.amazonaws.com/pyathena"
+            "?s3_staging_dir=s3://bucket/staging/&catalog_name=AwsDataCatalog",
+            connect_args={"cursor_kwargs": {"catalog_name": "s3tablescatalog/bucket"}},
+        )
+        table = Table(
+            "tbl",
+            MetaData(schema="pyathena"),
+            Column("id", Integer),
+            awsathena_tblproperties={"table_type": "ICEBERG"},
+        )
+        ddl = str(CreateTable(table).compile(engine))
         assert "LOCATION" not in ddl
 
     @pytest.mark.parametrize(

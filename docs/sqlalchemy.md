@@ -208,6 +208,11 @@ location
 
   Description: Specifies the location of the underlying data in the Amazon S3 from which the table is created.
 
+  Without this option, the location is `<base>/<schema>/<table>/`.
+  `<base>` is the `location` connection option, or the S3 staging directory of the statement's cursor (`s3_staging_dir`) when that option is not set.
+  `<schema>` is the table's schema; for a table without one, it is the cursor's `schema_name` (which `cursor_kwargs` can override), or `default` when that is not set.
+  Except for [Amazon S3 Tables](#amazon-s3-tables), which take no location, compiling `CREATE TABLE` raises `CompileError` when neither `location` nor an S3 staging directory is available.
+
   value: s3://bucket/path/to/
 
   Example:
@@ -444,6 +449,8 @@ If you want to limit the column options to specific table names only, specify th
 awsathena+rest://:@athena.us-west-2.amazonaws.com:443/default?partition=table1.column1%2Ctable1.column2&cluster=table2.column1%2Ctable2.column2&...
 ```
 
+(amazon-s3-tables)=
+
 ## Amazon S3 Tables
 
 [Amazon S3 Tables](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-tables.html) are Iceberg-backed
@@ -452,9 +459,9 @@ Athena registers it as a catalog named `s3tablescatalog/<table-bucket>`, with th
 database.
 
 Athena does not accept a three-part `catalog.namespace.table` identifier in DDL, so select the catalog on the
-**connection** with `catalog_name` and use the namespace as the table `schema`. Because S3 Tables use managed
-storage, the dialect omits the `LOCATION`, `ROW FORMAT`, and `STORED AS` clauses automatically. Tables must
-declare `awsathena_tblproperties={"table_type": "ICEBERG"}` (S3 Tables support only Iceberg), and
+**connection** with `catalog_name` (or `cursor_kwargs`) and use the namespace as the table `schema`. Because S3
+Tables use managed storage, the dialect omits the `LOCATION`, `ROW FORMAT`, and `STORED AS` clauses automatically.
+Tables must declare `awsathena_tblproperties={"table_type": "ICEBERG"}` (S3 Tables support only Iceberg), and
 `awsathena_location` must not be set — the dialect raises a compile-time error otherwise.
 
 ```python
