@@ -645,7 +645,7 @@ class TestAioS3FileSystem:
                 ("s3://bucket/dir",),
                 {
                     "recursion_limit": 1,
-                    "max_display": 1,
+                    "max_display": 3,
                     "display_size": True,
                     "prefix": ">",
                     "is_last": False,
@@ -669,6 +669,7 @@ class TestAioS3FileSystem:
         result = object() if returns else None
         entered = threading.Event()
         released = threading.Event()
+        ended = threading.Event()
         calls = []
 
         def delegate(*call_args, **call_kwargs):
@@ -676,6 +677,7 @@ class TestAioS3FileSystem:
             entered.set()
             if not released.wait(EVENT_TIMEOUT):
                 raise TimeoutError("the event loop did not release the call")
+            ended.set()
             return result
 
         async def wait_entered():
@@ -691,6 +693,8 @@ class TestAioS3FileSystem:
         finally:
             released.set()
         assert await asyncio.wait_for(task, EVENT_TIMEOUT) is result
+        # The coroutine returned after the call ended.
+        assert ended.is_set()
         [(call_args, call_kwargs, in_pool)] = calls
         assert call_args == args
         assert call_kwargs.items() >= kwargs.items()
