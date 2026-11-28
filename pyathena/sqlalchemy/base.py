@@ -397,8 +397,9 @@ class AthenaDialect(DefaultDialect):
     @override
     def _get_default_schema_name(self, connection: Connection) -> str:
         # SQLAlchemy calls this once per engine, on its first connection. The
-        # default schema is the database that unqualified statements run in and
-        # reflection without a schema reads; no query is needed to find it.
+        # default schema is the database that unqualified statements and
+        # reflection without a schema use on that connection; no query is needed
+        # to find it.
         return self._reflection_schema(self._raw_connection(connection), None)
 
     @staticmethod

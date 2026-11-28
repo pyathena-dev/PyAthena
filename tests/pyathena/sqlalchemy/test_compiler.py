@@ -783,7 +783,8 @@ class TestAthenaStatementCompiler:
         ids=["default_database", "cursor_kwargs_schema"],
     )
     def test_schema_translate_map_none_names_cursor_database(self, cursor_kwargs, expected):
-        # A None target names the database that the statement's cursor runs in.
+        # A None target names the database that the engine's first connection runs
+        # unqualified statements in.
         engine, calls = recording_engine(cursor_kwargs=cursor_kwargs)
         table = Table("events", MetaData(schema="logical"), Column("id", Integer))
         with engine.connect().execution_options(schema_translate_map={"logical": None}) as conn:
