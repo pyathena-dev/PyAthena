@@ -3500,7 +3500,8 @@ class TestAioS3FileSystem:
         # version_id argument requests is downloaded when its name is a
         # prefix. It was left out as a directory.
         fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
-        serve_s3_keys(fs._sync_fs, {"key/child"})
+        # The latest name is a directory.
+        fs._sync_fs.isdir = mock.MagicMock(return_value=True)
         fs._get_file = mock.AsyncMock()
 
         await fs._get("s3://bucket/key", str(tmp_path / "key"), version_id="v1")

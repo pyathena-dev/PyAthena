@@ -3620,23 +3620,32 @@ class TestS3FileSystem:
         fs.get_file.assert_not_called()
 
     @pytest.mark.parametrize(
-        ("kwargs", "sources"),
+        ("pattern", "keys", "kwargs", "sources"),
         [
             # A prefix that a glob matches is left out as a directory.
-            ({}, []),
+            ("s3://bucket/k*", {"key/child"}, {}, []),
             # GH-1467: with a requested version, it is handed to get_file(),
             # which downloads the version of the object of that name. It was
             # left out.
-            ({"version_id": "v1"}, ["bucket/key"]),
+            ("s3://bucket/k*", {"key/child"}, {"version_id": "v1"}, [("bucket/key", "v1")]),
+            # Also a listed key that ends in a slash, such as a folder marker.
+            (
+                "s3://bucket/**",
+                {"d/"},
+                {"withdirs": False, "version_id": "v1"},
+                [("bucket/d/", "v1")],
+            ),
         ],
     )
-    def test_get_glob_version_of_a_prefix(self, tmp_path, kwargs, sources):
+    def test_get_glob_version_of_a_prefix(self, tmp_path, pattern, keys, kwargs, sources):
         fs = self._make_fs()
-        self._serve_keys(fs, {"key/child"})
+        self._serve_keys(fs, keys)
         fs.get_file = mock.MagicMock()
 
-        fs.get("s3://bucket/k*", f"{tmp_path}/out/", **kwargs)
-        assert [str(c.args[0]) for c in fs.get_file.call_args_list] == sources
+        fs.get(pattern, f"{tmp_path}/out/", **kwargs)
+        assert [
+            (str(c.args[0]), c.kwargs.get("version_id")) for c in fs.get_file.call_args_list
+        ] == sources
 
     def test_get_root_is_left_out(self, tmp_path):
         # The root path is a directory, which get() leaves out without a
@@ -5943,14 +5952,15 @@ class TestS3FileSystem:
 
     def _make_version_of_a_prefix_fs(self, fs_params):
         # A filesystem whose s3://bucket/key is the 4-byte object b"data" at
-        # any requested version, and a directory at the latest name.
+        # the version v1, and a directory at the latest name and at any other
+        # version.
         fs, _ = self._make_object_fs(b"data")
         fs.s3_additional_kwargs = fs_params
         version = self._file_object("key")
         version.size = 4
 
         def info_entry(path, version_id=None, **_kwargs):
-            if version_id or S3Path.of(path).version_id:
+            if (version_id or S3Path.of(path).version_id) == "v1":
                 return version
             return S3FileSystem._directory_object("bucket", "key")
 
