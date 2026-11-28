@@ -307,6 +307,20 @@ blocks them:
 `max_workers` defaults to the `max_pool_connections` of the S3 client, 10 unless
 configured, as for `S3FileSystem`.
 
+`metadata()`, `getxattr()`, `setxattr()`, `get_tags()`, `put_tags()`, `chmod()`,
+`object_version_info()`, `list_multipart_uploads()`, `clear_multipart_uploads()`,
+`checksum()`, `created()`, `modified()`, `walk()`, `tree()`, `touch()`, and `rmdir()`
+send their requests from the caller's thread, as with `S3FileSystem`, so they also work
+inside a running event loop. Their coroutines, `_metadata()`, `_getxattr()`,
+`_setxattr()`, `_get_tags()`, `_put_tags()`, `_chmod()`, `_object_version_info()`,
+`_list_multipart_uploads()`, `_clear_multipart_uploads()`, `_checksum()`, `_created()`,
+`_modified()`, `_walk()`, `_tree()`, `_touch()`, and `_rmdir()`, run them in the threads
+of the filesystem.
+
+`default_block_size`, `default_cache_type`, `max_workers`, `s3_additional_kwargs`,
+`allow_bucket_creation`, `allow_bucket_deletion`, `version_aware`, and `request_kwargs`
+are read-only attributes that return those of the internal `S3FileSystem`.
+
 The pools create threads as the calls need them, and each call runs with the caller's
 context variables, as with `asyncio.to_thread()`.
 In a forked child process, a pool creates new threads.
@@ -361,7 +375,8 @@ order of the transfers raise `ValueError` before anything is transferred, as wit
 into it one after another, in order, with `n` = 1.
 A recursive `_put()` sends no request for the local directories. `_rm()` sends
 `batch_size` DeleteObjects requests at a time, `max_workers` by default and with `-1`; its
-`max_workers` argument is a deprecated alias of `batch_size`.
+`max_workers` argument is a deprecated alias of `batch_size`. The `batch_size` of the
+filesystem, fsspec's batch size of these coroutines, does not apply to `_rm()`.
 
 ### Executor strategy
 

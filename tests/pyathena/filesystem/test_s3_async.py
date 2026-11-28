@@ -123,6 +123,10 @@ def release_blocked_waits():
     release()
 
 
+# The coroutine forms that return None, as their synchronous forms do.
+_NO_RESULT_COROUTINES = frozenset(["_setxattr", "_put_tags", "_chmod", "_clear_multipart_uploads"])
+
+
 @pytest.mark.usefixtures("release_blocked_waits")
 class TestAioS3FileSystem:
     @staticmethod
@@ -504,6 +508,40 @@ class TestAioS3FileSystem:
                 ("s3://bucket/key",),
                 {"expiration": 100, "client_method": "put_object"},
             ),
+            # GH-1457: the coroutine forms of the methods above.
+            (
+                "_metadata",
+                "metadata",
+                ("s3://bucket/key?versionId=v1",),
+                {"ExpectedBucketOwner": "111122223333"},
+            ),
+            ("_get_tags", "get_tags", ("s3://bucket/key?versionId=v1",), {}),
+            ("_put_tags", "put_tags", ("s3://bucket/key", {"b": "2"}), {"mode": "m"}),
+            ("_chmod", "chmod", ("s3://bucket/dir", "private"), {"recursive": True}),
+            (
+                "_object_version_info",
+                "object_version_info",
+                ("s3://bucket/key",),
+                {"delete_markers": True},
+            ),
+            (
+                "_getxattr",
+                "getxattr",
+                ("s3://bucket/key", "m"),
+                {"ExpectedBucketOwner": "111122223333"},
+            ),
+            (
+                "_setxattr",
+                "setxattr",
+                ("s3://bucket/key",),
+                {"copy_kwargs": {"ContentType": "text/csv"}, "m": "2"},
+            ),
+            ("_list_multipart_uploads", "list_multipart_uploads", ("s3://bucket/dir",), {}),
+            ("_clear_multipart_uploads", "clear_multipart_uploads", ("s3://bucket/dir",), {}),
+            ("_checksum", "checksum", ("s3://bucket/key",), {"refresh": True}),
+            ("_created", "created", ("s3://bucket/key",), {}),
+            ("_modified", "modified", ("s3://bucket/key",), {}),
+            ("_tree", "tree", ("s3://bucket/dir",), {"recursion_limit": 1, "display_size": True}),
         ],
     )
     @pytest.mark.asyncio
@@ -572,6 +610,50 @@ class TestAioS3FileSystem:
             )
         assert outcomes[0][1], "no request was sent"
         assert outcomes[1] == outcomes[0]
+
+    @pytest.mark.parametrize(
+        ("method", "sync_method", "args", "returns"),
+        [
+            ("_metadata", "metadata", ("s3://bucket/key",), True),
+            ("_getxattr", "getxattr", ("s3://bucket/key", "m"), True),
+            ("_setxattr", "setxattr", ("s3://bucket/key",), False),
+            ("_get_tags", "get_tags", ("s3://bucket/key",), True),
+            ("_put_tags", "put_tags", ("s3://bucket/key", {"b": "2"}), False),
+            ("_chmod", "chmod", ("s3://bucket/key", "private"), False),
+            ("_object_version_info", "object_version_info", ("s3://bucket/key",), True),
+            ("_list_multipart_uploads", "list_multipart_uploads", ("s3://bucket",), True),
+            ("_clear_multipart_uploads", "clear_multipart_uploads", ("s3://bucket",), False),
+            ("_checksum", "checksum", ("s3://bucket/key",), True),
+            ("_created", "created", ("s3://bucket/key",), True),
+            ("_modified", "modified", ("s3://bucket/key",), True),
+            ("_tree", "tree", ("s3://bucket/dir",), True),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_coroutine_forms_leave_the_event_loop_running(
+        self, method, sync_method, args, returns
+    ):
+        # GH-1457: the coroutine forms of the methods that send their requests
+        # on the caller's thread run them in the threads of the filesystem, so
+        # that the event loop runs while they wait: here, until the loop
+        # releases the call. Each returns what its synchronous form returns,
+        # None for those that return nothing.
+        fs = AioS3FileSystem(client=mock_client(), skip_instance_cache=True)
+        released = threading.Event()
+        result = object()
+
+        def blocking(*_args, **_kwargs):
+            if not released.wait(EVENT_TIMEOUT):
+                raise TimeoutError("the event loop did not run")
+            return result
+
+        setattr(fs._sync_fs, sync_method, blocking)
+        task = asyncio.ensure_future(getattr(fs, method)(*args))
+        await asyncio.sleep(0)
+        released.set()
+        returned = await asyncio.wait_for(task, EVENT_TIMEOUT)
+        assert returned is (result if returns else None)
+        fs.close()
 
     @pytest.mark.parametrize(
         ("call", "transaction"),
@@ -3745,6 +3827,48 @@ class TestAioS3FileSystem:
             AioS3FileSystem(connection=connection, skip_instance_cache=True, **kwargs)
         # Checked before the client of the connection is used.
         s3_client.assert_not_called()
+
+    def test_attributes_of_the_internal_filesystem(self):
+        # GH-1457: the s3fs attributes of S3FileSystem are those of the
+        # internal filesystem, which reads them, and cannot be assigned.
+        s3_additional_kwargs = {"ContentType": "text/csv"}
+        fs = AioS3FileSystem(
+            key="dummy",
+            secret="dummy",
+            region_name="us-east-1",
+            default_block_size=8 * 2**20,
+            default_cache_type="none",
+            max_workers=3,
+            s3_additional_kwargs=s3_additional_kwargs,
+            allow_bucket_creation=True,
+            allow_bucket_deletion=True,
+            version_aware=True,
+            requester_pays=True,
+            skip_instance_cache=True,
+        )
+        assert fs.default_block_size == 8 * 2**20
+        assert fs.default_cache_type == "none"
+        assert fs.max_workers == 3
+        assert fs.s3_additional_kwargs is fs._sync_fs.s3_additional_kwargs
+        assert fs.s3_additional_kwargs == {"ContentType": "text/csv"}
+        assert fs.allow_bucket_creation is True
+        assert fs.allow_bucket_deletion is True
+        assert fs.version_aware is True
+        assert fs.request_kwargs["RequestPayer"] == "requester"
+        assert fs.request_kwargs == fs._sync_fs.request_kwargs
+        for name in (
+            "default_block_size",
+            "default_cache_type",
+            "max_workers",
+            "s3_additional_kwargs",
+            "allow_bucket_creation",
+            "allow_bucket_deletion",
+            "version_aware",
+            "request_kwargs",
+        ):
+            with pytest.raises(AttributeError):
+                setattr(fs, name, getattr(fs, name))
+        fs.close()
 
     def test_pickle(self):
         # GH-1339: a filesystem with a given client raises TypeError, which names
