@@ -3173,7 +3173,8 @@ class S3FileSystem(AbstractFileSystem):
             lpath: The local destination, as given to :meth:`get` (see
                 :meth:`_local_root`).
             file_kwargs: The arguments of ``get_file()``, whose ``outfile``
-                and ``version_id`` the checks follow.
+                and version (``version_id`` or ``VersionId``) the checks
+                follow.
             recursive: Whether to copy the directories with their contents.
             maxdepth: Maximum depth of a recursive copy.
             **kwargs: Passed to the expansion of the sources.
@@ -3193,7 +3194,9 @@ class S3FileSystem(AbstractFileSystem):
         if isinstance(pairing.path2, str):
             check_contained(pairing.path2, [lp for _, lp in pairs])
         if pairs and file_kwargs.get("outfile") is None:
-            self._check_local_destinations(pairs, file_kwargs.get("version_id"))
+            self._check_local_destinations(
+                pairs, file_kwargs.get("version_id") or file_kwargs.get("VersionId")
+            )
         return pairs
 
     def _check_local_destinations(
@@ -3212,7 +3215,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             pairs: The S3 sources and their local paths or file-like objects.
-            version_id: The version ID that ``get_file()`` receives.
+            version_id: The version ID that ``get_file()`` receives, as
+                ``version_id`` or a ``VersionId`` parameter.
 
         Raises:
             ValueError: If two downloads write the same file, or one creates
@@ -3268,7 +3272,8 @@ class S3FileSystem(AbstractFileSystem):
 
         Args:
             rpath: The S3 source, or an ``S3Path``, as for ``get_file()``.
-            version_id: The version ID that ``get_file()`` receives.
+            version_id: The version ID that ``get_file()`` receives, as
+                ``version_id`` or a ``VersionId`` parameter.
 
         Returns:
             True if the source has no version and is a directory.
@@ -4241,7 +4246,9 @@ class S3FileSystem(AbstractFileSystem):
         s3_path = S3Path.of(rpath if isinstance(rpath, S3Path) else self._strip_protocol(rpath))
         if outfile is None and isfilelike(lpath):
             outfile = lpath
-        elif outfile is None and self._is_directory_source(rpath, kwargs.get("version_id")):
+        elif outfile is None and self._is_directory_source(
+            rpath, kwargs.get("version_id") or kwargs.get("VersionId")
+        ):
             os.makedirs(lpath, exist_ok=True)
             return
 

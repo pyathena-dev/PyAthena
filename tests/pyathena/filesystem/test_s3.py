@@ -5765,6 +5765,8 @@ class TestS3FileSystem:
         [
             ("s3://bucket/key", {"version_id": "v1"}),
             ("s3://bucket/key?versionId=v1", {}),
+            # GH-1437: open() reads the version of a VersionId parameter.
+            ("s3://bucket/key", {"VersionId": "v1"}),
         ],
     )
     def test_get_file_version_id(self, tmp_path, rpath, kwargs):
