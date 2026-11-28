@@ -1896,11 +1896,14 @@ class TestS3FileSystem:
         fs.exists = mock.MagicMock(return_value=False)
         fs.core.client.meta.region_name = client_region
         fs._listing_cache.put_buckets(["stale-bucket-listing"])
+        fs.invalidate_cache = mock.MagicMock(wraps=fs.invalidate_cache)
 
         fs.mkdir("s3://new-bucket", **kwargs)
         fs.core.call.assert_called_once_with(fs.core.client.create_bucket, **expected)
         # The cached bucket listing must be evicted.
         assert fs._listing_cache.get_buckets() is None
+        # An override of invalidate_cache() sees the new bucket.
+        fs.invalidate_cache.assert_called_once_with("new-bucket")
 
     def test_mkdir_rejects_invalid_acl(self):
         fs = self._make_fs()
@@ -1937,11 +1940,66 @@ class TestS3FileSystem:
         fs = self._make_fs()
         fs.allow_bucket_deletion = True
         fs._listing_cache.put_buckets(["stale-bucket-listing"])
+        fs.invalidate_cache = mock.MagicMock(wraps=fs.invalidate_cache)
 
         fs.rmdir("s3://bucket")
         fs.core.call.assert_called_once_with(fs.core.client.delete_bucket, Bucket="bucket")
         # The cached bucket listing must be evicted.
         assert fs._listing_cache.get_buckets() is None
+        # An override of invalidate_cache() sees the deleted bucket.
+        fs.invalidate_cache.assert_called_once_with("bucket")
+
+    @pytest.mark.parametrize(
+        ("method", "error", "evicted"),
+        [
+            ("mkdir", None, True),
+            ("rmdir", None, True),
+            # NoSuchBucket: the bucket does not exist either.
+            ("rmdir", FileNotFoundError, True),
+            # BucketNotEmpty: the bucket and its objects still exist.
+            ("rmdir", OSError, False),
+        ],
+        ids=["mkdir", "rmdir", "rmdir-no-such-bucket", "rmdir-bucket-not-empty"],
+    )
+    def test_bucket_change_evicts_entries_below_bucket(self, method, error, evicted):
+        # GH-1460: a bucket that has been created, deleted or found missing
+        # holds none of the objects cached below it, which another client
+        # may have deleted.
+        fs = self._make_fs()
+        fs.allow_bucket_creation = True
+        fs.allow_bucket_deletion = True
+        fs.exists = mock.MagicMock(return_value=False)
+        fs.core.client.meta.region_name = "us-east-1"
+        fs.core.call.side_effect = error
+        key = S3Path("bucket", "dir/key")
+        version = S3Path("bucket", "dir/key", "v1")
+        bucket_entries = [
+            ("buckets",),
+            ("lookup", S3Path("bucket")),
+            ("listing", "bucket", "/"),
+            ("listing", "bucket", ""),
+            ("lookup", key),
+            ("lookups", key),
+            ("lookup", version),
+            ("lookups", version),
+            ("listing", "bucket/dir", "/"),
+            ("listing", "bucket/dir", ""),
+        ]
+        # The entries of a bucket whose name starts with that of the bucket.
+        other_entries = [
+            ("lookup", S3Path("bucket-other", "dir/key")),
+            ("listing", "bucket-other/dir", "/"),
+        ]
+        self._cache(fs, *bucket_entries, *other_entries)
+
+        if error is None:
+            getattr(fs, method)("s3://bucket")
+        else:
+            with pytest.raises(error):
+                getattr(fs, method)("s3://bucket")
+        assert self._cached(fs, bucket_entries + other_entries) == (
+            other_entries if evicted else bucket_entries + other_entries
+        )
 
     def test_rmdir_bucket_deletion_disabled(self):
         # Bucket deletion is disabled by default.

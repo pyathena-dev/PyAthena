@@ -138,6 +138,23 @@ class S3ListingCache:
         return path.name
 
     @staticmethod
+    def _key_name(key: Any) -> str | None:
+        """Return the name of the path that a key caches an entry of.
+
+        Args:
+            key: The key of a ``dircache`` entry: a name, or a tuple whose
+                first element is a name or another such tuple, as the keys
+                of listings, versions and lookups with parameters are.
+
+        Returns:
+            The name, which is ``""`` for the bucket listing, or None for a
+            key that the cache does not make.
+        """
+        while isinstance(key, tuple) and key:
+            key = key[0]
+        return key if isinstance(key, str) else None
+
+    @staticmethod
     def _lookup_id(lookup_kwargs: Mapping[str, Any]) -> tuple[tuple[str, Any], ...]:
         """Identify a set of lookup parameters in the cache.
 
@@ -296,6 +313,24 @@ class S3ListingCache:
     def evict_buckets(self) -> None:
         """Remove the cached bucket listing."""
         self._evict("")
+
+    def evict_bucket(self, bucket: str) -> None:
+        """Remove the cached bucket listing and every cached entry of a bucket.
+
+        After a bucket is created or deleted, or found missing, no cached
+        entry of the bucket or below it describes it: the lookups, with and
+        without lookup parameters and versions, and the listings. The keys of
+        the ``dircache`` are scanned once.
+
+        Args:
+            bucket: The name of the bucket.
+        """
+        self.evict_buckets()
+        prefix = bucket + "/"
+        for key in list(self.dircache):
+            name = self._key_name(key)
+            if name is not None and (name == bucket or name.startswith(prefix)):
+                self._evict(key)
 
     def get_listing(self, name: str, delimiter: str) -> list[S3Object] | None:
         """Get the cached listing of a directory.
