@@ -3260,7 +3260,15 @@ class TestAioS3FileSystem:
         cache = sync_fs._listing_cache
         cache.put_listing("bucket/dir", "/", [file, sync_fs._directory_object("bucket", "dir/sub")])
         cache.put_listing("bucket/dir", "", [file])
-        cache.put_listing("bucket/dir/sub", "/", [])
+        cache.put_listing(
+            "bucket/dir/sub",
+            "/",
+            [
+                S3Object(
+                    init={}, type=S3ObjectType.S3_OBJECT_TYPE_FILE, bucket="bucket", key="dir/sub/b"
+                )
+            ],
+        )
         expected = copy.deepcopy(file)
 
         async def entries():
@@ -3643,7 +3651,7 @@ class TestAioS3FileSystem:
         fs.dircache = dircache
 
         await fs._info("s3://bucket/key")
-        assert len(dircache) == 1
+        assert dircache
 
     def test_internal_file_system_not_cached(self):
         # GH-978: the internal S3FileSystem was kept in the fsspec instance

@@ -410,7 +410,7 @@ class AioS3FileSystem(AsyncFileSystem):
     @property
     def dircache(self) -> DirCache:
         """The ``dircache`` of the wrapped ``S3FileSystem``, which both filesystems use."""
-        return cast("DirCache", self._sync_fs.dircache)
+        return self._sync_fs.dircache
 
     @dircache.setter
     def dircache(self, value: DirCache) -> None:

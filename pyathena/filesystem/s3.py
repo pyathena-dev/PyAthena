@@ -21,7 +21,7 @@ from datetime import datetime
 from glob import has_magic
 from io import BufferedRandom, BufferedReader, BufferedWriter, BytesIO, FileIO
 from stat import S_ISREG
-from typing import Any, BinaryIO, ClassVar, Protocol, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, ClassVar, Protocol, cast
 from urllib.parse import unquote_plus
 
 import fsspec
@@ -33,7 +33,6 @@ from fsspec.callbacks import _DEFAULT_CALLBACK, Callback
 from fsspec.compression import compr
 from fsspec.config import apply_config
 from fsspec.core import get_compression
-from fsspec.dircache import DirCache
 from fsspec.implementations.local import LocalFileSystem, make_path_posix, trailing_sep
 from fsspec.spec import AbstractBufferedFile
 from fsspec.utils import check_contained, isfilelike, other_paths, stringify_path, tokenize
@@ -69,6 +68,9 @@ from pyathena.filesystem.s3_retry import (
 )
 from pyathena.filesystem.s3_writer import _S3WriteSession
 from pyathena.filesystem.util import override, user_agent_extra
+
+if TYPE_CHECKING:
+    from fsspec.dircache import DirCache
 
 _logger = logging.getLogger(__name__)
 
@@ -652,7 +654,7 @@ class S3FileSystem(AbstractFileSystem):
         Args:
             value: The new ``DirCache``.
         """
-        listing_cache = self.__dict__.get("_listing_cache")
+        listing_cache = getattr(self, "_listing_cache", None)
         if listing_cache is None:
             # fsspec's __init__ assigns the first one.
             self._listing_cache = S3ListingCache(value)
@@ -984,10 +986,7 @@ class S3FileSystem(AbstractFileSystem):
             self._listing_cache.evict_listing(name, delimiter)
             raise
         if use_cache:
-            if files:
-                self._listing_cache.put_listing(name, delimiter, files)
-            else:
-                self._listing_cache.evict_listing(name, delimiter)
+            self._listing_cache.put_listing(name, delimiter, files)
         return files
 
     def ls(
@@ -2615,10 +2614,7 @@ class S3FileSystem(AbstractFileSystem):
                 region_name=kwargs.pop("region_name", None),
                 **self.core.operation_params("create_bucket", kwargs),
             )
-            # invalidate_cache of the bucket keeps the cached bucket
-            # listing, so evict it directly.
-            self._listing_cache.evict_buckets()
-            self.invalidate_cache(s3_path.bucket)
+            self._listing_cache.invalidate_bucket(s3_path.bucket)
         else:
             # exists() has already confirmed the bucket does not exist,
             # and it is not requested to be created.
@@ -2683,10 +2679,7 @@ class S3FileSystem(AbstractFileSystem):
             )
 
         self.core.delete_bucket(s3_path.bucket)
-        self.invalidate_cache(s3_path.bucket)
-        # invalidate_cache of the bucket keeps the cached bucket listing,
-        # so evict it directly.
-        self._listing_cache.evict_buckets()
+        self._listing_cache.invalidate_bucket(s3_path.bucket)
 
     def touch(
         self, path: str | os.PathLike[str], truncate: bool = True, **kwargs

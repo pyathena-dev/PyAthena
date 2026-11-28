@@ -43,7 +43,7 @@ class S3ListingCache:
 
     - the bucket listing (ListBuckets) under ``""``;
     - a listing (ListObjectsV2) under ``(name, delimiter)``, with the name of
-      the directory, as :meth:`_listing_name` names it;
+      the directory, as :meth:`_parent_listing_key` names it;
     - the lookup (HeadObject or HeadBucket) of a path without a version under
       its name, and that of an explicit version under
       ``(name, "versionId", version_id)``;
@@ -71,26 +71,14 @@ class S3ListingCache:
         self.dircache = dircache
 
     @staticmethod
-    def _listing_name(path: S3Path) -> str:
-        """Return the name of the directory whose listing holds the key of a path.
-
-        The name of the key is cut at its last slash, without parsing it, so
-        that the directory is named as its listing names it: ``bucket/a`` for
-        the key ``a/x``, ``bucket/a/`` for ``a//x``, and
-        ``bucket/a/dir?versionId=v1`` for ``a/dir?versionId=v1/x``.
-
-        Args:
-            path: The path of an object.
-
-        Returns:
-            The name of the directory, or the bucket for a key without a
-            slash.
-        """
-        return path.name.rpartition("/")[0]
-
-    @classmethod
-    def _parent_listing_key(cls, path: S3Path) -> str | tuple[str, str]:
+    def _parent_listing_key(path: S3Path) -> str | tuple[str, str]:
         """Return the key of the listing that holds a path.
+
+        The directory of a key is named by cutting the name of the key at its
+        last slash, without parsing it, so that it is named as its listing
+        names it: ``bucket/a`` for the key ``a/x``, ``bucket/a/`` for
+        ``a//x``, and ``bucket/a/dir?versionId=v1`` for
+        ``a/dir?versionId=v1/x``.
 
         Args:
             path: The path of the bucket or the object.
@@ -99,7 +87,7 @@ class S3ListingCache:
             The key of the bucket listing for a bucket, and otherwise that of
             the listing of the directory that holds the key.
         """
-        return (cls._listing_name(path), "/") if path.key else ""
+        return (path.name.rpartition("/")[0], "/") if path.key else ""
 
     @staticmethod
     def _lookup_key(path: S3Path) -> str | tuple[str, str, str]:
@@ -225,7 +213,8 @@ class S3ListingCache:
             return
         key = self._parent_listing_key(path)
         files = self.dircache.get(key)
-        if files and any(f.name == path.name for f in files):
+        name = path.name
+        if files and any(f.name == name for f in files):
             self._evict(key)
 
     def evict_parent_listing(self, path: S3Path) -> None:
@@ -274,6 +263,9 @@ class S3ListingCache:
     def put_listing(self, name: str, delimiter: str, files: list[S3Object]) -> None:
         """Cache the listing of a directory.
 
+        An empty listing is not cached, and removes the cached one, so that a
+        cached listing shows that the directory exists.
+
         Args:
             name: The name of the bucket or the directory, as a listing names
                 it.
@@ -281,7 +273,10 @@ class S3ListingCache:
                 one.
             files: The complete listing of the directory.
         """
-        self.dircache[(name, delimiter)] = files
+        if files:
+            self.dircache[(name, delimiter)] = files
+        else:
+            self.evict_listing(name, delimiter)
 
     def evict_listing(self, name: str, delimiter: str) -> None:
         """Remove the cached listing of a directory.
@@ -319,7 +314,8 @@ class S3ListingCache:
             return None
         parent_cache = self.dircache.get(self._parent_listing_key(path))
         if parent_cache is not None:
-            files = [f for f in parent_cache if f["name"] == path.name]
+            name = path.name
+            files = [f for f in parent_cache if f["name"] == name]
             if files:
                 return files
             if path.key:
@@ -370,6 +366,15 @@ class S3ListingCache:
             for query in _VERSION_QUERIES:
                 self._invalidate_name(f"{base}?{query}={version_id}")
             self._invalidate_name(base)
+
+    def invalidate_bucket(self, bucket: str) -> None:
+        """Remove the cached entries of a created or deleted bucket and the bucket listing.
+
+        Args:
+            bucket: The bucket name.
+        """
+        self.evict_buckets()
+        self._invalidate_name(bucket)
 
     def invalidate(self, path: S3Path) -> None:
         """Remove the cached entries of a written path and of the directories above it.

@@ -165,13 +165,16 @@ class TestS3FileSystem:
         # Cache an entry for each description: ("buckets",), ("listing",
         # name, delimiter), or ("lookup", path) and ("lookups", path), the
         # lookup of an S3Path without and with lookup parameters. The value
-        # defaults to an empty listing or a directory entry of the path.
+        # defaults to a listing of one directory, an empty bucket listing, or
+        # a directory entry of the path.
         cache = fs._listing_cache
         for kind, *args in entries:
             if kind == "buckets":
                 cache.put_buckets([] if value is None else value)
             elif kind == "listing":
-                cache.put_listing(*args, [] if value is None else value)
+                cache.put_listing(
+                    *args, [fs._directory_object("bucket", "dir")] if value is None else value
+                )
             else:
                 (path,) = args
                 cache.put_lookup(
@@ -199,7 +202,7 @@ class TestS3FileSystem:
 
     def test_unused_filesystem_is_freed_without_the_cycle_collector(self):
         # GH-1384: the result sets release their filesystem, and its
-        # dircache, with them. The listing cache does not refer to it.
+        # dircache, with them. The listing cache must not refer back to it.
         fs = S3FileSystem(
             key="dummy", secret="dummy", region_name="us-east-1", skip_instance_cache=True
         )
@@ -216,8 +219,9 @@ class TestS3FileSystem:
     def test_collected_filesystem_cache_in_finalizers(self):
         # GH-1384: a finalizer that the cyclic garbage collector runs, as that
         # of an unclosed file, invalidates the cache of a filesystem collected
-        # with it. CPython clears the weak references to the collected objects
-        # before it runs their finalizers.
+        # with it. CPython up to 3.14 clears the weak references to the
+        # collected objects before it runs their finalizers, so the cache
+        # must not reach its filesystem through one.
         invalidated = []
 
         class Finalized:
@@ -227,7 +231,7 @@ class TestS3FileSystem:
 
             def __del__(self):
                 self.fs.invalidate_cache("s3://bucket/key")
-                invalidated.append(self.fs.dircache)
+                invalidated.append(True)
 
         enabled = gc.isenabled()
         gc.disable()
@@ -966,7 +970,12 @@ class TestS3FileSystem:
         assert actual == ["bucket/key?versionId=v2"]
         assert [c.args[0] for c in fs._call.call_args_list] == [fs._client.head_object]
         # Nothing is cached as a listing of the version-qualified path.
-        assert len(fs.dircache) == 1
+        listings = [
+            ("listing", name, delimiter)
+            for name in ("bucket/key?versionId=v2", "bucket/key")
+            for delimiter in ("/", "")
+        ]
+        assert self._cached(fs, listings) == []
         assert fs._listing_cache.get_lookup(S3Path("bucket", "key", "v2"), {}) is not None
 
     def test_listing_of_missing_version_path(self):
@@ -1802,9 +1811,10 @@ class TestS3FileSystem:
 
     def test_refresh_evicts_cached_object_and_bucket_not_found(self):
         fs = self._make_fs()
+        bucket = fs._directory_object("bucket", None)
         fs._listing_cache.put_lookup(S3Path("bucket", "key"), {}, self._file_object("key"))
-        self._cache(fs, ("lookup", S3Path("bucket")))
-        fs._listing_cache.put_buckets([fs._directory_object("bucket", None)])
+        fs._listing_cache.put_lookup(S3Path("bucket"), {}, bucket)
+        fs._listing_cache.put_buckets([bucket])
 
         def call(method, **kwargs):
             if method in (fs._client.head_object, fs._client.head_bucket):
@@ -1825,9 +1835,10 @@ class TestS3FileSystem:
 
     def test_exists_refresh_bypasses_cache(self):
         fs = self._make_fs()
+        bucket = fs._directory_object("bucket", None)
         fs._listing_cache.put_lookup(S3Path("bucket", "key"), {}, self._file_object("key"))
-        self._cache(fs, ("lookup", S3Path("bucket")))
-        fs._listing_cache.put_buckets([fs._directory_object("bucket", None)])
+        fs._listing_cache.put_lookup(S3Path("bucket"), {}, bucket)
+        fs._listing_cache.put_buckets([bucket])
 
         def call(method, **kwargs):
             if method in (fs._client.head_object, fs._client.head_bucket):
