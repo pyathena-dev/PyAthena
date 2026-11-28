@@ -2443,7 +2443,13 @@ class AioS3FileSystem(AsyncFileSystem):
             **kwargs: Additional parameters passed to the PutObject API.
 
         Returns:
-            The PutObject response as a dictionary.
+            The PutObject response as botocore returns it, including
+            ``ResponseMetadata``, as s3fs returns it.
+
+        Raises:
+            TypeError: If kwargs has ``Body``, ``Bucket`` or ``Key``.
+            ValueError: If the path has a version ID, is a bucket, or exists
+                while ``truncate`` is False.
         """
         return self._sync_fs.touch(path, truncate=truncate, **kwargs)
 

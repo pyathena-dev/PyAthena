@@ -180,7 +180,9 @@ class S3MultipartWriter:
         them. An ``UploadPart`` request takes neither the checksum values,
         ``ContentMD5`` nor ``ContentLength`` of the whole object. The
         completion takes the checksum values only when its checksum type is
-        ``FULL_OBJECT``, for which S3 checks them.
+        ``FULL_OBJECT``, for which S3 checks them: the type of the upload, or
+        else the inherited ``ChecksumType``, not one given to the completion
+        itself.
 
         Args:
             method: The name of the client method, such as ``upload_part``.

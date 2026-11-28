@@ -233,6 +233,33 @@ class TestS3MultipartWriter:
             writer.complete([writer.upload_part(1, b"abcd")])
             stubber.assert_no_pending_responses()
 
+    @pytest.mark.parametrize(
+        ("upload_type", "inherited_type", "sent"),
+        [("FULL_OBJECT", None, True), ("COMPOSITE", "FULL_OBJECT", False)],
+    )
+    def test_writer_completion_checksum_type(self, upload_type, inherited_type, sent):
+        # GH-1383: the checksum type of the upload, not the inherited one,
+        # decides whether the completion takes the whole-object value.
+        params = {"ChecksumCRC32": "whole"}
+        if inherited_type:
+            params["ChecksumType"] = inherited_type
+        writer, stubber = _make_writer(request_kwargs=params)
+        identity = {"Bucket": "bucket", "Key": "key", "UploadId": "uploadid"}
+        writer.upload = S3MultipartUpload({**identity, "ChecksumType": upload_type})
+        stubber.add_response(
+            "complete_multipart_upload",
+            {"ETag": '"done"'},
+            {
+                **identity,
+                "ChecksumType": upload_type,
+                **({"ChecksumCRC32": "whole"} if sent else {}),
+                "MultipartUpload": {"Parts": [{"PartNumber": 1, "ETag": '"one"'}]},
+            },
+        )
+        with stubber:
+            writer.complete([S3MultipartUploadPart(1, {"ETag": '"one"'})])
+            stubber.assert_no_pending_responses()
+
     def test_writer_copy_range_parameter(self):
         # GH-1383: an inherited CopySourceRange yields to the range of a copy,
         # and is sent by a copy without a range of its own.
