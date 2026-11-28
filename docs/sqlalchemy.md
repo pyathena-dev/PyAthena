@@ -1233,7 +1233,7 @@ statement = select(func.filter(orders.c.item_ids, bindparam("predicate", type_=S
 result = conn.execute(statement, {"predicate": "x -> x > 1"})
 ```
 
-A statement with such a lambda, including a plain string, can't run with a list of parameter sets (`executemany()`); use `literal_column()` or `text()` for the lambda there.
+A statement with such a lambda, including a plain string, can't run with more than one parameter set (`executemany()`); use `literal_column()` or `text()` for the lambda there.
 
 `str()` of the compiled statement shows a bind parameter lambda as `__[POSTCOMPILE_<name>]`.
 Compile with the Athena dialect and `compile_kwargs={"render_postcompile": True}`, such as `statement.compile(conn, compile_kwargs={"render_postcompile": True})`, to get the lambda text in the SQL; give a lambda that is only an execution parameter its value first, as in `statement.params(predicate="x -> x > 1")`.

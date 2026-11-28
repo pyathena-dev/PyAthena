@@ -269,9 +269,10 @@ class TestAthenaStatementCompiler:
             "SELECT filter(numbers, x -> x % 2 = 1) AS filter_1",
         ]
 
-    def test_visit_filter_func_execution_parameter(self):
+    @pytest.mark.parametrize("type_", [String, None], ids=["string", "untyped"])
+    def test_visit_filter_func_execution_parameter(self, type_):
         statement = select(
-            func.filter(column("numbers", ARRAY(Integer)), bindparam("lambda_", type_=String))
+            func.filter(column("numbers", ARRAY(Integer)), bindparam("lambda_", type_=type_))
         )
         assert executed_sql(statement, {"lambda_": "x -> x > 1"}) == (
             "SELECT filter(numbers, x -> x > 1) AS filter_1"
