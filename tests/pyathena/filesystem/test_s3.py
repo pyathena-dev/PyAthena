@@ -3646,9 +3646,11 @@ class TestS3FileSystem:
         fs.get_file = mock.MagicMock()
 
         fs.get(pattern, f"{tmp_path}/out/", **kwargs)
-        assert [
-            (str(c.args[0]), c.kwargs.get("version_id")) for c in fs.get_file.call_args_list
-        ] == sources
+        # The downloads run in parallel, in any order.
+        assert (
+            sorted((str(c.args[0]), c.kwargs.get("version_id")) for c in fs.get_file.call_args_list)
+            == sources
+        )
 
     def test_get_root_is_left_out(self, tmp_path):
         # The root path is a directory, which get() leaves out without a
