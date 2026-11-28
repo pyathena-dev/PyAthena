@@ -5808,6 +5808,16 @@ class TestS3FileSystem:
             VersionId=expected,
         )
 
+    def test_cat_file_version_parameter_of_another_version(self):
+        # GH-1383: the version of the path is a field that the path sets, so
+        # a VersionId parameter for another version raises TypeError instead
+        # of reading either version.
+        fs = self._make_fs()
+
+        with pytest.raises(TypeError, match="VersionId"):
+            fs.cat_file("s3://bucket/key?versionId=v2", VersionId="v1")
+        fs.core.call.assert_not_called()
+
     def test_cat_file_range_version_ending_in_slash(self):
         # GH-1425: a version of the path that ends in a slash sizes a
         # negative offset, as it is read. The name of the path, which drops

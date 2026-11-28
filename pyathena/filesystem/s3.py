@@ -3930,6 +3930,10 @@ class S3FileSystem(AbstractFileSystem):
         # offset: that of the path, then version_id, then the VersionId
         # parameter, which is sent as given.
         version_id = path.version_id or version_id or kwargs.get("VersionId") or None
+        if version_id and kwargs.get("VersionId") == version_id:
+            # The parameter named the version that the path now has; another
+            # one is a field that the path sets, which raises TypeError.
+            del kwargs["VersionId"]
         ranges: tuple[int, int | None] | None = None
         if start is not None and start < 0 and end is None:
             # S3 returns the last bytes, or the whole object when it is
